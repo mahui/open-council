@@ -1,0 +1,46 @@
+{
+  "name": "@anthropic-ai/council",
+  "version": "0.1.0",
+  "description": "Local AI Council — 多模型辩论编排系统",
+  "type": "module",
+  "bin": {
+    "council": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "tsc --noEmit",
+    "start": "node dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "ai",
+    "council",
+    "debate",
+    "multi-model",
+    "cli"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@google/genai": "^0.14.0",
+    "@inquirer/prompts": "^7.0.0",
+    "better-sqlite3": "^12.8.0",
+    "commander": "^12.0.0",
+    "openai": "^5.0.0",
+    "yaml": "^2.0.0",
+    "zod": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^2.0.0"
+  }
+}
