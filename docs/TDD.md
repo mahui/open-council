@@ -1,0 +1,2088 @@
+# Local AI Council — 技术设计文档 (TDD)
+
+**Technical Design Document v1.0**
+
+| 项目 | 内容 |
+|------|------|
+| 文档状态 | Draft |
+| 版本 | 1.0 |
+| 日期 | 2026-03-25 |
+| 对应 PRD | docs/PRD.md v6.3 |
+| 主语言 | TypeScript (Node.js ≥ 20) |
+| 包管理 | pnpm |
+| 分发方式 | npm 全局包 (`npm install -g @anthropic-ai/council`) |
+
+---
+
+## 1. 技术选型总览
+
+### 1.1 语言与运行时
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| 语言 | **TypeScript 5.x** | 三大 Provider SDK 均以 TS 为一等公民；pi-mono 参考实现为 TS；类型安全减少运行时错误 |
+| 运行时 | **Node.js ≥ 20** | 原生 `fetch`、`crypto.subtle`（PKCE）、`node:test`；LTS 稳定 |
+| 包管理 | **pnpm** | workspace 支持好、磁盘占用小、lockfile 确定性强 |
+| 编译 | **tsup** (esbuild) | 编译为单个 CJS bundle，启动速度比 tsc 快 10x+ |
+
+### 1.2 核心依赖
+
+| 模块 | 库 | 版本策略 | 选型理由 |
+|------|-----|---------|---------|
+| **Provider SDK** | `@anthropic-ai/sdk` | latest | Anthropic 官方，原生 streaming |
+| | `openai` | ≥ 5.x | OpenAI 官方，Responses API 支持 |
+| | `@google/genai` | latest | Google 官方 GenAI SDK |
+| **CLI 框架** | `commander` | ^12 | 命令解析、子命令、选项管理；最成熟的 Node CLI 框架 |
+| **交互式 Prompt** | `@inquirer/prompts` | ^7 | Setup Wizard 的多选、确认、列表选择；模块化按需导入 |
+| **TUI 仪表盘** | `ink` + `ink-spinner` | ^5 | React 范式渲染终端 UI；组件化、声明式更新、天然支持实时刷新 |
+| **SQLite** | `better-sqlite3` | ^11 | **同步 API**（事务原子性保证）；WAL 模式；FTS5 支持；原生 C binding 性能优异 |
+| **YAML** | `yaml` (eemeli/yaml) | ^2 | 完整 YAML 1.2；保留注释（用户手编配置不丢注释） |
+| **Schema 校验** | `zod` | ^3 | 配置文件校验、API 响应校验；TS 类型推导一体化 |
+| **JWT 解析** | `jose` | ^5 | 解码 Codex 的 `access_token` JWT 提取 `chatgpt_account_id`；零依赖 |
+| **日志** | `pino` | ^9 | 结构化 JSON 日志；低开销；支持 `pino-pretty` 开发模式 |
+| **测试** | `vitest` | ^2 | 与 TypeScript 零配置集成；watch mode 快；内置 mock/spy |
+
+### 1.3 不引入的依赖（及理由）
+
+| 库 | 不选理由 |
+|----|---------|
+| `axios` | Node 20 原生 `fetch` 已足够；Provider SDK 内部已封装 HTTP |
+| `knex` / `drizzle` | SQLite 查询简单（< 10 种 query），直接用 `better-sqlite3` 的 prepared statement，无需 ORM 抽象 |
+| `blessed` / `neo-blessed` | 过时，API 复杂；`ink` 的 React 范式更易维护 |
+| `chalk` | `ink` 内置颜色支持；CLI 输出少量颜色用 ANSI 常量即可 |
+| `ora` | spinner 逻辑简单，自行实现 < 20 行，避免多余依赖 |
+
+### 1.4 分发策略
+
+```bash
+# 主分发渠道：npm 全局安装
+npm install -g @anthropic-ai/council
+
+# 零安装试用
+npx council "Redis vs Memcached 怎么选?"
+
+# 开发者本地
+pnpm install && pnpm build
+node dist/cli.js "question"
+```
+
+**打包产物**：`tsup` 将所有 TS 源码编译为单个 `dist/cli.js`（CJS bundle），Provider SDK 和 `better-sqlite3` 等原生模块作为 external 依赖。`package.json` 的 `bin` 字段指向 `dist/cli.js`。
+
+**原生模块处理**：`better-sqlite3` 包含 C++ addon，通过 npm 安装时自动编译。对于不想编译的用户，提供 prebuilt binaries（`prebuild-install`）。
+
+---
+
+## 2. 项目结构
+
+```
+council/
+├── package.json
+├── pnpm-lock.yaml
+├── tsconfig.json
+├── tsup.config.ts                  # 构建配置
+├── vitest.config.ts                # 测试配置
+│
+├── src/
+│   ├── cli.ts                      # 入口：#!/usr/bin/env node + commander 注册
+│   │
+│   ├── commands/                   # CLI 命令实现（每个文件对应一个子命令）
+│   │   ├── council.ts                # 主命令 council "question"
+│   │   ├── setup.ts                  # council setup
+│   │   ├── models.ts                 # council models / models add / models check
+│   │   ├── benchmark.ts              # council benchmark
+│   │   ├── history.ts                # council history / show / recall / thread
+│   │   ├── stats.ts                  # council stats
+│   │   ├── rate.ts                   # council rate
+│   │   ├── replay.ts                 # council replay
+│   │   └── export.ts                 # council export
+│   │
+│   ├── core/                       # 核心编排引擎（纯逻辑，不依赖 CLI/UI）
+│   │   ├── orchestrator.ts           # 辩论流程编排状态机
+│   │   ├── router.ts                 # 路由引擎：模式判定 + Agent 席位分配
+│   │   ├── consensus.ts              # 共识度计算（Kendall's W + model_diversity_factor）
+│   │   ├── anonymizer.ts             # Review 阶段三层匿名化
+│   │   ├── compression.ts            # Pre-Synthesis Compression
+│   │   ├── prompt-builder.ts         # 各阶段 prompt 模板构建
+│   │   └── score-parser.ts           # Review JSON 评分解析 + fallback
+│   │
+│   ├── providers/                  # 双模调用适配层
+│   │   ├── adapter.ts                # 统一接口 invoke(config, prompt) → InvocationResult
+│   │   ├── cli-adapter.ts            # CLI 模式：child_process.spawn + stdin/stdout pipe
+│   │   ├── api-adapter.ts            # API 模式：Provider SDK 直调
+│   │   ├── credentials/              # 凭证发现与 Token 刷新
+│   │   │   ├── discovery.ts            # 扫描本地凭证路径
+│   │   │   ├── anthropic.ts            # Anthropic OAuth token refresh
+│   │   │   ├── openai.ts              # OpenAI OAuth token refresh (读 ~/.codex/auth.json)
+│   │   │   ├── google.ts              # Google OAuth token refresh (读 ~/.gemini/oauth_creds.json)
+│   │   │   └── types.ts               # ProviderCredential 类型定义
+│   │   └── health.ts                 # 健康检查 (CLI L1-L3 + API L1-L3) + 熔断器
+│   │
+│   ├── storage/                    # 持久化层
+│   │   ├── database.ts               # SQLite 初始化、迁移、表定义
+│   │   ├── session-store.ts          # Session JSON 读写（文件系统）
+│   │   ├── checkpoint.ts             # Checkpoint 写入 / 恢复 / 清理
+│   │   ├── concurrency.ts            # resource_slots 原子调度
+│   │   └── migration.ts              # schema_version 迁移逻辑
+│   │
+│   ├── config/                     # 配置管理
+│   │   ├── loader.ts                 # YAML 加载 + 合并 + 校验
+│   │   ├── schema.ts                 # zod schema（council.yaml + model YAML）
+│   │   ├── presets.ts                # 内置预设库（CLI + API 双模）
+│   │   └── paths.ts                  # 路径常量（~/.council/config、~/.codex/auth.json 等）
+│   │
+│   ├── ui/                         # 用户界面层
+│   │   ├── tui/                      # ink 组件（Phase 5 TUI 仪表盘）
+│   │   │   ├── App.tsx                 # TUI 根组件
+│   │   │   ├── Dashboard.tsx           # 辩论进度仪表盘
+│   │   │   ├── AgentStatus.tsx         # 单个 Agent 状态行
+│   │   │   ├── ConsensusBar.tsx        # 共识度进度条
+│   │   │   ├── ConflictSummary.tsx     # Human Gate 冲突摘要视图
+│   │   │   └── ReplayView.tsx          # 辩论回放视图
+│   │   ├── plain-renderer.ts        # 纯文本进度输出（非 TTY / pipe 场景）
+│   │   ├── follow-up.ts             # 追问模式交互 prompt
+│   │   └── wizard/                   # Setup Wizard 交互界面
+│   │       ├── first-run.ts            # 首次运行引导
+│   │       ├── model-add.ts            # 添加模型向导
+│   │       └── setup-modules.ts        # 完整配置向导各模块
+│   │
+│   └── types/                      # 共享类型定义
+│       ├── session.ts                # Session, Stage, Invocation, Agent
+│       ├── config.ts                 # ModelConfig, CouncilConfig, RouteRule
+│       ├── provider.ts               # Provider, Credential, InvocationResult
+│       └── benchmark.ts              # BenchmarkQuestion, BenchmarkReport
+│
+├── defaults/                       # 内置默认资源（编译时嵌入）
+│   ├── roles/
+│   │   ├── default.yaml              # 默认角色集 (analyst, engineer, innovator)
+│   │   ├── code-review.yaml          # 代码审查角色集
+│   │   └── architecture.yaml         # 架构设计角色集
+│   └── benchmark.yaml                # 内置基准测试问题集
+│
+└── test/
+    ├── core/                       # 编排引擎单元测试
+    │   ├── orchestrator.test.ts
+    │   ├── consensus.test.ts
+    │   ├── anonymizer.test.ts
+    │   └── router.test.ts
+    ├── providers/                   # 适配层测试
+    │   ├── cli-adapter.test.ts
+    │   ├── api-adapter.test.ts
+    │   └── credentials/
+    │       └── discovery.test.ts
+    ├── storage/                     # 持久化测试
+    │   ├── database.test.ts
+    │   ├── checkpoint.test.ts
+    │   └── concurrency.test.ts
+    ├── integration/                 # 集成测试（需要真实 CLI/API）
+    │   ├── debate-flow.test.ts
+    │   └── benchmark.test.ts
+    └── fixtures/                    # 测试数据
+        ├── sessions/
+        ├── configs/
+        └── credentials/              # mock 凭证文件
+```
+
+**关键设计决策**：
+
+- `core/` 是**纯逻辑层**，不依赖 I/O、CLI、UI。它接收抽象的 `InvocationAdapter` 接口，可独立单元测试。
+- `providers/` 是唯一与外部系统交互的层（subprocess、HTTP API、文件系统凭证读取）。
+- `commands/` 薄层，只负责解析 CLI 参数 → 调用 `core/` → 通过 `ui/` 渲染结果。
+- `ui/` 分为 `tui/`（ink 组件，Phase 5）和 `plain-renderer.ts`（Phase 0-4 的纯文本输出），通过 `process.stdout.isTTY` 自动切换。
+
+---
+
+## 3. 核心抽象与接口设计
+
+### 3.1 Provider 调用适配层
+
+这是系统的关键抽象——编排层不关心调用是通过 subprocess 还是 HTTP API 完成的。
+
+```typescript
+// src/providers/adapter.ts
+
+export interface InvocationResult {
+  response: string;                    // 模型回复的完整文本
+  elapsed_ms: number;                  // 调用耗时
+  invocation_mode: 'cli' | 'api';     // 实际使用的调用模式
+  exit_code?: number;                  // CLI 模式：进程退出码
+  http_status?: number;                // API 模式：HTTP 状态码
+  stderr?: string;                     // CLI 模式：标准错误
+  token_usage?: {                      // API 模式：token 用量
+    input_tokens: number;
+    output_tokens: number;
+  };
+  timed_out: boolean;
+}
+
+export interface InvocationAdapter {
+  /**
+   * 调用模型，返回完整响应。
+   * 编排层通过此接口与所有模型交互，无需关心 CLI/API 差异。
+   */
+  invoke(config: ModelConfig, prompt: string): Promise<InvocationResult>;
+
+  /**
+   * 流式调用模型，通过 AsyncGenerator 逐 chunk 返回。
+   * 用于 TUI 实时渲染。CLI 模式逐行读取 stdout，API 模式解析 SSE。
+   */
+  stream(config: ModelConfig, prompt: string): AsyncGenerator<string, InvocationResult>;
+
+  /**
+   * 健康检查。CLI 模式检查 binary 存在 + version；API 模式检查凭证有效性。
+   */
+  healthCheck(config: ModelConfig): Promise<HealthStatus>;
+}
+
+export type HealthStatus = {
+  level: 'healthy' | 'unhealthy' | 'degraded' | 'unavailable';
+  message: string;
+  checked_at: string;  // ISO 8601
+};
+```
+
+**适配器选择逻辑**（`invocation: auto` 时的分派）：
+
+```typescript
+// src/providers/adapter.ts
+
+export class AutoAdapter implements InvocationAdapter {
+  constructor(
+    private apiAdapter: ApiAdapter,
+    private cliAdapter: CliAdapter,
+  ) {}
+
+  async invoke(config: ModelConfig, prompt: string): Promise<InvocationResult> {
+    // 1. 如果有有效 API 凭证，优先 API 模式
+    if (config.invocation === 'api' || config.invocation === 'auto') {
+      const apiHealth = await this.apiAdapter.healthCheck(config);
+      if (apiHealth.level === 'healthy') {
+        return this.apiAdapter.invoke(config, prompt);
+      }
+    }
+
+    // 2. 回退到 CLI 模式
+    if (config.invocation === 'cli' || config.invocation === 'auto') {
+      const cliHealth = await this.cliAdapter.healthCheck(config);
+      if (cliHealth.level !== 'unavailable') {
+        return this.cliAdapter.invoke(config, prompt);
+      }
+    }
+
+    throw new ModelUnavailableError(config.name, 'No available invocation mode');
+  }
+}
+```
+
+### 3.2 CLI 适配器实现
+
+```typescript
+// src/providers/cli-adapter.ts
+
+import { spawn } from 'node:child_process';
+
+export class CliAdapter implements InvocationAdapter {
+  async invoke(config: ModelConfig, prompt: string): Promise<InvocationResult> {
+    const args = [...config.args, ...(config.model_args ?? [])];
+    const start = Date.now();
+
+    return new Promise((resolve, reject) => {
+      const child = spawn(config.binary!, args, {
+        env: { ...process.env, ...config.env },
+        timeout: config.timeout_seconds * 1000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+
+      // input_mode 处理
+      if (config.input_mode === 'stdin') {
+        child.stdin.write(prompt);
+        child.stdin.end();
+      }
+      // arg 模式: prompt 已在 args 中作为最后一个参数
+
+      child.on('close', (code) => {
+        const elapsed = Date.now() - start;
+        resolve({
+          response: this.cleanOutput(stdout),
+          elapsed_ms: elapsed,
+          invocation_mode: 'cli',
+          exit_code: code ?? 1,
+          stderr: stderr || undefined,
+          timed_out: false,
+        });
+      });
+
+      child.on('error', (err) => {
+        reject(new InvocationError(config.name, 'cli', err.message));
+      });
+    });
+  }
+
+  /** 去除 ANSI 色彩码、进度条等非内容输出 */
+  private cleanOutput(raw: string): string {
+    return raw
+      .replace(/\x1b\[[0-9;]*m/g, '')  // ANSI escape codes
+      .replace(/\r/g, '')               // carriage returns
+      .trim();
+  }
+}
+```
+
+### 3.3 API 适配器实现
+
+```typescript
+// src/providers/api-adapter.ts
+
+import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
+import { GoogleGenAI } from '@google/genai';
+
+export class ApiAdapter implements InvocationAdapter {
+  private credentialManager: CredentialManager;
+
+  async invoke(config: ModelConfig, prompt: string): Promise<InvocationResult> {
+    const credential = await this.credentialManager.getValidCredential(config.provider!);
+    const start = Date.now();
+
+    switch (config.provider) {
+      case 'anthropic':
+        return this.invokeAnthropic(config, prompt, credential, start);
+      case 'openai':
+        return this.invokeOpenAI(config, prompt, credential, start);
+      case 'google':
+        return this.invokeGoogle(config, prompt, credential, start);
+      default:
+        throw new Error(`Unsupported API provider: ${config.provider}`);
+    }
+  }
+
+  private async invokeAnthropic(
+    config: ModelConfig, prompt: string,
+    credential: ProviderCredential, start: number,
+  ): Promise<InvocationResult> {
+    const client = new Anthropic({
+      apiKey: credential.access_token,  // OAuth token 作为 API key
+      baseURL: config.api_base_url,
+    });
+
+    const response = await client.messages.create({
+      model: config.model!,
+      max_tokens: 8192,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const text = response.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('');
+
+    return {
+      response: text,
+      elapsed_ms: Date.now() - start,
+      invocation_mode: 'api',
+      http_status: 200,
+      token_usage: {
+        input_tokens: response.usage.input_tokens,
+        output_tokens: response.usage.output_tokens,
+      },
+      timed_out: false,
+    };
+  }
+
+  private async invokeOpenAI(
+    config: ModelConfig, prompt: string,
+    credential: ProviderCredential, start: number,
+  ): Promise<InvocationResult> {
+    const client = new OpenAI({
+      apiKey: credential.access_token,
+      baseURL: config.api_base_url,
+    });
+
+    const response = await client.responses.create({
+      model: config.model!,
+      input: prompt,
+    });
+
+    return {
+      response: response.output_text,
+      elapsed_ms: Date.now() - start,
+      invocation_mode: 'api',
+      http_status: 200,
+      token_usage: {
+        input_tokens: response.usage.input_tokens,
+        output_tokens: response.usage.output_tokens,
+      },
+      timed_out: false,
+    };
+  }
+
+  private async invokeGoogle(
+    config: ModelConfig, prompt: string,
+    credential: ProviderCredential, start: number,
+  ): Promise<InvocationResult> {
+    const ai = new GoogleGenAI({ apiKey: credential.access_token });
+
+    const response = await ai.models.generateContent({
+      model: config.model!,
+      contents: prompt,
+    });
+
+    return {
+      response: response.text ?? '',
+      elapsed_ms: Date.now() - start,
+      invocation_mode: 'api',
+      http_status: 200,
+      token_usage: response.usageMetadata ? {
+        input_tokens: response.usageMetadata.promptTokenCount ?? 0,
+        output_tokens: response.usageMetadata.candidatesTokenCount ?? 0,
+      } : undefined,
+      timed_out: false,
+    };
+  }
+}
+```
+
+### 3.4 凭证管理器
+
+```typescript
+// src/providers/credentials/discovery.ts
+
+import { readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+/** 已知 CLI 客户端的凭证文件路径 */
+const CREDENTIAL_PATHS: Record<string, string> = {
+  openai:    join(homedir(), '.codex', 'auth.json'),
+  google:    join(homedir(), '.gemini', 'oauth_creds.json'),
+  'google-vertex': join(homedir(), '.config', 'gcloud', 'application_default_credentials.json'),
+};
+
+/** OAuth Token 刷新端点 */
+const TOKEN_ENDPOINTS: Record<string, string> = {
+  anthropic: 'https://platform.claude.com/v1/oauth/token',
+  openai:    'https://auth.openai.com/oauth/token',
+  google:    'https://oauth2.googleapis.com/token',
+};
+
+/** OpenAI Codex OAuth Client ID（公开值，用于 token refresh） */
+const OPENAI_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+
+export class CredentialManager {
+  private cache = new Map<string, ProviderCredential>();
+
+  /** 扫描所有已知路径，返回可用凭证列表 */
+  async discoverAll(): Promise<DiscoveryReport> {
+    const results: DiscoveryReport = {};
+
+    // 1. 环境变量优先
+    for (const [provider, envVar] of Object.entries(ENV_VARS)) {
+      const key = process.env[envVar];
+      if (key) {
+        results[provider] = {
+          source: 'env',
+          status: 'valid',
+          env_var: envVar,
+        };
+        this.cache.set(provider, { access_token: key, source: 'env' });
+      }
+    }
+
+    // 2. 本地凭证文件
+    for (const [provider, path] of Object.entries(CREDENTIAL_PATHS)) {
+      if (results[provider]) continue;  // 环境变量已覆盖
+      if (!existsSync(path)) {
+        results[provider] = { source: 'file', status: 'not_found', path };
+        continue;
+      }
+
+      try {
+        const credential = this.parseCredentialFile(provider, path);
+        if (this.isExpired(credential)) {
+          const refreshed = await this.refreshToken(provider, credential);
+          if (refreshed) {
+            this.writeBackCredential(provider, path, refreshed);
+            this.cache.set(provider, refreshed);
+            results[provider] = { source: 'file', status: 'refreshed', path };
+          } else {
+            results[provider] = { source: 'file', status: 'expired', path };
+          }
+        } else {
+          this.cache.set(provider, credential);
+          results[provider] = { source: 'file', status: 'valid', path };
+        }
+      } catch {
+        results[provider] = { source: 'file', status: 'parse_error', path };
+      }
+    }
+
+    return results;
+  }
+
+  /** 获取有效凭证（自动刷新过期 token） */
+  async getValidCredential(provider: string): Promise<ProviderCredential> {
+    let cred = this.cache.get(provider);
+    if (!cred) throw new CredentialNotFoundError(provider);
+
+    if (this.isExpired(cred) && cred.refresh_token) {
+      const refreshed = await this.refreshToken(provider, cred);
+      if (!refreshed) throw new CredentialExpiredError(provider);
+      cred = refreshed;
+      this.cache.set(provider, cred);
+    }
+
+    return cred;
+  }
+
+  /** 解析不同 Provider 的凭证文件格式 */
+  private parseCredentialFile(provider: string, path: string): ProviderCredential {
+    const raw = JSON.parse(readFileSync(path, 'utf-8'));
+
+    switch (provider) {
+      case 'openai':
+        return {
+          access_token: raw.tokens?.access_token,
+          refresh_token: raw.tokens?.refresh_token,
+          account_id: raw.tokens?.account_id,
+          expires_at: raw.tokens?.expires_at,
+          source: 'file',
+        };
+      case 'google':
+        return {
+          access_token: raw.access_token,
+          refresh_token: raw.refresh_token,
+          expires_at: raw.expiry_date,
+          source: 'file',
+        };
+      default:
+        return { access_token: raw.access_token, source: 'file' };
+    }
+  }
+
+  /** 使用 refresh_token 刷新 access_token */
+  private async refreshToken(
+    provider: string, cred: ProviderCredential,
+  ): Promise<ProviderCredential | null> {
+    const endpoint = TOKEN_ENDPOINTS[provider];
+    if (!endpoint || !cred.refresh_token) return null;
+
+    const body: Record<string, string> = {
+      grant_type: 'refresh_token',
+      refresh_token: cred.refresh_token,
+    };
+
+    // OpenAI 需要 client_id
+    if (provider === 'openai') {
+      body.client_id = OPENAI_CLIENT_ID;
+    }
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(body),
+      });
+
+      if (!res.ok) return null;
+
+      const data = await res.json();
+      return {
+        ...cred,
+        access_token: data.access_token,
+        expires_at: Date.now() + (data.expires_in ?? 3600) * 1000,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** 将刷新后的 token 写回原凭证文件（保持与 CLI 共享） */
+  private writeBackCredential(
+    provider: string, path: string, cred: ProviderCredential,
+  ): void {
+    // 读取原始文件，只更新 token 字段，保留其他内容
+    const raw = JSON.parse(readFileSync(path, 'utf-8'));
+
+    switch (provider) {
+      case 'openai':
+        raw.tokens.access_token = cred.access_token;
+        if (cred.expires_at) raw.tokens.expires_at = cred.expires_at;
+        raw.last_refresh = new Date().toISOString();
+        break;
+      case 'google':
+        raw.access_token = cred.access_token;
+        if (cred.expires_at) raw.expiry_date = cred.expires_at;
+        break;
+    }
+
+    writeFileSync(path, JSON.stringify(raw, null, 2), { mode: 0o600 });
+  }
+
+  private isExpired(cred: ProviderCredential): boolean {
+    if (!cred.expires_at) return false;
+    return cred.expires_at < Date.now() - 60_000;  // 提前 60s 判定过期
+  }
+}
+
+const ENV_VARS: Record<string, string> = {
+  anthropic: 'ANTHROPIC_API_KEY',
+  openai: 'OPENAI_API_KEY',
+  google: 'GEMINI_API_KEY',
+};
+```
+
+---
+
+## 4. 辩论编排引擎
+
+### 4.1 状态机设计
+
+编排器是一个显式状态机，每个阶段对应一个状态转换。Checkpoint 在每次状态转换后写入。
+
+```typescript
+// src/core/orchestrator.ts
+
+export type DebatePhase =
+  | 'route'
+  | 'broadcast'
+  | 'review'
+  | 'human_gate'
+  | 'consensus'
+  | 'pre_synthesis_compression'
+  | 'synthesis'
+  | 'completed'
+  | 'failed';
+
+/** 各辩论模式的阶段执行序列 */
+const PHASE_SEQUENCES: Record<DebateMode, DebatePhase[]> = {
+  quick:   ['route', 'broadcast'],
+  compare: ['route', 'broadcast', 'pre_synthesis_compression', 'synthesis'],
+  debate:  ['route', 'broadcast', 'review', 'human_gate', 'consensus',
+            'pre_synthesis_compression', 'synthesis'],
+};
+
+export class Orchestrator {
+  constructor(
+    private adapter: InvocationAdapter,
+    private sessionStore: SessionStore,
+    private checkpointManager: CheckpointManager,
+    private config: CouncilConfig,
+    private renderer: Renderer,  // plain 或 TUI
+  ) {}
+
+  async run(question: string, options: RunOptions): Promise<Session> {
+    // 1. 恢复或创建 Session
+    let session = options.resume
+      ? await this.checkpointManager.restore(options.sessionId)
+      : this.createSession(question, options);
+
+    // 2. 确定阶段序列
+    const phases = PHASE_SEQUENCES[session.resolved_mode];
+    const startIndex = this.findResumePoint(session, phases);
+
+    // 3. 逐阶段执行
+    for (let i = startIndex; i < phases.length; i++) {
+      const phase = phases[i];
+
+      // 可选阶段跳过逻辑
+      if (phase === 'human_gate' && !options.interactive) continue;
+      if (phase === 'pre_synthesis_compression' && !this.needsCompression(session)) continue;
+
+      session.status = this.phaseToStatus(phase);
+      this.renderer.onPhaseStart(phase, i, phases.length);
+
+      try {
+        session = await this.executePhase(phase, session);
+      } catch (err) {
+        session = this.handlePhaseError(phase, session, err);
+        if (session.status === 'failed') break;
+        // 降级后继续
+      }
+
+      // Checkpoint
+      await this.checkpointManager.save(session);
+    }
+
+    // 4. 完成
+    session.status = session.status === 'failed' ? 'failed' : 'completed';
+    session.completed_at = new Date().toISOString();
+    session.total_elapsed_ms = Date.now() - new Date(session.created_at).getTime();
+
+    if (!options.noStore) {
+      await this.sessionStore.save(session);
+      await this.checkpointManager.remove(session.session_id);
+    }
+
+    return session;
+  }
+
+  private async executePhase(phase: DebatePhase, session: Session): Promise<Session> {
+    switch (phase) {
+      case 'route':      return this.executeRoute(session);
+      case 'broadcast':  return this.executeBroadcast(session);
+      case 'review':     return this.executeReview(session);
+      case 'consensus':  return this.executeConsensus(session);
+      case 'pre_synthesis_compression': return this.executeCompression(session);
+      case 'synthesis':  return this.executeSynthesis(session);
+      case 'human_gate': return this.executeHumanGate(session);
+      default: return session;
+    }
+  }
+}
+```
+
+### 4.2 Broadcast 阶段——并发调用
+
+```typescript
+private async executeBroadcast(session: Session): Promise<Session> {
+  const stage = this.createStage('broadcast');
+  const agents = session.agents;
+
+  // 按模型分组：同一模型的多个 Agent 串行，不同模型间并行
+  const groups = this.groupByModel(agents);
+
+  const allInvocations = await Promise.all(
+    groups.map(async (group) => {
+      const results: Invocation[] = [];
+      for (const agent of group) {
+        const prompt = buildBroadcastPrompt(
+          session.question, agent.role, session.parent_session_id
+            ? session.parent_synthesis : undefined,
+        );
+
+        this.renderer.onAgentStart(agent);
+        const result = await this.adapter.invoke(agent.config, prompt);
+        this.renderer.onAgentComplete(agent, result);
+
+        results.push(this.toInvocation(agent, result, prompt));
+      }
+      return results;
+    }),
+  );
+
+  stage.invocations = allInvocations.flat();
+  stage.status = 'completed';
+  session.stages.push(stage);
+  return session;
+}
+
+/**
+ * 按模型 ID 分组。同一模型的 Agent 必须串行执行（避免同一 CLI 的并发限制），
+ * 不同模型间并行执行。
+ */
+private groupByModel(agents: Agent[]): Agent[][] {
+  const map = new Map<string, Agent[]>();
+  for (const agent of agents) {
+    const key = agent.config.name;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(agent);
+  }
+  return [...map.values()];
+}
+```
+
+### 4.3 Review 阶段——匿名化
+
+```typescript
+// src/core/anonymizer.ts
+
+export class Anonymizer {
+  /** 三层匿名化处理 */
+  anonymize(responses: AgentResponse[]): AnonymizedResponse[] {
+    // 随机打乱顺序（消除位置偏见）
+    const shuffled = this.shuffle([...responses]);
+
+    return shuffled.map((r, i) => ({
+      label: String.fromCharCode(65 + i),  // A, B, C, ...
+      content: this.pipeline(r.content),
+      original_agent_index: r.agentIndex,  // 保留映射关系用于还原
+    }));
+  }
+
+  private pipeline(text: string): string {
+    let result = text;
+    result = this.removeIdentity(result);       // Layer 1: 身份标记
+    result = this.normalizeFormatting(result);   // Layer 3: 格式归一化
+    return result;
+  }
+
+  /** Layer 1: 移除模型自我标识 */
+  private removeIdentity(text: string): string {
+    const patterns = [
+      /I'm Claude\b/gi,
+      /As Claude,?\s*/gi,
+      /I'm Gemini\b/gi,
+      /As an AI assistant created by \w+/gi,
+      /I'm an AI (assistant|model) (made|created|developed) by \w+/gi,
+    ];
+    let result = text;
+    for (const p of patterns) {
+      result = result.replace(p, '');
+    }
+    return result;
+  }
+
+  /** Layer 3: 格式归一化（消除文风指纹） */
+  private normalizeFormatting(text: string): string {
+    return text
+      .replace(/[\u{1F600}-\u{1F9FF}]/gu, '')           // 去除 Emoji
+      .replace(/^#{1,2}\s/gm, '### ')                    // 统一标题层级
+      .replace(/^\*/gm, '-')                              // 统一列表符号
+      .replace(/\*\*(.+?)\*\*/g, '**$1**');               // 保留加粗（已统一）
+  }
+
+  private shuffle<T>(arr: T[]): T[] {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
+}
+```
+
+### 4.4 Consensus 计算
+
+```typescript
+// src/core/consensus.ts
+
+export interface ConsensusResult {
+  consensus_score: number;             // 0.0 - 1.0
+  dimension_scores: Record<string, { score: number; divergence: number }>;
+  model_diversity_factor: number;      // δ
+  raw_agreement: number;               // 未经 diversity 修正的共识度
+}
+
+export function calculateConsensus(
+  reviews: ParsedReview[],
+  agents: Agent[],
+): ConsensusResult {
+  // 1. 过滤有效评审（排除 PARSE_ERROR）
+  const valid = reviews.filter(r => r.status === 'valid');
+  const N = valid.length;
+  if (N < 2) {
+    return { consensus_score: 0, dimension_scores: {}, model_diversity_factor: 0, raw_agreement: 0 };
+  }
+
+  // 2. z-score 归一化（消除评审者尺度差异）
+  const normalized = zScoreNormalize(valid);
+
+  // 3. 计算每份回答的分数标准差
+  const answerScores = groupScoresByAnswer(normalized);
+  const sigmas = Object.values(answerScores).map(scores => standardDeviation(scores));
+  const sigmaAvg = mean(sigmas);
+
+  // 4. Kendall's W 排名一致性
+  const W = kendallsW(normalized);
+
+  // 5. 小样本修正
+  const rho = (N - 1) / N;
+
+  // 6. Model Diversity Factor (δ)
+  const uniqueProviders = new Set(agents.map(a => getProviderFamily(a.config)));
+  const D = uniqueProviders.size;
+  const A = agents.length;
+  let delta = D / A;
+  if (D < 2) delta *= 0.7;  // 纯单供应商硬折减
+
+  // 7. 综合共识度
+  const rawAgreement = 0.5 * (1 - sigmaAvg / 4.5) + 0.5 * W;
+  const score = Math.max(0, Math.min(1, rawAgreement * rho * delta));
+
+  // 8. 分维度分歧分析
+  const dimensions = ['accuracy', 'completeness', 'practicality', 'insight'];
+  const dimensionScores: Record<string, { score: number; divergence: number }> = {};
+  for (const dim of dimensions) {
+    const dimScores = groupScoresByDimension(normalized, dim);
+    const dimSigma = mean(Object.values(dimScores).map(standardDeviation));
+    dimensionScores[dim] = {
+      score: 1 - dimSigma / 4.5,
+      divergence: dimSigma,
+    };
+  }
+
+  return {
+    consensus_score: score,
+    dimension_scores: dimensionScores,
+    model_diversity_factor: delta,
+    raw_agreement: rawAgreement * rho,
+  };
+}
+
+/** 判断模型的供应商归属（用于 diversity 计算） */
+function getProviderFamily(config: ModelConfig): string {
+  if (config.provider) return config.provider;
+  // CLI 模式通过 binary 推断
+  const binary = config.binary ?? '';
+  if (binary.includes('claude')) return 'anthropic';
+  if (binary.includes('codex')) return 'openai';
+  if (binary.includes('gemini')) return 'google';
+  if (binary.includes('ollama')) return 'ollama';
+  return binary;  // 未知工具以 binary 名作为 family
+}
+```
+
+---
+
+## 5. 持久化层
+
+### 5.1 SQLite 数据库初始化与迁移
+
+```typescript
+// src/storage/database.ts
+
+import Database from 'better-sqlite3';
+
+const CURRENT_SCHEMA_VERSION = 1;
+
+export function initDatabase(dbPath: string): Database.Database {
+  const db = new Database(dbPath);
+
+  // 启用 WAL 模式（并发读写性能提升）
+  db.pragma('journal_mode = WAL');
+  db.pragma('busy_timeout = 5000');
+  db.pragma('foreign_keys = ON');
+
+  // 检查并执行迁移
+  migrate(db);
+
+  return db;
+}
+
+function migrate(db: Database.Database) {
+  const version = db.pragma('user_version', { simple: true }) as number;
+
+  if (version < 1) {
+    db.exec(`
+      -- 主表
+      CREATE TABLE IF NOT EXISTS sessions (
+        session_id        TEXT PRIMARY KEY,
+        question_hash     TEXT NOT NULL,
+        question_normalized TEXT,
+        question_preview  TEXT,
+        synthesis_preview TEXT,
+        mode              TEXT NOT NULL,
+        resolved_mode     TEXT,
+        status            TEXT NOT NULL,
+        consensus_score   REAL,
+        models_used       TEXT,
+        created_at        TEXT NOT NULL,
+        completed_at      TEXT,
+        total_elapsed_ms  INTEGER,
+        user_rating       INTEGER,
+        parent_session_id TEXT,
+        auto_suggested_mode TEXT,
+        user_override_mode  TEXT
+      );
+
+      CREATE INDEX idx_sessions_question_hash ON sessions(question_hash);
+      CREATE INDEX idx_sessions_status ON sessions(status);
+      CREATE INDEX idx_sessions_created_at ON sessions(created_at);
+      CREATE INDEX idx_sessions_consensus ON sessions(consensus_score);
+      CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
+      CREATE INDEX idx_sessions_rating ON sessions(user_rating);
+
+      -- FTS5 全文索引
+      CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
+        question_preview, synthesis_preview,
+        content=sessions, content_rowid=rowid
+      );
+
+      -- 标签关联表
+      CREATE TABLE IF NOT EXISTS session_tags (
+        session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+        tag        TEXT NOT NULL,
+        PRIMARY KEY (session_id, tag)
+      );
+
+      -- 模型表现统计
+      CREATE TABLE IF NOT EXISTS model_stats (
+        session_id          TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+        model_id            TEXT NOT NULL,
+        invocation_mode     TEXT,
+        avg_peer_score      REAL,
+        was_chairman        INTEGER NOT NULL DEFAULT 0,
+        was_devil_advocate  INTEGER NOT NULL DEFAULT 0,
+        response_elapsed_ms INTEGER,
+        token_usage_input   INTEGER,
+        token_usage_output  INTEGER,
+        PRIMARY KEY (session_id, model_id)
+      );
+
+      -- 并发调度表（运行时状态，启动时可安全清空）
+      CREATE TABLE IF NOT EXISTS resource_slots (
+        slot_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        model_id      TEXT NOT NULL,
+        pid           INTEGER NOT NULL,
+        acquired_at   TEXT NOT NULL,
+        resource_cost INTEGER NOT NULL DEFAULT 1
+      );
+
+      CREATE INDEX idx_resource_slots_model ON resource_slots(model_id);
+      CREATE INDEX idx_resource_slots_pid ON resource_slots(pid);
+    `);
+
+    db.pragma(`user_version = ${CURRENT_SCHEMA_VERSION}`);
+  }
+}
+```
+
+### 5.2 Checkpoint 管理
+
+```typescript
+// src/storage/checkpoint.ts
+
+import { readFileSync, writeFileSync, unlinkSync, readdirSync, statSync } from 'node:fs';
+
+export class CheckpointManager {
+  constructor(private checkpointDir: string) {}
+
+  save(session: Session): void {
+    const path = this.getPath(session.session_id);
+    const data = {
+      ...session,
+      pid: process.pid,
+      last_updated_at: new Date().toISOString(),
+    };
+    writeFileSync(path, JSON.stringify(data, null, 2), { mode: 0o600 });
+  }
+
+  restore(sessionId?: string): Session | null {
+    // 清理僵尸 checkpoint
+    this.cleanOrphans();
+
+    if (sessionId) {
+      return this.loadCheckpoint(this.getPath(sessionId));
+    }
+
+    // 找最近的有效 checkpoint
+    const files = readdirSync(this.checkpointDir)
+      .filter(f => f.endsWith('.ckpt.json'))
+      .map(f => ({
+        name: f,
+        path: join(this.checkpointDir, f),
+        mtime: statSync(join(this.checkpointDir, f)).mtimeMs,
+      }))
+      .sort((a, b) => b.mtime - a.mtime);
+
+    for (const file of files) {
+      const session = this.loadCheckpoint(file.path);
+      if (session) return session;
+    }
+
+    return null;
+  }
+
+  remove(sessionId: string): void {
+    const path = this.getPath(sessionId);
+    try { unlinkSync(path); } catch {}
+  }
+
+  /** 清理超过 24h 或 PID 已退出的 checkpoint */
+  private cleanOrphans(): void {
+    const maxAge = 24 * 60 * 60 * 1000;
+    const files = readdirSync(this.checkpointDir).filter(f => f.endsWith('.ckpt.json'));
+
+    for (const file of files) {
+      const path = join(this.checkpointDir, file);
+      try {
+        const data = JSON.parse(readFileSync(path, 'utf-8'));
+        const age = Date.now() - new Date(data.last_updated_at).getTime();
+        const pidAlive = isProcessAlive(data.pid);
+
+        if (age > maxAge || !pidAlive) {
+          unlinkSync(path);
+        }
+      } catch {
+        unlinkSync(path);  // 解析失败也清理
+      }
+    }
+  }
+
+  private getPath(sessionId: string): string {
+    return join(this.checkpointDir, `${sessionId}.ckpt.json`);
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);  // 信号 0 不发送信号，仅检查进程是否存在
+    return true;
+  } catch {
+    return false;
+  }
+}
+```
+
+### 5.3 并发调度（resource_slots）
+
+```typescript
+// src/storage/concurrency.ts
+
+export class ConcurrencyManager {
+  constructor(private db: Database.Database, private globalLimit: number) {}
+
+  /**
+   * 尝试获取一个资源槽位。
+   * 使用 SQLite BEGIN IMMEDIATE 保证原子性。
+   * 同步 API 保证事务内无 yield，不会被中断。
+   */
+  acquire(modelId: string, maxConcurrent: number, resourceWeight: number): boolean {
+    const txn = this.db.transaction(() => {
+      // 1. 清理僵尸槽位
+      const slots = this.db.prepare('SELECT slot_id, pid FROM resource_slots').all() as any[];
+      for (const slot of slots) {
+        if (!isProcessAlive(slot.pid)) {
+          this.db.prepare('DELETE FROM resource_slots WHERE slot_id = ?').run(slot.slot_id);
+        }
+      }
+
+      // 2. 检查模型并发限制
+      const modelCount = this.db.prepare(
+        'SELECT COUNT(*) as cnt FROM resource_slots WHERE model_id = ?'
+      ).get(modelId) as any;
+
+      if (modelCount.cnt >= maxConcurrent) return false;
+
+      // 3. 检查全局资源池
+      const totalCost = this.db.prepare(
+        'SELECT COALESCE(SUM(resource_cost), 0) as total FROM resource_slots'
+      ).get() as any;
+
+      if (totalCost.total + resourceWeight > this.globalLimit) return false;
+
+      // 4. 插入槽位
+      this.db.prepare(
+        'INSERT INTO resource_slots (model_id, pid, acquired_at, resource_cost) VALUES (?, ?, ?, ?)'
+      ).run(modelId, process.pid, new Date().toISOString(), resourceWeight);
+
+      return true;
+    });
+
+    return txn.immediate();  // BEGIN IMMEDIATE 保证写事务互斥
+  }
+
+  /** 释放当前进程持有的所有槽位 */
+  release(): void {
+    this.db.prepare('DELETE FROM resource_slots WHERE pid = ?').run(process.pid);
+  }
+
+  /** 注册进程退出时自动释放 */
+  registerCleanup(): void {
+    const cleanup = () => this.release();
+    process.on('exit', cleanup);
+    process.on('SIGINT', () => { cleanup(); process.exit(130); });
+    process.on('SIGTERM', () => { cleanup(); process.exit(143); });
+  }
+}
+```
+
+---
+
+## 6. 配置系统
+
+### 6.1 Zod Schema 定义
+
+```typescript
+// src/config/schema.ts
+
+import { z } from 'zod';
+
+/** 模型配置 Schema */
+export const ModelConfigSchema = z.object({
+  // 通用字段
+  name: z.string(),
+  invocation: z.enum(['cli', 'api', 'auto']).default('auto'),
+  provider: z.enum(['anthropic', 'openai', 'google', 'github-copilot', 'ollama', 'custom']).optional(),
+  model: z.string().optional(),
+  timeout_seconds: z.number().int().positive().default(120),
+  capabilities: z.array(z.string()).default(['general']),
+  priority: z.number().int().nonnegative().default(100),
+  max_concurrent: z.number().int().positive().default(1),
+  resource_weight: z.number().int().positive().default(1),
+  enabled: z.boolean().default(true),
+
+  // CLI 专用
+  binary: z.string().optional(),
+  model_args: z.array(z.string()).optional(),
+  args: z.array(z.string()).optional(),
+  input_mode: z.enum(['stdin', 'arg', 'file']).optional(),
+  output_mode: z.enum(['stdout', 'file', 'json_field']).optional(),
+  output_json_field: z.string().optional(),
+  env: z.record(z.string()).optional(),
+  health_check: z.object({
+    command: z.array(z.string()),
+    expect_exit_code: z.number().int().default(0),
+    cache_seconds: z.number().int().default(300),
+    timeout_seconds: z.number().int().default(10),
+  }).optional(),
+
+  // API 专用
+  api_credential_path: z.string().optional(),
+  api_base_url: z.string().url().optional(),
+  api_key_env: z.string().optional(),
+  streaming: z.boolean().default(true),
+}).refine(
+  // CLI 模式必须有 binary + args + input_mode
+  (data) => {
+    if (data.invocation === 'cli') {
+      return !!data.binary && !!data.args && !!data.input_mode;
+    }
+    return true;
+  },
+  { message: 'CLI mode requires binary, args, and input_mode' },
+);
+
+export type ModelConfig = z.infer<typeof ModelConfigSchema>;
+
+/** 主配置 Schema */
+export const CouncilConfigSchema = z.object({
+  schema_version: z.number().int().default(1),
+
+  general: z.object({
+    default_mode: z.enum(['quick', 'compare', 'debate', 'auto']).default('auto'),
+    default_chairman: z.string(),
+    min_agents: z.number().int().min(1).default(2),
+    max_agents: z.number().int().min(1).default(5),
+    allow_same_model_agents: z.boolean().default(true),
+    review_rounds: z.number().int().min(1).max(3).default(1),
+    language: z.enum(['auto', 'zh', 'en']).default('auto'),
+    compression_threshold_ratio: z.number().min(0).max(1).default(0.6),
+    devil_advocate: z.enum(['auto', 'always', 'never']).default('auto'),
+    high_risk_keywords: z.array(z.string()).default([]),
+  }),
+
+  storage: z.object({
+    data_dir: z.string().default('~/.council/data'),
+    checkpoint_dir: z.string().default('~/.council/checkpoints'),
+    log_dir: z.string().default('~/.council/logs'),
+    log_retention_days: z.number().int().default(7),
+    orphan_checkpoint_hours: z.number().int().default(24),
+  }),
+
+  routing: z.object({
+    strategy: z.enum(['keyword', 'llm', 'manual']).default('keyword'),
+    dynamic_weight: z.boolean().default(true),
+    dynamic_weight_alpha: z.number().min(0).max(1).default(0.3),
+    dynamic_weight_shadow: z.boolean().default(true),
+    exploration_rate: z.number().min(0).max(1).default(0.1),
+    rules: z.array(z.any()).default([]),
+    default: z.object({
+      prefer: z.array(z.string()),
+      chairman: z.string(),
+      role_set: z.string().default('default'),
+    }),
+  }),
+
+  concurrency: z.object({
+    global_resource_limit: z.number().int().positive().default(10),
+  }),
+
+  circuit_breaker: z.object({
+    failure_threshold: z.number().int().positive().default(5),
+    recovery_seconds: z.number().int().positive().default(3600),
+    enabled: z.boolean().default(true),
+  }),
+
+  output: z.object({
+    format: z.enum(['markdown', 'json', 'plain']).default('markdown'),
+    show_individual: z.boolean().default(false),
+    show_scores: z.boolean().default(true),
+    show_consensus: z.boolean().default(true),
+    show_dimension_heatmap: z.boolean().default(true),
+    show_timing: z.boolean().default(true),
+    copy_to_clipboard: z.boolean().default(false),
+    tui_mode: z.enum(['auto', 'always', 'never']).default('auto'),
+  }),
+
+  storage_security: z.object({
+    session_retention_days: z.number().int().nonnegative().default(90),
+  }),
+});
+
+export type CouncilConfig = z.infer<typeof CouncilConfigSchema>;
+```
+
+### 6.2 配置加载
+
+```typescript
+// src/config/loader.ts
+
+import { parse as parseYaml } from 'yaml';
+import { readdirSync, readFileSync, existsSync } from 'node:fs';
+
+export class ConfigLoader {
+  constructor(private configDir: string) {}
+
+  loadCouncilConfig(): CouncilConfig {
+    const path = join(this.configDir, 'council.yaml');
+    if (!existsSync(path)) throw new ConfigNotFoundError(path);
+
+    const raw = parseYaml(readFileSync(path, 'utf-8'));
+    return CouncilConfigSchema.parse(raw);
+  }
+
+  loadAllModels(): ModelConfig[] {
+    const modelsDir = join(this.configDir, 'models');
+    if (!existsSync(modelsDir)) return [];
+
+    return readdirSync(modelsDir)
+      .filter(f => f.endsWith('.yaml'))
+      .map(f => {
+        const raw = parseYaml(readFileSync(join(modelsDir, f), 'utf-8'));
+        return ModelConfigSchema.parse(raw);
+      })
+      .filter(m => m.enabled);
+  }
+
+  loadRoleSet(name: string): RoleSet {
+    // 先查用户自定义，再查内置默认
+    const userPath = join(this.configDir, 'roles', `${name}.yaml`);
+    if (existsSync(userPath)) {
+      return parseYaml(readFileSync(userPath, 'utf-8'));
+    }
+
+    // 内置默认角色集（编译时嵌入）
+    const builtinPath = join(__dirname, '..', 'defaults', 'roles', `${name}.yaml`);
+    if (existsSync(builtinPath)) {
+      return parseYaml(readFileSync(builtinPath, 'utf-8'));
+    }
+
+    throw new RoleSetNotFoundError(name);
+  }
+}
+```
+
+### 6.3 路径常量
+
+```typescript
+// src/config/paths.ts
+
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+export const COUNCIL_HOME = join(homedir(), '.council');
+
+export const PATHS = {
+  config:       join(COUNCIL_HOME, 'config'),
+  councilYaml:  join(COUNCIL_HOME, 'config', 'council.yaml'),
+  modelsDir:    join(COUNCIL_HOME, 'config', 'models'),
+  rolesDir:     join(COUNCIL_HOME, 'config', 'roles'),
+  dataDir:      join(COUNCIL_HOME, 'data'),
+  database:     join(COUNCIL_HOME, 'data', 'council.db'),
+  sessionsDir:  join(COUNCIL_HOME, 'data', 'sessions'),
+  checkpoints:  join(COUNCIL_HOME, 'checkpoints'),
+  credentials:  join(COUNCIL_HOME, 'credentials'),
+  logs:         join(COUNCIL_HOME, 'logs'),
+} as const;
+
+/** 已知 CLI 客户端凭证路径 */
+export const KNOWN_CREDENTIALS = {
+  openai:  join(homedir(), '.codex', 'auth.json'),
+  google:  join(homedir(), '.gemini', 'oauth_creds.json'),
+  'google-vertex': join(homedir(), '.config', 'gcloud', 'application_default_credentials.json'),
+} as const;
+```
+
+---
+
+## 7. CLI 命令实现
+
+### 7.1 入口与命令注册
+
+```typescript
+// src/cli.ts
+#!/usr/bin/env node
+
+import { Command } from 'commander';
+
+const program = new Command()
+  .name('council')
+  .description('Local AI Council — 多模型辩论编排系统')
+  .version('0.1.0');
+
+// 主命令：council "question"
+program
+  .argument('[question]', '要辩论的问题')
+  .option('-m, --mode <mode>', '辩论模式: quick | compare | debate', 'auto')
+  .option('-c, --chairman <model>', '指定 Chairman 模型')
+  .option('--models <models...>', '指定参与模型')
+  .option('-i, --interactive', '启用交互式 Human-in-the-Loop')
+  .option('--no-interactive', '强制禁用交互模式')
+  .option('-j, --json', 'JSON 格式输出')
+  .option('--no-store', '不持久化本次辩论结果')
+  .option('--resume [sessionId]', '恢复中断的辩论')
+  .option('--force', '强制开启新辩论')
+  .option('--tag <tags...>', '标签')
+  .option('--copy', '自动复制结果到剪贴板')
+  .option('--devil-advocate', '强制启用反方角色')
+  .option('--role-set <name>', '指定角色集')
+  .option('--follow [sessionId]', '追问（基于已有辩论结果）')
+  .action(async (question, options) => {
+    const { runCouncil } = await import('./commands/council.js');
+    await runCouncil(question, options);
+  });
+
+// 子命令
+program.command('setup').description('完整配置向导').action(async (opts) => {
+  const { runSetup } = await import('./commands/setup.js');
+  await runSetup(opts);
+});
+
+program.command('models').description('模型管理')
+  .addCommand(new Command('list').description('列出所有模型').action(/* ... */))
+  .addCommand(new Command('add').description('添加模型').action(/* ... */))
+  .addCommand(new Command('check').description('健康检查').action(/* ... */))
+  .addCommand(new Command('enable').argument('<id>').action(/* ... */))
+  .addCommand(new Command('disable').argument('<id>').action(/* ... */))
+  .addCommand(new Command('reset').argument('<id>').action(/* ... */))
+  .addCommand(new Command('scan').action(/* ... */));
+
+program.command('benchmark').description('运行基准测试').action(async (opts) => {
+  const { runBenchmark } = await import('./commands/benchmark.js');
+  await runBenchmark(opts);
+});
+
+program.command('history').description('查看历史辩论').action(/* ... */);
+program.command('show <sessionId>').description('查看辩论详情').action(/* ... */);
+program.command('recall <keyword>').description('搜索历史结论').action(/* ... */);
+program.command('stats').description('模型表现统计').action(/* ... */);
+program.command('rate <sessionId> <score>').description('评分').action(/* ... */);
+program.command('replay <sessionId>').description('回放辩论').action(/* ... */);
+program.command('export <sessionId>').description('导出').action(/* ... */);
+program.command('prune').description('清理旧数据').action(/* ... */);
+program.command('reload').description('重新加载配置').action(/* ... */);
+
+program.parseAsync();
+```
+
+### 7.2 主命令执行流程
+
+```typescript
+// src/commands/council.ts
+
+export async function runCouncil(question: string | undefined, options: any) {
+  // 0. 首次运行检测
+  if (!existsSync(PATHS.config)) {
+    const { runFirstRunWizard } = await import('../ui/wizard/first-run.js');
+    await runFirstRunWizard();
+  }
+
+  // 1. 加载配置
+  const loader = new ConfigLoader(PATHS.config);
+  const config = loader.loadCouncilConfig();
+  const models = loader.loadAllModels();
+
+  // 2. 初始化各层
+  const db = initDatabase(PATHS.database);
+  const credentialManager = new CredentialManager();
+  const adapter = new AutoAdapter(
+    new ApiAdapter(credentialManager),
+    new CliAdapter(),
+  );
+  const sessionStore = new SessionStore(PATHS.sessionsDir, db);
+  const checkpointManager = new CheckpointManager(PATHS.checkpoints);
+  const concurrencyManager = new ConcurrencyManager(db, config.concurrency.global_resource_limit);
+  concurrencyManager.registerCleanup();
+
+  // 3. 选择渲染器
+  const renderer = process.stdout.isTTY && config.output.tui_mode !== 'never'
+    ? new TuiRenderer()
+    : new PlainRenderer();
+
+  // 4. 如果没有问题，进入交互模式或报错
+  if (!question) {
+    if (options.resume) {
+      // 恢复模式
+    } else {
+      console.error('Usage: council "your question"');
+      process.exit(1);
+    }
+  }
+
+  // 5. 执行编排
+  const orchestrator = new Orchestrator(adapter, sessionStore, checkpointManager, config, renderer);
+  const session = await orchestrator.run(question!, {
+    mode: options.mode,
+    chairman: options.chairman,
+    models: options.models,
+    interactive: options.interactive,
+    noStore: options.noStore === false,  // --no-store
+    resume: !!options.resume,
+    tags: options.tag,
+    devilAdvocate: options.devilAdvocate,
+    roleSet: options.roleSet,
+    parentSessionId: options.follow,
+  });
+
+  // 6. 输出结果
+  if (options.json) {
+    console.log(JSON.stringify(session, null, 2));
+  } else {
+    renderer.renderResult(session);
+  }
+
+  // 7. 追问模式（仅 TTY）
+  if (process.stdout.isTTY && options.interactive !== false) {
+    await enterFollowUpMode(session, orchestrator, renderer);
+  }
+}
+```
+
+---
+
+## 8. UI 与渲染
+
+### 8.1 渲染器接口
+
+```typescript
+// src/ui/renderer.ts
+
+export interface Renderer {
+  onPhaseStart(phase: DebatePhase, index: number, total: number): void;
+  onAgentStart(agent: Agent): void;
+  onAgentProgress(agent: Agent, chunk: string): void;
+  onAgentComplete(agent: Agent, result: InvocationResult): void;
+  onConsensus(result: ConsensusResult): void;
+  onDegradation(event: DegradationEvent): void;
+  renderResult(session: Session): void;
+}
+```
+
+### 8.2 Plain Renderer（Phase 0-4）
+
+```typescript
+// src/ui/plain-renderer.ts
+
+export class PlainRenderer implements Renderer {
+  onPhaseStart(phase: DebatePhase, index: number, total: number) {
+    const label = PHASE_LABELS[phase];
+    process.stderr.write(`[${index + 1}/${total}] ${label}...\n`);
+  }
+
+  onAgentComplete(agent: Agent, result: InvocationResult) {
+    const mode = result.invocation_mode === 'api' ? 'API' : 'CLI';
+    process.stderr.write(
+      `  ✓ ${agent.config.name} (${agent.role}) ${result.elapsed_ms / 1000}s [${mode}]\n`
+    );
+  }
+
+  onConsensus(result: ConsensusResult) {
+    const bar = '█'.repeat(Math.round(result.consensus_score * 20))
+              + '░'.repeat(20 - Math.round(result.consensus_score * 20));
+    const level = result.consensus_score >= 0.8 ? '高'
+                : result.consensus_score >= 0.5 ? '中等'
+                : result.consensus_score >= 0.2 ? '低' : '极低';
+    process.stderr.write(
+      `  共识度: ${result.consensus_score.toFixed(2)} ${bar} (${level})\n`
+    );
+
+    if (result.model_diversity_factor < 0.5) {
+      process.stderr.write(
+        `  ⚠ 模型多样性较低 (δ=${result.model_diversity_factor.toFixed(2)})，置信度已折减\n`
+      );
+    }
+  }
+
+  renderResult(session: Session) {
+    if (session.synthesis) {
+      process.stdout.write(session.synthesis + '\n');
+    }
+  }
+
+  onDegradation(event: DegradationEvent) {
+    process.stderr.write(`  [!] ${event.phase}: ${event.reason}\n`);
+  }
+}
+```
+
+### 8.3 TUI Dashboard（Phase 5，ink 组件）
+
+```tsx
+// src/ui/tui/Dashboard.tsx
+
+import React, { useState } from 'react';
+import { Box, Text, useApp } from 'ink';
+import Spinner from 'ink-spinner';
+
+interface Props {
+  question: string;
+  mode: string;
+  agents: AgentState[];
+  currentPhase: DebatePhase;
+  phaseIndex: number;
+  totalPhases: number;
+  consensus?: ConsensusResult;
+  elapsed: number;
+}
+
+export function Dashboard(props: Props) {
+  const { question, mode, agents, currentPhase, phaseIndex, totalPhases, consensus, elapsed } = props;
+
+  const progressBar = '█'.repeat(Math.round((phaseIndex / totalPhases) * 20))
+                    + '░'.repeat(20 - Math.round((phaseIndex / totalPhases) * 20));
+
+  return (
+    <Box flexDirection="column" borderStyle="single" paddingX={1}>
+      <Text bold>Local AI Council - {mode.toUpperCase()} Mode</Text>
+      <Text dimColor>Question: "{question.slice(0, 60)}..."</Text>
+
+      <Box marginY={1}>
+        <Text>Phase: [{progressBar}] {phaseIndex}/{totalPhases} {PHASE_LABELS[currentPhase]}</Text>
+      </Box>
+
+      <Text bold>Agents:</Text>
+      {agents.map((a) => (
+        <AgentStatusLine key={a.id} agent={a} />
+      ))}
+
+      {consensus && (
+        <Box marginTop={1}>
+          <Text>
+            Consensus: {consensus.consensus_score.toFixed(2)}{' '}
+            {'█'.repeat(Math.round(consensus.consensus_score * 12))}
+            {'░'.repeat(12 - Math.round(consensus.consensus_score * 12))}
+          </Text>
+        </Box>
+      )}
+
+      <Box marginTop={1}>
+        <Text dimColor>Elapsed: {(elapsed / 1000).toFixed(1)}s</Text>
+      </Box>
+
+      <Box borderStyle="single" borderTop borderBottom={false} borderLeft={false} borderRight={false}>
+        <Text dimColor>[q] quit  [p] pause  [v] view responses</Text>
+      </Box>
+    </Box>
+  );
+}
+
+function AgentStatusLine({ agent }: { agent: AgentState }) {
+  const modeTag = agent.invocationMode === 'api' ? 'API' : 'CLI';
+  switch (agent.status) {
+    case 'running':
+      return (
+        <Text>
+          {'  '}<Spinner type="dots" /> {agent.name} ({agent.role}) [{modeTag}] {agent.elapsed}s
+        </Text>
+      );
+    case 'done':
+      return <Text>  ✓ {agent.name} ({agent.role}) [{modeTag}] {agent.elapsed}s</Text>;
+    case 'failed':
+      return <Text color="red">  ✗ {agent.name} ({agent.role}) [{modeTag}] {agent.error}</Text>;
+    default:
+      return <Text dimColor>  ○ {agent.name} ({agent.role}) [{modeTag}] pending</Text>;
+  }
+}
+```
+
+---
+
+## 9. Benchmark 与效果验证
+
+### 9.1 四组消融实验实现
+
+```typescript
+// src/commands/benchmark.ts
+
+export async function runBenchmark(options: BenchmarkOptions) {
+  const questions = loadBenchmarkSuite(options.suite);
+
+  for (const q of questions) {
+    // A. best-single-quick: 最佳单模型 + 基础 prompt
+    const groupA = await runSingleModel(q, bestModel, 'quick');
+
+    // B. best-single-deep: 最佳单模型 + 精细化 prompt（与 debate 同级）
+    const groupB = await runSingleModel(q, bestModel, 'deep');
+
+    // C. compare+synthesis: 多模型 + Synthesis（跳过 Review）
+    const groupC = await runOrchestrator(q, 'compare');
+
+    // D. full-debate: 完整流程
+    const groupD = await runOrchestrator(q, 'debate');
+
+    // 评估覆盖率
+    const coverageA = evaluateCoverage(groupA.response, q.expected_points);
+    const coverageB = evaluateCoverage(groupB.response, q.expected_points);
+    const coverageC = evaluateCoverage(groupC.synthesis!, q.expected_points);
+    const coverageD = evaluateCoverage(groupD.synthesis!, q.expected_points);
+
+    // 输出消融分析
+    report.addQuestion(q, { A: coverageA, B: coverageB, C: coverageC, D: coverageD });
+  }
+
+  // Release gate 检查（D vs B）
+  const passed = report.checkReleaseGate();
+  process.exit(passed ? 0 : 1);
+}
+```
+
+### 9.2 评估方式
+
+```typescript
+/**
+ * 使用 LLM 评估回答是否覆盖了预期关键点。
+ * 这里复用 Chairman 模型做评估（消耗少量额外 token）。
+ */
+async function evaluateCoverage(
+  response: string,
+  expectedPoints: string[],
+): Promise<CoverageResult> {
+  const prompt = `
+请判断以下回答是否覆盖了这些关键点。
+对每个关键点，回答 "hit" 或 "miss"，以 JSON 格式输出。
+
+关键点：
+${expectedPoints.map((p, i) => `${i + 1}. ${p}`).join('\n')}
+
+回答内容：
+${response}
+
+输出格式：
+{"results": [{"point": "...", "verdict": "hit|miss", "confidence": "high|low"}]}
+`;
+
+  const result = await adapter.invoke(chairmanConfig, prompt);
+  return parseCoverageResult(result.response, expectedPoints);
+}
+```
+
+---
+
+## 10. 错误处理与降级
+
+### 10.1 错误类型体系
+
+```typescript
+// src/types/errors.ts
+
+export class CouncilError extends Error {
+  constructor(message: string, public readonly code: string) {
+    super(message);
+    this.name = 'CouncilError';
+  }
+}
+
+export class ModelUnavailableError extends CouncilError {
+  constructor(modelName: string, reason: string) {
+    super(`Model ${modelName} unavailable: ${reason}`, 'MODEL_UNAVAILABLE');
+  }
+}
+
+export class InvocationError extends CouncilError {
+  constructor(modelName: string, mode: 'cli' | 'api', reason: string) {
+    super(`${mode.toUpperCase()} invocation of ${modelName} failed: ${reason}`, 'INVOCATION_FAILED');
+  }
+}
+
+export class CredentialNotFoundError extends CouncilError {
+  constructor(provider: string) {
+    super(`No credentials found for ${provider}`, 'CREDENTIAL_NOT_FOUND');
+  }
+}
+
+export class CredentialExpiredError extends CouncilError {
+  constructor(provider: string) {
+    super(`Credentials for ${provider} expired and refresh failed`, 'CREDENTIAL_EXPIRED');
+  }
+}
+
+export class LowConsensusError extends CouncilError {
+  constructor(score: number) {
+    super(`Consensus score ${score} below threshold`, 'LOW_CONSENSUS');
+  }
+}
+```
+
+### 10.2 降级策略（编排器内）
+
+```typescript
+// 在 Orchestrator 内部
+
+private handlePhaseError(phase: DebatePhase, session: Session, err: unknown): Session {
+  const event: DegradationEvent = {
+    phase,
+    reason: err instanceof Error ? err.message : String(err),
+    impact: '',
+  };
+
+  switch (phase) {
+    case 'broadcast': {
+      // 已成功的回答 ≥ 2 → 继续；仅 1 个 → 降级为 quick；0 个 → failed
+      const completed = session.stages.at(-1)?.invocations.filter(i => !i.timed_out && i.response_raw) ?? [];
+      if (completed.length >= 2) {
+        event.impact = `${session.agents.length - completed.length} Agent(s) failed, continuing with ${completed.length}`;
+      } else if (completed.length === 1) {
+        event.impact = 'Only 1 Agent succeeded, degrading to quick mode';
+        session.resolved_mode = 'quick';
+      } else {
+        session.status = 'failed';
+        event.impact = 'All agents failed';
+      }
+      break;
+    }
+
+    case 'review': {
+      // 有效评审 < 2 → 跳过 Review + Consensus，降级为 compare
+      event.impact = 'Review failed, degrading to compare mode (skipping consensus)';
+      session.resolved_mode = 'compare';
+      break;
+    }
+
+    case 'synthesis': {
+      // Chairman 失败 → 尝试 fallback 模型；全失败 → 输出最佳单 Agent 回答
+      event.impact = 'Synthesis failed, outputting best individual response';
+      session.synthesis = this.getBestIndividualResponse(session);
+      break;
+    }
+
+    default:
+      event.impact = `Phase ${phase} failed, skipping`;
+  }
+
+  session.degradation_events = session.degradation_events ?? [];
+  session.degradation_events.push(event);
+  this.renderer.onDegradation(event);
+
+  return session;
+}
+```
+
+---
+
+## 11. 测试策略
+
+### 11.1 测试分层
+
+| 层级 | 覆盖目标 | 运行条件 | 框架 |
+|------|---------|---------|------|
+| **单元测试** | `core/` 纯逻辑（共识计算、匿名化、prompt 构建、评分解析） | 无外部依赖，CI 中运行 | vitest |
+| **适配器测试** | `providers/` CLI 适配器（mock subprocess）+ API 适配器（mock HTTP） | mock 外部调用 | vitest + msw (HTTP mock) |
+| **存储测试** | `storage/` SQLite 操作、Checkpoint 读写、并发调度 | 临时 SQLite（`:memory:` 或 tmpdir） | vitest |
+| **集成测试** | 完整 debate 流程端到端 | 需要至少 1 个真实 CLI/API 可用 | vitest，标记为 `@slow` |
+| **Snapshot 测试** | TUI 组件渲染输出 | 无外部依赖 | vitest + ink-testing-library |
+
+### 11.2 关键测试用例
+
+```typescript
+// test/core/consensus.test.ts
+
+describe('calculateConsensus', () => {
+  it('3 个不同模型高度一致 → score > 0.8', () => {
+    const reviews = mockReviews({ agents: 3, providers: 3, scoreSigma: 0.3 });
+    const result = calculateConsensus(reviews, mockAgents(3, 3));
+    expect(result.consensus_score).toBeGreaterThan(0.8);
+    expect(result.model_diversity_factor).toBe(1);  // 3/3 = 完全多样
+  });
+
+  it('单模型多角色 → diversity factor 折减', () => {
+    const reviews = mockReviews({ agents: 3, providers: 1, scoreSigma: 0.3 });
+    const result = calculateConsensus(reviews, mockAgents(3, 1));
+    expect(result.model_diversity_factor).toBeLessThan(0.5);  // 1/3 * 0.7
+    expect(result.consensus_score).toBeLessThan(0.5);  // 即使评分一致也被折减
+  });
+
+  it('PARSE_ERROR 评审被排除', () => {
+    const reviews = [
+      mockValidReview(8), mockValidReview(7), mockParseErrorReview(),
+    ];
+    const result = calculateConsensus(reviews, mockAgents(3, 2));
+    // 只用 2 个有效评审计算
+    expect(result.consensus_score).toBeGreaterThan(0);
+  });
+});
+
+// test/providers/credentials/discovery.test.ts
+
+describe('CredentialManager', () => {
+  it('读取 ~/.codex/auth.json 并解析 OpenAI token', () => {
+    // 使用 fixtures/credentials/codex-auth.json
+    const manager = new CredentialManager();
+    const cred = manager.parseCredentialFile('openai', fixturePath);
+    expect(cred.access_token).toBeDefined();
+    expect(cred.refresh_token).toBeDefined();
+  });
+
+  it('过期 token 自动刷新', async () => {
+    // mock token endpoint
+    const manager = new CredentialManager();
+    // ... mock fetch
+    const cred = await manager.getValidCredential('openai');
+    expect(cred.expires_at).toBeGreaterThan(Date.now());
+  });
+});
+
+// test/storage/concurrency.test.ts
+
+describe('ConcurrencyManager', () => {
+  it('超过 global_resource_limit 时返回 false', () => {
+    const db = new Database(':memory:');
+    migrate(db);
+    const mgr = new ConcurrencyManager(db, 3);
+
+    expect(mgr.acquire('model-a', 5, 2)).toBe(true);   // 消耗 2
+    expect(mgr.acquire('model-b', 5, 2)).toBe(false);  // 2+2=4 > 3
+  });
+
+  it('僵尸槽位被自动清理', () => {
+    // 插入一个不存在 PID 的槽位
+    db.prepare('INSERT INTO resource_slots VALUES (NULL, ?, 99999, ?, 1)')
+      .run('model-a', new Date().toISOString());
+
+    expect(mgr.acquire('model-a', 1, 1)).toBe(true);  // 僵尸被清理后可获取
+  });
+});
+```
+
+---
+
+## 12. 分阶段实现计划
+
+### Phase 0: 最小可运行原型（1-2 天）
+
+**目标**：端到端跑通 `council "question"` → 多模型回答 → Chairman 综合 → stdout 输出
+
+| 文件 | 内容 | 预估行数 |
+|------|------|---------|
+| `src/cli.ts` | commander 入口，仅主命令 | ~30 |
+| `src/commands/council.ts` | 硬编码 2 模型，直接调用 | ~60 |
+| `src/providers/adapter.ts` | InvocationAdapter 接口 + AutoAdapter | ~50 |
+| `src/providers/api-adapter.ts` | Anthropic + OpenAI + Google SDK 调用 | ~150 |
+| `src/providers/cli-adapter.ts` | spawn + stdin/stdout pipe | ~80 |
+| `src/providers/credentials/discovery.ts` | 扫描凭证 + token 刷新 | ~180 |
+| `src/core/orchestrator.ts` | 仅 Broadcast + Synthesis | ~100 |
+| `src/core/prompt-builder.ts` | Broadcast + Synthesis prompt 模板 | ~60 |
+| `src/ui/plain-renderer.ts` | stderr 进度 + stdout 结果 | ~40 |
+| `src/types/*.ts` | 核心类型定义 | ~80 |
+| `src/config/paths.ts` | 路径常量 | ~20 |
+
+**合计**：~850 行。不含配置系统、持久化、TUI。
+
+**验收标准**：
+```bash
+npx council "Redis vs Memcached 怎么选?"
+# → 2 个模型并行回答 → Chairman 综合 → 输出到 stdout
+# → stderr 显示进度 "✓ claude-opus (12.3s) [API]" "✓ gemini-pro (8.7s) [API]"
+```
+
+### Phase 1: MVP + 配置系统（3-5 天）
+
+在 Phase 0 基础上增加：
+
+- `src/config/` — YAML 加载、zod 校验、预设库
+- `src/ui/wizard/first-run.ts` — 5 步引导（inquirer）
+- `src/storage/session-store.ts` — Session JSON 写入
+- `src/commands/models.ts` — `council models` 列出状态
+- 健康检查 L1（CLI binary 存在 / API 凭证存在）
+- `council.yaml` + `models/*.yaml` 生成
+
+### Phase 2: 完整辩论流程（3-5 天）
+
+- `src/core/anonymizer.ts` — 三层匿名化
+- `src/core/score-parser.ts` — Review JSON 解析 + fallback
+- `src/core/consensus.ts` — 共识度计算（含 model_diversity_factor）
+- `src/storage/checkpoint.ts` — Checkpoint 写入/恢复
+- `src/storage/database.ts` — SQLite 初始化、sessions 表
+- `src/storage/concurrency.ts` — resource_slots 原子调度
+- 编排器扩展：Review → Consensus → 完整 debate 流程
+- SIGINT 捕获 + 恢复提示
+
+### Phase 3: 效果验证（3-5 天）
+
+- `src/commands/benchmark.ts` — 四组消融实验
+- `src/commands/rate.ts` — 用户评分
+- `src/commands/history.ts` + `recall` — FTS5 搜索
+- `src/commands/stats.ts` — 模型表现统计
+- Release gate 自动检查
+
+### Phase 4: 智能路由与完整配置（3-5 天）
+
+- `src/core/router.ts` — keyword 路由、能力匹配
+- `src/ui/wizard/` — 完整 setup 向导、model-add 向导
+- `src/providers/health.ts` — L2+L3 检查、熔断器
+- 动态权重 shadow mode
+- `council history`、`council export`
+
+### Phase 5: 高级 UX（3-5 天）
+
+- `src/ui/tui/` — ink 组件：Dashboard、AgentStatus、ConsensusBar
+- `src/ui/follow-up.ts` — 追问模式
+- `src/core/compression.ts` — Pre-Synthesis Compression
+- `src/commands/replay.ts` — 辩论回放
+- `--copy`、快捷操作
+
+---
+
+## 13. 安全考量
+
+| 风险 | 缓解措施 |
+|------|---------|
+| 凭证文件被意外读取 | 凭证路径 hardcode，不接受用户任意路径输入；只读取已知格式 |
+| token 泄露到日志 | pino 日志中 redact `access_token`、`refresh_token` 字段 |
+| `input_mode: arg` 进程列表暴露 | 启动时 warn；配置引导标注风险；推荐 stdin |
+| Session JSON 明文存储 | 文件权限 `0o600`；`--no-store` 模式不写盘 |
+| refresh_token 写回失败 | catch + 日志记录，不阻塞主流程；下次使用时重新刷新 |
+| SQLite 注入 | 所有查询使用 prepared statement，无字符串拼接 |
+| 依赖供应链 | pnpm lockfile 锁定版本；CI 中运行 `npm audit` |
+
+---
+
+## 14. 性能预期
+
+| 场景 | 瓶颈 | 预估耗时 | 优化手段 |
+|------|------|---------|---------|
+| quick 模式 | 单次 API 调用 | 5-15s | API 模式减少 1-3s subprocess 开销 |
+| compare 模式（3 模型） | 最慢模型的响应时间 | 15-40s | 并行调用 |
+| debate 模式（3 模型） | Broadcast + Review + Synthesis 串行 | 45-120s | Broadcast 并行；Review 并行 |
+| 启动时间 | Node.js 启动 + 配置加载 + SQLite 连接 | ~200ms | tsup 单文件 bundle 减少模块解析 |
+| 凭证刷新 | OAuth token refresh HTTP 调用 | 0.5-2s | 提前 60s 判定过期，在主流程前异步刷新 |
+
+---
+
+## 附录 A: 依赖版本锁定
+
+```json
+{
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
+    "openai": "^5.8.0",
+    "@google/genai": "^1.40.0",
+    "commander": "^12.1.0",
+    "@inquirer/prompts": "^7.0.0",
+    "better-sqlite3": "^11.7.0",
+    "yaml": "^2.7.0",
+    "zod": "^3.24.0",
+    "jose": "^5.9.0",
+    "pino": "^9.6.0",
+    "ink": "^5.1.0",
+    "ink-spinner": "^5.0.0",
+    "react": "^18.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "tsup": "^8.3.0",
+    "vitest": "^2.1.0",
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/react": "^18.3.0",
+    "pino-pretty": "^13.0.0",
+    "ink-testing-library": "^4.0.0"
+  }
+}
+```
+
+## 附录 B: 环境变量一览
+
+| 变量 | 用途 | 优先级 |
+|------|------|--------|
+| `ANTHROPIC_API_KEY` | Anthropic API Key（替代 OAuth 凭证） | 最高 |
+| `OPENAI_API_KEY` | OpenAI API Key | 最高 |
+| `GEMINI_API_KEY` | Google Gemini API Key | 最高 |
+| `COPILOT_GITHUB_TOKEN` / `GH_TOKEN` | GitHub Copilot Token | 最高 |
+| `COUNCIL_HOME` | 自定义 Council 数据目录（默认 `~/.council`） | — |
+| `COUNCIL_LOG_LEVEL` | 日志级别（debug/info/warn/error） | — |
+| `NO_COLOR` | 禁用终端颜色（遵循 no-color.org 标准） | — |

@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Council runtime data (local only, not committed)
+.council/
+
+# Test coverage
+coverage/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+.claude/settings.local.json

@@ -1,0 +1,195 @@
+# Council Built-in Benchmark Suite
+# 用于 `council benchmark` 验证多模型辩论效果
+# 每个问题包含：预期关键点（coverage）和已知易错点（error detection）
+# Release gate 基线对比对象是 best-single-deep（同等精细 prompt 的最佳单模型）
+
+version: "1.0.0"
+
+questions:
+  # ============================================================
+  # architecture 类 — 目标：覆盖率 +20%, 错误率 -30%
+  # ============================================================
+
+  - id: bench_arch_001
+    question: "Redis 和 Memcached 的选型对比，我们的场景是电商平台的商品详情页缓存，日均 PV 5000 万，读写比约 100:1"
+    category: architecture
+    expected_points:
+      - "数据结构丰富度对比（Redis 支持 hash/list/set/zset，Memcached 仅 KV）"
+      - "持久化能力差异（Redis RDB/AOF vs Memcached 无持久化）"
+      - "集群方案对比（Redis Cluster vs Memcached 一致性哈希）"
+      - "内存管理策略差异（Redis jemalloc vs Memcached slab）"
+      - "针对高读写比场景的具体建议"
+      - "提及缓存穿透/击穿/雪崩防护策略"
+    known_traps:
+      - type: factual_error
+        description: "错误声称 Memcached 支持数据持久化"
+      - type: factual_error
+        description: "错误声称 Redis Cluster 不支持 pipeline"
+      - type: critical_omission
+        description: "未提及热点 key 问题及解决方案"
+
+  - id: bench_arch_002
+    question: "为一个日活 50 万的社交应用设计消息系统架构，需要支持单聊、群聊（最大 500 人）和消息已读回执"
+    category: architecture
+    expected_points:
+      - "消息存储模型选择（写扩散 vs 读扩散 vs 混合）"
+      - "消息投递的可靠性保证机制"
+      - "群聊场景的扩散策略（对大群的特殊处理）"
+      - "已读回执的实现方案及其对性能的影响"
+      - "长连接方案选型（WebSocket / SSE / 长轮询）"
+      - "消息序号/排序方案（分布式 ID 或逻辑时钟）"
+    known_traps:
+      - type: unsafe_recommendation
+        description: "推荐全量写扩散但未分析 500 人群的写放大问题"
+      - type: critical_omission
+        description: "未考虑弱网/离线场景下的消息同步"
+      - type: misleading_claim
+        description: "声称已读回执可以完全实时而不讨论性能 trade-off"
+
+  - id: bench_arch_003
+    question: "现有单体 Java 应用需要拆分微服务，当前团队 12 人，核心模块包括用户、订单、支付、库存、物流。请给出拆分策略和优先级"
+    category: architecture
+    expected_points:
+      - "拆分原则：按业务域拆分而非技术层拆分"
+      - "拆分优先级建议（基于变更频率、团队边界、故障域隔离需求）"
+      - "数据拆分策略（共享数据库 → 独立数据库的迁移路径）"
+      - "服务间通信方案（同步 RPC vs 异步消息）"
+      - "分布式事务处理（特别是订单-支付-库存的一致性）"
+      - "提醒微服务带来的额外复杂度和运维成本"
+    known_traps:
+      - type: unsafe_recommendation
+        description: "建议一次性全量拆分而非渐进式"
+      - type: critical_omission
+        description: "未讨论 12 人团队是否有能力运维微服务架构"
+      - type: misleading_claim
+        description: "声称微服务一定比单体好而不讨论适用条件"
+
+  # ============================================================
+  # code 类 — 目标：覆盖率 +10%, 错误率 -20%
+  # ============================================================
+
+  - id: bench_code_001
+    question: "实现一个线程安全的 LRU Cache，支持 O(1) 的 get 和 put 操作，使用 Java 或 Go 实现"
+    category: code
+    expected_points:
+      - "HashMap + 双向链表的经典实现方案"
+      - "线程安全的并发控制方案（全局锁 / 分段锁 / CAS）"
+      - "时间复杂度分析（get O(1)、put O(1) 的证明）"
+      - "边界条件处理（容量为 0、重复 key、并发读写）"
+      - "LRU 淘汰策略的正确实现"
+    known_traps:
+      - type: factual_error
+        description: "误称 Java HashMap 或 Go map 是线程安全的"
+      - type: critical_omission
+        description: "遗漏死锁或饥饿场景分析"
+      - type: unsafe_recommendation
+        description: "推荐无锁方案但未说明 ABA 问题或 memory ordering"
+
+  - id: bench_code_002
+    question: "用 Python 实现一个支持通配符（* 和 ?）的文件路径匹配器，* 匹配任意长度字符串，? 匹配单个字符"
+    category: code
+    expected_points:
+      - "动态规划或回溯法的正确实现"
+      - "时间复杂度和空间复杂度分析"
+      - "边界情况：空字符串、全 * 模式、连续 * 合并"
+      - "正确处理 * 和 ? 的语义差异"
+      - "提供测试用例覆盖关键边界"
+    known_traps:
+      - type: factual_error
+        description: "DP 转移方程错误（特别是 * 匹配空串的处理）"
+      - type: critical_omission
+        description: "未处理连续多个 * 的合并优化"
+
+  - id: bench_code_003
+    question: "审查以下 Node.js Express 代码的安全问题：\napp.get('/user', (req, res) => {\n  const query = `SELECT * FROM users WHERE name = '${req.query.name}'`;\n  db.query(query).then(rows => res.json(rows));\n});"
+    category: code
+    expected_points:
+      - "识别 SQL 注入漏洞"
+      - "给出参数化查询的修复方案"
+      - "提及缺少输入验证/白名单"
+      - "建议添加 rate limiting 防止滥用"
+      - "指出错误处理缺失（.catch 或 try-catch）"
+    known_traps:
+      - type: critical_omission
+        description: "未识别出 SQL 注入风险"
+      - type: misleading_claim
+        description: "建议用字符串转义替代参数化查询"
+
+  # ============================================================
+  # security 类 — 目标：覆盖率 +25%, 错误率 -40%
+  # ============================================================
+
+  - id: bench_sec_001
+    question: "评审一个 JWT 认证方案：access token 有效期 24 小时，存储在 localStorage，refresh token 有效期 30 天，通过 HTTP-only cookie 传递"
+    category: security
+    expected_points:
+      - "localStorage 存储 access token 的 XSS 风险"
+      - "access token 有效期过长（建议 15-60 分钟）"
+      - "refresh token 通过 cookie 的 CSRF 防护需求"
+      - "token 吊销机制（黑名单或短有效期 + 刷新）"
+      - "建议 access token 也用 HTTP-only cookie 或 BFF 模式"
+      - "HTTPS 强制和 Secure flag 要求"
+    known_traps:
+      - type: unsafe_recommendation
+        description: "认为 localStorage 存储 JWT 是安全的"
+      - type: critical_omission
+        description: "未提及 token 吊销/失效机制"
+      - type: factual_error
+        description: "错误声称 HTTP-only cookie 能防止 CSRF"
+
+  - id: bench_sec_002
+    question: "为一个处理用户上传文件的 API 设计安全方案，文件类型包括图片（JPG/PNG）和 PDF，最大 10MB"
+    category: security
+    expected_points:
+      - "文件类型验证：不仅检查扩展名，还需检查 magic bytes"
+      - "文件大小限制的服务端强制校验"
+      - "存储位置：不在 web 可直接访问的目录、使用随机文件名"
+      - "图片处理：re-encode 以消除恶意元数据或嵌入脚本"
+      - "PDF 安全：扫描或沙箱处理"
+      - "防止路径穿越攻击（../../ 等）"
+      - "上传频率限制"
+    known_traps:
+      - type: unsafe_recommendation
+        description: "仅通过 Content-Type header 或文件扩展名判断文件类型"
+      - type: critical_omission
+        description: "未提及路径穿越防护"
+      - type: critical_omission
+        description: "未考虑 zip bomb 或解压炸弹场景"
+
+  # ============================================================
+  # general 类 — 目标：覆盖率 +15%, 错误率 -25%
+  # ============================================================
+
+  - id: bench_gen_001
+    question: "对比分析 GraphQL 和 REST API 的优劣势，以及各自最适合的使用场景"
+    category: general
+    expected_points:
+      - "查询灵活性对比（GraphQL 按需取字段 vs REST 固定端点）"
+      - "over-fetching / under-fetching 问题"
+      - "缓存策略差异（REST HTTP 缓存友好 vs GraphQL 缓存复杂）"
+      - "类型系统和文档自动生成"
+      - "N+1 查询问题（GraphQL resolver）"
+      - "适用场景建议（而非简单说谁更好）"
+    known_traps:
+      - type: misleading_claim
+        description: "声称 GraphQL 在所有场景下都优于 REST"
+      - type: critical_omission
+        description: "未提及 GraphQL 的缓存困难和查询复杂度攻击"
+
+  - id: bench_gen_002
+    question: "解释 CAP 定理，并分析 MongoDB、Cassandra、PostgreSQL 在 CAP 三角中的定位"
+    category: general
+    expected_points:
+      - "CAP 定理的正确表述（网络分区时只能选 CP 或 AP）"
+      - "说明 CAP 是在分区发生时的选择，非日常运行状态"
+      - "MongoDB 的定位分析（默认 CP，可配置为 AP）"
+      - "Cassandra 的定位分析（AP，通过 tunable consistency 可调）"
+      - "PostgreSQL 的定位分析（单机 CA，主从模式 CP）"
+      - "提及 PACELC 或实际系统中 CAP 的细微差别"
+    known_traps:
+      - type: factual_error
+        description: "声称某个数据库同时满足 CAP 三者"
+      - type: factual_error
+        description: "混淆 CP 和 AP，错误归类数据库"
+      - type: misleading_claim
+        description: "将 CAP 简单化为非此即彼而不讨论可调一致性"
