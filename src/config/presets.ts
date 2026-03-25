@@ -92,6 +92,29 @@ export const MODEL_PRESETS: ModelPreset[] = [
   },
 ];
 
+/** Discover models from environment variables (Phase 0 fallback). */
+export function discoverModelsFromEnv(): ModelConfig[] {
+  const models: ModelConfig[] = [];
+  const envModels: Array<{ env: string; name: string; provider: ModelConfig['provider']; model: string; priority: number }> = [
+    { env: 'ANTHROPIC_API_KEY', name: 'claude-sonnet', provider: 'anthropic', model: 'claude-sonnet-4-20250514', priority: 100 },
+    { env: 'OPENAI_API_KEY', name: 'gpt-4o', provider: 'openai', model: 'gpt-4o', priority: 90 },
+    { env: 'GEMINI_API_KEY', name: 'gemini-pro', provider: 'google', model: 'gemini-2.0-flash', priority: 80 },
+  ];
+
+  for (const em of envModels) {
+    if (process.env[em.env]) {
+      models.push({
+        name: em.name, invocation: 'api', provider: em.provider, model: em.model,
+        timeout_seconds: 120, capabilities: ['general', 'code', 'analysis'],
+        priority: em.priority, max_concurrent: 1, resource_weight: 1,
+        enabled: true, streaming: true,
+      });
+    }
+  }
+
+  return models;
+}
+
 export function presetToModelConfig(preset: ModelPreset): ModelConfig {
   return {
     name: preset.name,

@@ -6,6 +6,7 @@ import { CliAdapter } from '../providers/cli-adapter.js';
 import { CredentialManager } from '../providers/credentials/discovery.js';
 import { PlainRenderer } from '../ui/plain-renderer.js';
 import { ConfigLoader } from '../config/loader.js';
+import { discoverModelsFromEnv } from '../config/presets.js';
 import { PATHS } from '../config/paths.js';
 import { SessionStore } from '../storage/session-store.js';
 import type { DebateMode, RunOptions } from '../types/session.js';
@@ -24,60 +25,6 @@ interface CouncilOptions {
   follow?: string;
   copy?: boolean;
   force?: boolean;
-}
-
-function getHardcodedModels(): ModelConfig[] {
-  const models: ModelConfig[] = [];
-
-  if (process.env['ANTHROPIC_API_KEY']) {
-    models.push({
-      name: 'claude-sonnet',
-      invocation: 'api',
-      provider: 'anthropic',
-      model: 'claude-sonnet-4-20250514',
-      timeout_seconds: 120,
-      capabilities: ['general', 'code', 'analysis'],
-      priority: 100,
-      max_concurrent: 1,
-      resource_weight: 1,
-      enabled: true,
-      streaming: true,
-    });
-  }
-
-  if (process.env['OPENAI_API_KEY']) {
-    models.push({
-      name: 'gpt-4o',
-      invocation: 'api',
-      provider: 'openai',
-      model: 'gpt-4o',
-      timeout_seconds: 120,
-      capabilities: ['general', 'code', 'analysis'],
-      priority: 90,
-      max_concurrent: 1,
-      resource_weight: 1,
-      enabled: true,
-      streaming: true,
-    });
-  }
-
-  if (process.env['GEMINI_API_KEY']) {
-    models.push({
-      name: 'gemini-pro',
-      invocation: 'api',
-      provider: 'google',
-      model: 'gemini-2.0-flash',
-      timeout_seconds: 120,
-      capabilities: ['general', 'code', 'analysis'],
-      priority: 80,
-      max_concurrent: 1,
-      resource_weight: 1,
-      enabled: true,
-      streaming: true,
-    });
-  }
-
-  return models;
 }
 
 export async function runCouncil(question: string | undefined, options: CouncilOptions): Promise<void> {
@@ -101,10 +48,10 @@ export async function runCouncil(question: string | undefined, options: CouncilO
       models = loader.loadAllModels();
       if (!chairman) chairman = config.general.default_chairman;
     } catch {
-      models = getHardcodedModels();
+      models = discoverModelsFromEnv();
     }
   } else {
-    models = getHardcodedModels();
+    models = discoverModelsFromEnv();
   }
 
   if (models.length === 0) {
