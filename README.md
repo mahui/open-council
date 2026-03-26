@@ -234,7 +234,7 @@ max_concurrent: 3
 
 ## 技术栈
 
-TypeScript · Node.js ≥ 20 · better-sqlite3 · @anthropic-ai/sdk · openai · @google/genai · commander · ink · zod
+TypeScript · Node.js ≥ 20 · better-sqlite3 · @mariozechner/pi-ai · commander · ink · zod
 
 ## 项目文档
 

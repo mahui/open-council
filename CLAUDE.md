@@ -5,8 +5,8 @@
 **以下文档是开发时的强制约束，所有代码变更必须符合这些文档的要求：**
 
 1. **`CONTRIBUTING.md`** — 开发规范。所有规则以 ID 编号（ARCH-01、SEC-03 等），**规则已内嵌到各 agent 定义中，无需每次任务重复阅读**。
-2. **`docs/PRD.md`** (v6.3) — 产品需求文档。功能设计的权威来源。
-3. **`docs/TDD.md`** (v1.0) — 技术设计文档。架构、接口、数据结构的权威来源。
+2. **`docs/PRD.md`** (v7.0) — 产品需求文档。功能设计的权威来源。
+3. **`docs/TDD.md`** (v2.0) — 技术设计文档。架构、接口、数据结构的权威来源。
 
 **文档查阅策略**：agent 的关键设计约束和规则已内嵌在各自的 `.claude/agents/*.md` 定义中。开发时**不需要全量阅读 PRD/TDD**，仅在对具体细节有疑问时用 Grep 定向搜索对应章节。
 
@@ -186,7 +186,7 @@ Local AI Council 是一个基于 TypeScript/Node.js 的多 Agent 辩论编排系
 - pnpm 包管理
 - commander (CLI) + @inquirer/prompts (交互)
 - better-sqlite3 (持久化, 同步 API, WAL 模式)
-- @anthropic-ai/sdk + openai + @google/genai (Provider SDK)
+- @mariozechner/pi-ai (统一 LLM 接口，内置 20+ Provider 适配 + OAuth 鉴权)
 - ink (TUI, Phase 5)
 - zod (Schema 校验)
 - vitest (测试)
