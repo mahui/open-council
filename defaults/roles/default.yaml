@@ -1,6 +1,7 @@
 # Default Role Set — 通用辩论场景
 # 适用于大多数问题类型：技术分析、方案对比、通用问答
 # 三个角色从不同维度审视问题：严谨性、实用性、创新性
+# assign_to 匹配模型名、模型ID或 provider 名
 
 version: "1.0.0"
 
@@ -21,7 +22,7 @@ roles:
       - 结论先行，再展开论据
       - 用具体数据和案例支撑观点，避免空泛的定性描述
       - 对不确定的部分明确标注置信度
-    assign_to: [claude-opus, claude-sonnet]
+    assign_to: [anthropic, claude]
 
   engineer:
     description: "注重实践落地的工程师"
@@ -40,7 +41,7 @@ roles:
       - 如果推荐某个方案，说明具体怎么做、用什么工具、大约多少工作量
       - 指出方案中"看起来简单但实际坑很多"的部分
       - 代码示例优先于文字描述
-    assign_to: [codex-o4mini, openai-o4mini]
+    assign_to: [google, gemini]
 
   innovator:
     description: "善于跳出框架思考的创新者"
@@ -58,4 +59,4 @@ roles:
       - 在给出主流答案的基础上，额外提供 1-2 个非常规视角
       - 对非常规方案，明确标注"这是探索性建议"及其前提条件
       - 引用具体的技术或案例来支撑非常规观点，而非空谈
-    assign_to: [gemini-pro]
+    assign_to: [openai, codex, gpt]
