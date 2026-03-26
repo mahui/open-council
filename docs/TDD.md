@@ -208,18 +208,23 @@ export interface InvocationResult {
   timed_out: boolean;
 }
 
+/** pi-ai 的 ThinkingLevel 类型 */
+export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+
 export interface InvocationAdapter {
   /**
    * 调用模型，返回完整响应。
    * 编排层通过此接口与所有模型交互，无需关心 CLI/API 差异。
+   * @param stageEffort 阶段级推理深度覆盖（与模型配置的 reasoning_effort 取较高值）
    */
-  invoke(config: ModelConfig, prompt: string): Promise<InvocationResult>;
+  invoke(config: ModelConfig, prompt: string, stageEffort?: ThinkingLevel): Promise<InvocationResult>;
 
   /**
    * 流式调用模型，通过 AsyncGenerator 逐 chunk 返回。
    * 用于 TUI 实时渲染。CLI 模式逐行读取 stdout，API 模式解析 SSE。
+   * @param stageEffort 阶段级推理深度覆盖
    */
-  stream(config: ModelConfig, prompt: string): AsyncGenerator<string, InvocationResult>;
+  stream(config: ModelConfig, prompt: string, stageEffort?: ThinkingLevel): AsyncGenerator<string, InvocationResult>;
 
   /**
    * 健康检查。CLI 模式检查 binary 存在 + version；API 模式检查凭证有效性。
@@ -334,7 +339,12 @@ Council 的 API 模式通过 `@mariozechner/pi-ai` 统一接口调用所有 Prov
 ```typescript
 // src/providers/api-adapter.ts
 
-import { getModel, stream, complete, type Context } from '@mariozechner/pi-ai';
+import {
+  getModel, getModels, getProviders,
+  streamSimple, completeSimple,
+  supportsXhigh,
+  type Context, type SimpleStreamOptions, type ThinkingLevel,
+} from '@mariozechner/pi-ai';
 import { getEnvApiKey } from '@mariozechner/pi-ai/env-api-keys';
 import { getOAuthApiKey } from '@mariozechner/pi-ai/oauth';
 
@@ -344,9 +354,12 @@ export class ApiAdapter implements InvocationAdapter {
    * - Provider SDK 选择（Anthropic/OpenAI/Google/Mistral/Bedrock...）
    * - 凭证获取（环境变量 > OAuth token > ADC）
    * - Token 过期自动刷新
+   * - 推理深度（reasoning effort）跨 Provider 统一抽象
    * - 流式/非流式输出
    */
-  async invoke(config: ModelConfig, prompt: string): Promise<InvocationResult> {
+  async invoke(
+    config: ModelConfig, prompt: string, stageEffort?: ThinkingLevel,
+  ): Promise<InvocationResult> {
     const model = getModel(config.provider!, config.model!);
     const apiKey = await this.resolveApiKey(config.provider!);
     const start = Date.now();
@@ -356,8 +369,18 @@ export class ApiAdapter implements InvocationAdapter {
       messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
     };
 
+    // 解析 reasoning effort：stage_effort 与 model config 取较高值
+    const reasoning = this.resolveEffort(config.reasoning_effort, stageEffort, model);
+
+    const options: SimpleStreamOptions = {
+      apiKey,
+      reasoning,
+      temperature: config.temperature,
+      maxTokens: config.max_tokens,
+    };
+
     try {
-      const result = await complete(model, context, [], { apiKey });
+      const result = await completeSimple(model, context, [], options);
 
       return {
         response: result.content
@@ -380,10 +403,11 @@ export class ApiAdapter implements InvocationAdapter {
   }
 
   /**
-   * 流式调用，通过 pi-ai 的 stream() 返回事件流。
+   * 流式调用，通过 pi-ai 的 streamSimple() 返回事件流。
+   * 自动应用 reasoning effort 配置。
    */
   async *stream(
-    config: ModelConfig, prompt: string,
+    config: ModelConfig, prompt: string, stageEffort?: ThinkingLevel,
   ): AsyncGenerator<string, InvocationResult> {
     const model = getModel(config.provider!, config.model!);
     const apiKey = await this.resolveApiKey(config.provider!);
@@ -394,7 +418,14 @@ export class ApiAdapter implements InvocationAdapter {
       messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
     };
 
-    const eventStream = stream(model, context, [], { apiKey });
+    const reasoning = this.resolveEffort(config.reasoning_effort, stageEffort, model);
+
+    const eventStream = streamSimple(model, context, [], {
+      apiKey,
+      reasoning,
+      temperature: config.temperature,
+      maxTokens: config.max_tokens,
+    });
     let fullText = '';
     let usage: { inputTokens: number; outputTokens: number } | undefined;
 
@@ -419,6 +450,30 @@ export class ApiAdapter implements InvocationAdapter {
       } : undefined,
       timed_out: false,
     };
+  }
+
+  /**
+   * 解析最终使用的 reasoning effort。
+   * 取 modelEffort 和 stageEffort 中较高的那个。
+   * xhigh 不支持时自动降级为 high。
+   */
+  private resolveEffort(
+    modelEffort?: string,
+    stageEffort?: ThinkingLevel,
+    model?: any,
+  ): ThinkingLevel | undefined {
+    const levels: ThinkingLevel[] = ['minimal', 'low', 'medium', 'high', 'xhigh'];
+    const modelIdx = modelEffort ? levels.indexOf(modelEffort as ThinkingLevel) : -1;
+    const stageIdx = stageEffort ? levels.indexOf(stageEffort) : -1;
+    const maxIdx = Math.max(modelIdx, stageIdx);
+    if (maxIdx < 0) return undefined;
+
+    let resolved = levels[maxIdx];
+    // xhigh 不支持时降级为 high
+    if (resolved === 'xhigh' && model && !supportsXhigh(model)) {
+      resolved = 'high';
+    }
+    return resolved;
   }
 
   /**
@@ -461,7 +516,7 @@ export class ApiAdapter implements InvocationAdapter {
 ```typescript
 // src/providers/pi-ai-bridge.ts
 
-import { getProviders, getModels, getModel } from '@mariozechner/pi-ai';
+import { getProviders, getModels, getModel, supportsXhigh } from '@mariozechner/pi-ai';
 import { getEnvApiKey } from '@mariozechner/pi-ai/env-api-keys';
 import {
   getOAuthProviders,
@@ -500,6 +555,10 @@ export async function discoverApiModels(): Promise<DiscoveredProvider[]> {
         models: models.map(m => ({
           id: m.id,
           name: m.name ?? m.id,
+          contextWindow: m.contextWindow,
+          maxTokens: m.maxTokens,
+          reasoning: m.reasoning ?? false,
+          supportsXhigh: supportsXhigh(m),
         })),
       });
     }
@@ -508,10 +567,19 @@ export async function discoverApiModels(): Promise<DiscoveredProvider[]> {
   return results;
 }
 
+interface DiscoveredModel {
+  id: string;
+  name: string;
+  contextWindow?: number;     // pi-ai 动态提供
+  maxTokens?: number;         // pi-ai 动态提供
+  reasoning: boolean;         // 模型是否支持推理/思考
+  supportsXhigh: boolean;     // 是否支持 xhigh 级别思考
+}
+
 interface DiscoveredProvider {
   provider: string;
   authMethod: 'env' | 'oauth';
-  models: Array<{ id: string; name: string }>;
+  models: DiscoveredModel[];
 }
 ```
 
@@ -1125,6 +1193,11 @@ export const ModelConfigSchema = z.object({
     timeout_seconds: z.number().int().default(10),
   }).optional(),
 
+  // 推理与生成参数
+  reasoning_effort: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']).optional(),
+  temperature: z.number().min(0).max(2).optional(),
+  max_tokens: z.number().int().positive().optional(),
+
   // API 专用
   api_credential_path: z.string().optional(),
   api_base_url: z.string().url().optional(),
@@ -1158,6 +1231,11 @@ export const CouncilConfigSchema = z.object({
     compression_threshold_ratio: z.number().min(0).max(1).default(0.6),
     devil_advocate: z.enum(['auto', 'always', 'never']).default('auto'),
     high_risk_keywords: z.array(z.string()).default([]),
+    stage_effort: z.object({
+      broadcast: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']).default('medium'),
+      review: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']).default('low'),
+      synthesis: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']).default('high'),
+    }).optional(),
   }),
 
   storage: z.object({

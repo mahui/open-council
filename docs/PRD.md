@@ -932,7 +932,7 @@ Council 通过 pi-ai 的 `OAuthProviderInterface` 调用 `login()` 方法触发�
   让我们花 2 分钟完成初始配置
 ══════════════════════════════════════════════════════
 
-Step 1/5 — 扫描本地 AI 工具与凭证
+Step 1/6 — 扫描本地 AI 工具与凭证
 ──────────────────────────────────────────────────────
   正在扫描已安装的 CLI 工具...
 
@@ -940,30 +940,32 @@ Step 1/5 — 扫描本地 AI 工具与凭证
   ✓ gemini    Gemini CLI        /usr/local/bin/gemini
   ✗ codex     Codex CLI         未找到
 
-  正在扫描本地 OAuth 凭证...
+  正在通过 pi-ai 扫描可用 API Provider...
 
-  ✓ ~/.codex/auth.json                  OpenAI 凭证有效 (account: user@example.com)
-  ✓ ~/.gemini/oauth_creds.json          Google 凭证有效 (expires: 2026-03-26)
-  ✗ ~/.config/gcloud/application_default_credentials.json   未找到
+  ✓ anthropic       Claude Pro/Max OAuth 凭证有效
+  ✓ openai          Codex OAuth 凭证有效 (via ~/.codex/auth.json)
+  ✓ google          Gemini OAuth 凭证有效
+  ✗ github-copilot  未发现凭证
+  ✗ mistral         未发现 MISTRAL_API_KEY
 
-  检测到 2 个 CLI 工具 + 1 个额外 API 凭证 (OpenAI) ✓
-  Codex CLI 未安装，但发现本地 OpenAI 凭证 → 可通过 API 模式接入 ✓
+  检测到 2 个 CLI 工具 + 3 个 API Provider ✓
   (即使只有 1 个来源也可以使用 — 同一模型可扮演多个角色参与辩论)
 
-Step 2/5 — 选择模型与调用模式
+Step 2/6 — 选择模型与调用模式
 ──────────────────────────────────────────────────────
-  每个来源支持多个模型，请选择要启用的:
+  每个 Provider 的可用模型列表由 pi-ai 动态获取:
 
-  Claude Code (CLI 模式):
+  Anthropic (CLI: claude / API: OAuth):
   > [✓] claude-sonnet-4-20250514     均衡, 速度快 (推荐)
     [✓] claude-opus-4-20250514       最强, 适合 Chairman (推荐)
     [ ] claude-haiku-4-5-20251001    最快, 能力较弱
 
-  OpenAI (API 模式 — 复用 ~/.codex/auth.json 凭证):
+  OpenAI (API 模式 — 复用 Codex OAuth 凭证):
   > [✓] o4-mini                      均衡, 代码能力强 (推荐)
     [ ] o3                           最强, 较慢
+    [ ] gpt-4.1                      通用
 
-  Gemini CLI (CLI 模式):
+  Google (CLI: gemini / API: OAuth):
   > [✓] gemini-2.5-pro              综合能力强 (推荐)
     [ ] gemini-2.5-flash             快速, 适合简单问题
 
@@ -971,26 +973,49 @@ Step 2/5 — 选择模型与调用模式
 
   已选择 3 个模型: claude-opus, claude-sonnet, gemini-pro  ✓
 
-Step 3/5 — 验证模型可用性
+Step 3/6 — 验证模型可用性
 ──────────────────────────────────────────────────────
   正在验证各模型是否正常工作...
 
   ✓ claude --version        → Claude Code v1.2.3
   ✓ gemini --version        → Gemini CLI v0.5.1
+  ✓ anthropic API           → 凭证有效
+  ✓ openai API              → 凭证有效
 
   全部验证通过 ✓
 
-Step 4/5 — 选择默认主持人 (Chairman)
+Step 4/6 — 配置推理深度 (Reasoning Effort)
+──────────────────────────────────────────────────────
+  推理深度控制模型的"思考力度"。推荐使用默认值:
+
+  claude-opus:
+  > ● high     深度推理, 适合 Chairman 综合 (推荐)
+    ○ medium   均衡
+    ○ xhigh    最深度推理 (仅部分模型支持)
+
+  claude-sonnet:
+  > ● medium   均衡推理 (推荐)
+    ○ low      轻度推理, 更快
+    ○ high     深度推理
+
+  gemini-pro:
+  > ● medium   均衡推理 (推荐)
+    ○ low      轻度推理, 更快
+    ○ high     深度推理
+
+  [↑↓ 选择, Enter 确认]   [s] 全部使用推荐值
+
+Step 5/6 — 选择默认主持人 (Chairman)
 ──────────────────────────────────────────────────────
   Chairman 负责最终综合各方观点，建议选择综合能力最强的模型。
 
-  > ● claude-opus     (推荐 — 最强综合能力)
+  > ● claude-opus     (推荐 — 最强综合能力, reasoning: high)
     ○ claude-sonnet
     ○ gemini-pro
 
   [↑↓ 选择, Enter 确认]
 
-Step 5/5 — 选择默认辩论模式
+Step 6/6 — 选择默认辩论模式
 ──────────────────────────────────────────────────────
   > ● auto     自动根据问题复杂度选择 (推荐)
     ○ quick    单模型快速回答
@@ -1234,15 +1259,17 @@ council models add --id codex-o4mini --binary codex --model o4-mini --args "--qu
 
 系统内置常见工具的预设配置，引导过程中自动匹配，减少用户输入。每个 Provider 同时支持 CLI 和 API 两种调用模式：
 
-**CLI 模式预设：**
+**CLI 模式预设（仅定义 CLI 工具的调用参数，不硬编码模型列表）：**
 
-| 工具 | binary | 可选模型 | 模型切换参数 | 预设 input_mode |
+| 工具 | binary | 模型来源 | 模型切换参数 | 预设 input_mode |
 |------|--------|---------|-------------|----------------|
-| Claude Code | `claude` | claude-sonnet-4-20250514, claude-opus-4-20250514, claude-haiku-4-5-20251001 等 | `--model {model}` | stdin |
-| Codex CLI | `codex` | o4-mini, o3, codex-mini 等 | `--model {model}` | arg |
-| Gemini CLI | `gemini` | gemini-2.5-pro, gemini-2.5-flash 等 | `--model {model}` | stdin |
-| Ollama | `ollama` | 本地已拉取的模型（qwen2.5, llama3, deepseek 等） | `run {model}` | stdin |
+| Claude Code | `claude` | pi-ai `getModels('anthropic')` 动态获取 | `--model {model}` | stdin |
+| Codex CLI | `codex` | pi-ai `getModels('openai')` 动态获取 | `--model {model}` | arg |
+| Gemini CLI | `gemini` | pi-ai `getModels('google')` 动态获取 | `--model {model}` | stdin |
+| Ollama | `ollama` | `ollama list` 动态获取本地已拉取的模型 | `run {model}` | stdin |
 | Aider | `aider` | 取决于配置的 provider | `--model {model}` | arg |
+
+> **动态模型列表**: CLI 模式预设只定义工具的调用方式（binary、args、input_mode），**可用模型列表不硬编码在预设中**，而是通过 pi-ai 的 `getModels(provider)` 在 Setup Wizard 和 `models add` 时动态获取。这样当 Provider 发布新模型时，用户无需更新 Council 即可使用。
 
 **API 模式预设（统一由 pi-ai 管理，模型列表通过 `getModels(provider)` 自动发现）：**
 
@@ -1298,6 +1325,13 @@ council models add --id codex-o4mini --binary codex --model o4-mini --args "--qu
 | max_concurrent | int | ✓ | Step 5 | 默认 1。该模型的最大并发调用数 |
 | resource_weight | int | ✓ | Step 5 | 默认 1。资源权重（本地模型自动设为 3-5，云端设为 1） |
 | enabled | bool | ✓ | 默认 true | 设为 false 可临时禁用而不删配置 |
+| reasoning_effort | enum | — | Step 6 | `minimal` \| `low` \| `medium` \| `high` \| `xhigh` — 推理深度控制（见 4.4.2）。未设置时由模型默认行为决定 |
+
+> **`reasoning_effort` 说明**: 该字段映射到 pi-ai 的 `ThinkingLevel`，控制模型的"思考深度"。不同 Provider 的底层实现不同（OpenAI 的 `reasoningEffort`、Anthropic 的 `thinkingEnabled` + token 预算、Google 的 `thinking` 配置），但 pi-ai 统一抽象为 5 个档位。Council 通过此字段让用户按场景灵活控制：
+> - Chairman（综合者）建议 `high` 或 `xhigh` — 需要深度分析和综合
+> - Review 阶段建议 `medium` — 均衡的评审深度
+> - Quick 模式可用 `low` — 快速响应
+> - `xhigh` 仅部分模型支持（pi-ai 的 `supportsXhigh(model)` 可检测），不支持时自动降级为 `high`
 
 **CLI 模式专用字段**（`invocation: cli` 或 `auto` 时使用）：
 
@@ -1320,6 +1354,8 @@ council models add --id codex-o4mini --binary codex --model o4-mini --args "--qu
 | api_base_url | string | — | 自定义 API 端点（用于代理、企业版、或 Azure OpenAI 等场景） |
 | api_key_env | string | — | 环境变量名（如 `ANTHROPIC_API_KEY`），优先级高于凭证文件。适用于用户持有独立 API Key 的场景 |
 | streaming | bool | — | 是否使用流式输出，默认 `true` |
+| temperature | float | — | 模型温度参数（0.0-2.0），未设置时使用模型默认值 |
+| max_tokens | int | — | 最大输出 token 数，未设置时使用模型默认值 |
 
 **`health_check` 子字段定义**（CLI 模式）：
 
@@ -1343,7 +1379,34 @@ council models add --id codex-o4mini --binary codex --model o4-mini --args "--qu
 - `priority`: 首次添加时根据预设库推荐（同工具下旗舰模型优先级更高）；后续可通过 `council setup` 调整或由动态权重自动优化
 - `resource_weight`: 根据"云端/本地"选择自动设定（云端=1, 本地=5）
 
-#### 4.4.2 配置示例
+#### 4.4.2 推理深度（Reasoning Effort）配置
+
+`reasoning_effort` 通过 pi-ai 的 `SimpleStreamOptions.reasoning` 透传给各 Provider，控制模型的"思考深度"：
+
+| reasoning_effort | 适用场景 | 效果 |
+|-----------------|---------|------|
+| `minimal` | 快速分类、简单格式化 | 最低 token 消耗，几乎无思考 |
+| `low` | quick 模式、简单问答 | 轻度推理，响应快 |
+| `medium`（默认） | compare 模式、常规 Review | 均衡的推理深度 |
+| `high` | debate 模式、Chairman 综合 | 深度推理，适合复杂分析 |
+| `xhigh` | 高价值决策、数学证明 | 最深度推理，仅部分模型支持 |
+
+**阶段级 Effort Override**: 除了模型配置中的全局 `reasoning_effort`，编排器还支持按辩论阶段动态覆盖：
+
+```yaml
+# council.yaml
+general:
+  stage_effort:
+    broadcast: medium        # 各 Agent 回答：均衡
+    review: low              # 互评：不需要太深的推理
+    synthesis: high          # Chairman 综合：需要深度分析
+```
+
+当 `stage_effort` 与模型配置中的 `reasoning_effort` 同时存在时，取**较高**的那个（不会降低模型自身配置的推理深度）。
+
+**动态模型信息**: 模型的 `contextWindow`、`maxTokens`、是否支持 reasoning、是否支持 `xhigh` 等元信息通过 pi-ai 的 `getModel()` 返回的 `Model` 对象动态获取，Council 不硬编码这些值。编排器在构建 prompt 时参考 `contextWindow` 计算是否需要压缩。
+
+#### 4.4.3 配置示例
 
 引导流程自动生成的 YAML 文件示例。注意同一 Provider 可以注册多个模型配置，且 CLI 和 API 模式可混用：
 
@@ -1369,6 +1432,7 @@ capabilities: [general, code, analysis, chinese, architecture]
 priority: 10              # 旗舰模型，最高优先级，推荐作为 Chairman
 max_concurrent: 1
 resource_weight: 1
+reasoning_effort: high    # 旗舰模型用于综合，深度推理
 enabled: true
 ```
 
@@ -1392,6 +1456,7 @@ capabilities: [general, code, analysis, chinese]
 priority: 20              # 均衡模型，速度更快
 max_concurrent: 2
 resource_weight: 1
+reasoning_effort: medium  # 均衡模型，中等推理深度
 enabled: true
 ```
 
@@ -1454,6 +1519,7 @@ capabilities: [general, code, analysis, chinese, architecture]
 priority: 10
 max_concurrent: 3
 resource_weight: 1
+reasoning_effort: high          # 综合者角色，深度推理
 enabled: true
 ```
 
