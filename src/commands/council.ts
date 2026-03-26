@@ -9,6 +9,7 @@ import { ConfigLoader } from '../config/loader.js';
 import { discoverModelsFromEnv } from '../config/presets.js';
 import { PATHS } from '../config/paths.js';
 import { SessionStore } from '../storage/session-store.js';
+import { hasViewableContent, startViewer } from '../ui/viewer.js';
 import type { DebateMode, RunOptions } from '../types/session.js';
 
 interface CouncilOptions {
@@ -48,10 +49,10 @@ export async function runCouncil(question: string | undefined, options: CouncilO
       models = loader.loadAllModels();
       if (!chairman) chairman = config.general.default_chairman;
     } catch {
-      models = discoverModelsFromEnv();
+      models = discoverModelsFromEnv(credentialManager);
     }
   } else {
-    models = discoverModelsFromEnv();
+    models = discoverModelsFromEnv(credentialManager);
   }
 
   if (models.length === 0) {
@@ -63,8 +64,9 @@ export async function runCouncil(question: string | undefined, options: CouncilO
     process.exit(1);
   }
 
+  const modelList = models.map(m => `${m.name}${m.invocation === 'cli' ? ' (CLI)' : ''}`).join(', ');
   process.stderr.write(
-    `Council: ${models.length} model(s) available [${models.map(m => m.name).join(', ')}]\n\n`,
+    `\x1b[1m🏛️  Council\x1b[0m \x1b[2m${models.length} model(s): ${modelList}\x1b[0m\n`,
   );
 
   const apiAdapter = new ApiAdapter(credentialManager);
@@ -108,5 +110,35 @@ export async function runCouncil(question: string | undefined, options: CouncilO
     process.stdout.write(JSON.stringify(session, null, 2) + '\n');
   } else {
     renderer.renderResult(session);
+
+    // Interactive viewer in TTY mode with multiple agents
+    if (process.stderr.isTTY && hasViewableContent(session) && session.agents.length > 1) {
+      process.stderr.write(`\n${'\x1b[2m'}Press Enter to explore responses, or q to exit...${'\x1b[0m'}`);
+      const shouldView = await waitForKey();
+      if (shouldView) {
+        await startViewer(session);
+      }
+    }
   }
+}
+
+function waitForKey(): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!process.stdin.isTTY) { resolve(false); return; }
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding('utf-8');
+    const onData = (key: string) => {
+      process.stdin.removeListener('data', onData);
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      if (key === '\r' || key === '\n' || key === ' ') {
+        resolve(true);
+      } else {
+        process.stderr.write('\n');
+        resolve(false);
+      }
+    };
+    process.stdin.on('data', onData);
+  });
 }

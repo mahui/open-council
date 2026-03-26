@@ -25,6 +25,12 @@ program
   .option('--role-set <name>', 'Specify role set')
   .option('--follow [sessionId]', 'Follow-up on a previous debate')
   .action(async (question, options) => {
+    if (!question && process.stdin.isTTY && !options.json) {
+      // No question + TTY → launch interactive REPL
+      const { startRepl } = await import('./ui/repl.js');
+      await startRepl();
+      return;
+    }
     const { runCouncil } = await import('./commands/council.js');
     await runCouncil(question, options);
   });

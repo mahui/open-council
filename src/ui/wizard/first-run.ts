@@ -2,9 +2,10 @@ import { mkdirSync } from 'node:fs';
 import { select, confirm, checkbox } from '@inquirer/prompts';
 import { PATHS } from '../../config/paths.js';
 import { ConfigLoader } from '../../config/loader.js';
-import { MODEL_PRESETS, presetToModelConfig } from '../../config/presets.js';
 import { CredentialManager } from '../../providers/credentials/discovery.js';
-import type { CouncilConfig } from '../../types/config.js';
+import { discoverModels } from '../../providers/model-discovery.js';
+import type { DiscoveredModel } from '../../providers/model-discovery.js';
+import type { CouncilConfig, ModelConfig } from '../../types/config.js';
 
 export async function runFirstRunWizard(): Promise<void> {
   process.stderr.write('\n🏛️  Welcome to Local AI Council!\n');
@@ -25,48 +26,64 @@ export async function runFirstRunWizard(): Promise<void> {
     }
   }
 
-  if (available.length === 0) {
-    process.stderr.write('\n⚠ No credentials found. Set environment variables:\n');
-    process.stderr.write('  ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY\n');
+  // Step 2: Discover models dynamically
+  process.stderr.write('\nStep 2/5: Discovering available models...\n');
+  const discovered = await discoverModels(credManager);
+
+  if (discovered.length === 0) {
+    process.stderr.write('\n⚠ No models found. Ensure you have:\n');
+    process.stderr.write('  - API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY)\n');
+    process.stderr.write('  - Or CLI tools installed (claude, codex, gemini)\n');
     process.stderr.write('  Then run "council setup" again.\n\n');
     return;
   }
 
-  // Step 2: Select models
-  process.stderr.write('\nStep 2/5: Select models to use\n');
-  const applicablePresets = MODEL_PRESETS.filter(p =>
-    p.provider && available.includes(p.provider) && p.invocation === 'api',
-  );
+  // Group by provider for display
+  const byProvider = new Map<string, DiscoveredModel[]>();
+  for (const m of discovered) {
+    const list = byProvider.get(m.provider) ?? [];
+    list.push(m);
+    byProvider.set(m.provider, list);
+  }
 
-  const selectedNames = await checkbox({
-    message: 'Choose models:',
-    choices: applicablePresets.map(p => ({
-      name: `${p.displayName} (${p.provider})`,
-      value: p.name,
-      checked: true,
+  for (const [provider, models] of byProvider) {
+    process.stderr.write(`  ${provider}: ${models.length} model(s) available\n`);
+  }
+
+  // Select models
+  process.stderr.write('\n');
+  const selectedIds = await checkbox({
+    message: 'Choose models for your council:',
+    choices: discovered.map(m => ({
+      name: `${m.name} [${m.provider}/${m.invocation}]`,
+      value: m.id + '|' + m.invocation,
+      checked: false,
     })),
   });
 
-  const selectedPresets = applicablePresets.filter(p => selectedNames.includes(p.name));
-
-  if (selectedPresets.length === 0) {
+  if (selectedIds.length === 0) {
     process.stderr.write('No models selected. Exiting setup.\n');
     return;
   }
 
+  const selected = selectedIds.map(idInv => {
+    const [id, inv] = idInv.split('|');
+    return discovered.find(m => m.id === id && m.invocation === inv)!;
+  }).filter(Boolean);
+
   // Step 3: Verify connectivity
   process.stderr.write('\nStep 3/5: Verifying model access...\n');
-  for (const preset of selectedPresets) {
-    process.stderr.write(`  ✓ ${preset.displayName} ready\n`);
+  for (const m of selected) {
+    process.stderr.write(`  ✓ ${m.name} (${m.invocation}) ready\n`);
   }
 
   // Step 4: Select Chairman
   process.stderr.write('\nStep 4/5: Select Chairman model (synthesizes debate results)\n');
-  const chairmanName = await select({
+  const chairmanId = await select({
     message: 'Chairman model:',
-    choices: selectedPresets.map(p => ({
-      name: p.displayName,
-      value: p.name,
+    choices: selected.map(m => ({
+      name: `${m.name} [${m.invocation}]`,
+      value: m.id,
     })),
   });
 
@@ -100,12 +117,13 @@ export async function runFirstRunWizard(): Promise<void> {
   const loader = new ConfigLoader();
 
   // Save model configs
-  for (const preset of selectedPresets) {
-    const modelConfig = presetToModelConfig(preset);
+  for (const m of selected) {
+    const modelConfig = discoveredToModelConfig(m);
     loader.saveModelConfig(modelConfig);
   }
 
   // Save main config
+  const chairmanName = selected.find(m => m.id === chairmanId)?.id ?? selected[0]!.id;
   const config: CouncilConfig = {
     schema_version: 1,
     general: {
@@ -135,7 +153,7 @@ export async function runFirstRunWizard(): Promise<void> {
       exploration_rate: 0.1,
       rules: [],
       default: {
-        prefer: selectedPresets.map(p => p.name),
+        prefer: selected.map(m => m.id),
         chairman: chairmanName,
         role_set: 'default',
       },
@@ -169,4 +187,35 @@ export async function runFirstRunWizard(): Promise<void> {
   process.stderr.write(`   Config: ${PATHS.councilYaml}\n`);
   process.stderr.write(`   Models: ${PATHS.modelsDir}\n\n`);
   process.stderr.write('   Run "council <question>" to start your first debate!\n\n');
+}
+
+function discoveredToModelConfig(m: DiscoveredModel): ModelConfig {
+  const base: ModelConfig = {
+    name: m.id,
+    invocation: m.invocation,
+    provider: m.provider,
+    model: m.id,
+    timeout_seconds: 120,
+    capabilities: ['general', 'code', 'analysis'],
+    priority: m.provider === 'anthropic' ? 100 : m.provider === 'openai' ? 90 : 80,
+    max_concurrent: 1,
+    resource_weight: 1,
+    enabled: true,
+    streaming: m.invocation === 'api',
+  };
+
+  // CLI-specific config
+  if (m.invocation === 'cli') {
+    if (m.provider === 'anthropic') {
+      base.binary = 'claude';
+      base.args = ['-p', '--model', m.id];
+      base.input_mode = 'arg';
+    } else if (m.provider === 'openai') {
+      base.binary = 'codex';
+      base.args = ['exec', '-m', m.id, '-c', 'approval_policy="never"', '--json'];
+      base.input_mode = 'arg';
+    }
+  }
+
+  return base;
 }
