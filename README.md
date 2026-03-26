@@ -59,7 +59,73 @@ npm install -g @anthropic-ai/council
 
 前提条件：
 - Node.js ≥ 20
+- pnpm（开发时需要）
 - 至少安装并登录一个 AI CLI 工具（claude-code、codex-cli、gemini-cli），或拥有对应的 API Key
+
+## 从源码构建与运行
+
+```bash
+# 克隆仓库
+git clone https://github.com/mahui/mind-storm.git
+cd mind-storm
+
+# 安装依赖
+pnpm install
+
+# 编译（输出到 dist/）
+pnpm build
+
+# 直接运行
+node dist/cli.js "你的问题"
+
+# 或者链接为全局命令后运行
+pnpm link --global
+council "你的问题"
+```
+
+### 开发模式
+
+```bash
+# 监听文件变更，自动重新编译
+pnpm dev
+
+# 运行测试
+pnpm test
+
+# 监听模式运行测试
+pnpm test:watch
+
+# 运行测试并生成覆盖率报告
+pnpm test:coverage
+
+# TypeScript 类型检查（不产生输出文件）
+pnpm lint
+```
+
+### 环境变量
+
+运行前需设置至少一个 API Key：
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."    # Anthropic Claude
+export OPENAI_API_KEY="sk-..."           # OpenAI GPT
+export GEMINI_API_KEY="AI..."            # Google Gemini
+```
+
+也可通过本地凭证文件自动发现（无需手动设置）：
+- `~/.codex/auth.json` — OpenAI Codex CLI 凭证
+- `~/.gemini/oauth_creds.json` — Google Gemini OAuth 凭证
+
+### 构建产物
+
+```
+dist/
+├── cli.js          # 入口文件（ESM bundle，含 shebang）
+├── *.js            # 按命令拆分的 chunk（动态 import 懒加载）
+└── *.js.map        # Source map
+```
+
+构建使用 [tsup](https://tsup.egoist.dev/)（基于 esbuild），编译为 ESM 格式，Provider SDK 和原生模块作为 external 依赖。
 
 ## 快速开始
 
@@ -181,11 +247,11 @@ TypeScript · Node.js ≥ 20 · better-sqlite3 · @anthropic-ai/sdk · openai ·
 ## 开发路线图
 
 - [x] Phase 0 — 最小可运行原型（Broadcast + Synthesis）
-- [ ] Phase 1 — MVP + 引导式配置 + 双模调用
-- [ ] Phase 2 — 完整辩论流程（Review + Consensus + Checkpoint）
-- [ ] Phase 3 — 效果验证（Benchmark 四组消融实验）
-- [ ] Phase 4 — 智能路由 + 完整配置向导 + 动态权重
-- [ ] Phase 5 — TUI 仪表盘 + 辩论回放 + 高级 UX
+- [x] Phase 1 — MVP + 引导式配置 + 双模调用
+- [x] Phase 2 — 完整辩论流程（Review + Consensus + Checkpoint）
+- [x] Phase 3 — 效果验证（Benchmark 四组消融实验）
+- [x] Phase 4 — 智能路由 + 完整配置向导 + 动态权重
+- [x] Phase 5 — 辩论回放 + Pre-Synthesis 压缩 + 追问模式
 
 ## License
 
