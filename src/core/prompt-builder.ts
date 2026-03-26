@@ -22,8 +22,10 @@ export function buildBroadcastPrompt(
     prompt += `Question: ${question}\n\n`;
   }
 
-  prompt += `Please provide your analysis from the perspective of "${role}". `;
-  prompt += `Be thorough, specific, and support your points with evidence or examples.`;
+  prompt += `You are participating in a multi-model debate as the "${role}". `;
+  prompt += `Provide a thorough, detailed analysis (at least several paragraphs). `;
+  prompt += `Be specific, use evidence or examples, and structure your response with clear sections. `;
+  prompt += `Do NOT use any tools or run any commands — just provide your written analysis directly.`;
 
   return prompt;
 }
@@ -84,4 +86,70 @@ export function buildReviewPrompt(
   prompt += `}\n`;
 
   return prompt;
+}
+
+export function buildCrossExaminePrompt(
+  question: string,
+  role: string,
+  ownResponse: string,
+  otherResponses: Array<{ role: string; response: string }>,
+  divergencePoints: string[],
+  roundNumber: number,
+): string {
+  let prompt = `You are participating in Round ${roundNumber + 1} of a multi-model debate.\n`;
+  prompt += `Your role: "${role}"\n`;
+  prompt += `Original question: ${question}\n\n`;
+
+  prompt += `=== Your previous response ===\n${ownResponse}\n\n`;
+
+  prompt += `=== Other experts' responses ===\n`;
+  for (const other of otherResponses) {
+    prompt += `--- ${other.role} ---\n${other.response}\n\n`;
+  }
+
+  if (divergencePoints.length > 0) {
+    prompt += `=== Key disagreements identified ===\n`;
+    for (const point of divergencePoints) {
+      prompt += `• ${point}\n`;
+    }
+    prompt += '\n';
+  }
+
+  prompt += `Instructions for this round:\n`;
+  prompt += `1. Review the other experts' perspectives and the identified disagreements\n`;
+  prompt += `2. Address any valid criticisms of your position — update your view if convinced\n`;
+  prompt += `3. Challenge points where you disagree — explain WHY with evidence\n`;
+  prompt += `4. Identify any new common ground or nuances discovered\n`;
+  prompt += `5. Provide your REVISED analysis — be specific about what changed and what held firm\n\n`;
+  prompt += `Focus on the substance of disagreements, not surface-level differences. `;
+  prompt += `It's OK to change your mind if the evidence warrants it.`;
+
+  return prompt;
+}
+
+export function extractDivergencePoints(
+  consensus: { dimension_scores: Record<string, { score: number; divergence: number }> },
+  responses: Array<{ role: string; response: string }>,
+): string[] {
+  const points: string[] = [];
+
+  for (const [dim, { divergence }] of Object.entries(consensus.dimension_scores)) {
+    if (divergence > 1.5) {
+      points.push(`High divergence on "${dim}" (σ=${divergence.toFixed(1)}) — experts disagree significantly`);
+    }
+  }
+
+  const conclusions = responses.map(r => {
+    const lines = r.response.split('\n').filter(l => l.trim());
+    const lastParagraph = lines.slice(-3).join(' ');
+    return { role: r.role, conclusion: lastParagraph.substring(0, 200) };
+  });
+
+  if (conclusions.length >= 2) {
+    points.push(
+      `Expert positions: ${conclusions.map(c => `${c.role}: "${c.conclusion.substring(0, 80)}..."`).join(' vs ')}`,
+    );
+  }
+
+  return points;
 }
