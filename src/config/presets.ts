@@ -92,8 +92,19 @@ export const MODEL_PRESETS: ModelPreset[] = [
   },
 ];
 
-/** Discover models from environment variables (Phase 0 fallback). */
-export function discoverModelsFromEnv(): ModelConfig[] {
+import { execSync } from 'node:child_process';
+
+function hasBinary(name: string): boolean {
+  try {
+    execSync(`which ${name}`, { stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Discover models from environment variables, OAuth credentials, and CLI tools (Phase 0 fallback). */
+export function discoverModelsFromEnv(credentialManager?: { hasCredential(provider: string): boolean }): ModelConfig[] {
   const models: ModelConfig[] = [];
   const envModels: Array<{ env: string; name: string; provider: ModelConfig['provider']; model: string; priority: number }> = [
     { env: 'ANTHROPIC_API_KEY', name: 'claude-sonnet', provider: 'anthropic', model: 'claude-sonnet-4-20250514', priority: 100 },
@@ -110,6 +121,57 @@ export function discoverModelsFromEnv(): ModelConfig[] {
         enabled: true, streaming: true,
       });
     }
+  }
+
+  // Also discover models from OAuth credentials (CLI logins)
+  if (credentialManager) {
+    if (!models.some(m => m.provider === 'anthropic') && credentialManager.hasCredential('anthropic')) {
+      // OAuth tokens can only call haiku via API; use CLI for better models
+      if (hasBinary('claude')) {
+        models.push({
+          name: 'claude-sonnet', invocation: 'cli', provider: 'anthropic',
+          model: 'claude-sonnet-4-6',
+          binary: 'claude',
+          args: ['-p', '--model', 'claude-sonnet-4-6'],
+          input_mode: 'arg',
+          timeout_seconds: 120, capabilities: ['general', 'code', 'analysis'],
+          priority: 100, max_concurrent: 1, resource_weight: 1,
+          enabled: true, streaming: false,
+        });
+      } else {
+        // No CLI available, fall back to haiku via API (only model that works with OAuth)
+        models.push({
+          name: 'claude-haiku', invocation: 'api', provider: 'anthropic',
+          model: 'claude-haiku-4-5-20251001',
+          timeout_seconds: 120, capabilities: ['general', 'code', 'analysis'],
+          priority: 100, max_concurrent: 1, resource_weight: 1,
+          enabled: true, streaming: true,
+        });
+      }
+    }
+    if (!models.some(m => m.provider === 'google') && credentialManager.hasCredential('google')) {
+      models.push({
+        name: 'gemini-pro', invocation: 'api', provider: 'google',
+        model: 'gemini-2.5-flash',  // Cloud Code Assist API supports 2.5 models
+        timeout_seconds: 120, capabilities: ['general', 'code', 'analysis'],
+        priority: 80, max_concurrent: 1, resource_weight: 1,
+        enabled: true, streaming: true,
+      });
+    }
+  }
+
+  // 3. CLI tool discovery — use local CLI tools as fallback
+  if (!models.some(m => m.provider === 'openai') && hasBinary('codex')) {
+    models.push({
+      name: 'codex', invocation: 'cli', provider: 'openai',
+      model: 'gpt-5.1-codex-max',
+      binary: 'codex',
+      args: ['exec', '-m', 'gpt-5.1-codex-max', '-c', 'approval_policy="never"', '--json'],
+      input_mode: 'arg',
+      timeout_seconds: 120, capabilities: ['general', 'code', 'analysis'],
+      priority: 90, max_concurrent: 1, resource_weight: 1,
+      enabled: true, streaming: false,
+    });
   }
 
   return models;

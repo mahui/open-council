@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process';
 import type { ModelConfig } from '../types/config.js';
-import type { InvocationAdapter, InvocationResult, HealthStatus } from '../types/provider.js';
+import type { InvocationAdapter, InvocationResult, HealthStatus, OnChunk } from '../types/provider.js';
 import { InvocationError } from '../types/errors.js';
 
 export class CliAdapter implements InvocationAdapter {
-  async invoke(config: ModelConfig, prompt: string): Promise<InvocationResult> {
+  async invoke(config: ModelConfig, prompt: string, _onChunk?: OnChunk): Promise<InvocationResult> {
     if (!config.binary) {
       throw new InvocationError(config.name, 'cli', 'No binary configured');
     }
@@ -29,7 +29,14 @@ export class CliAdapter implements InvocationAdapter {
       let stderr = '';
       let timedOut = false;
 
-      child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+      child.stdout.on('data', (chunk: Buffer) => {
+        const text = chunk.toString();
+        stdout += text;
+        if (_onChunk && config.binary !== 'codex') {
+          // Stream stdout chunks directly for non-JSON CLI tools (e.g. claude -p)
+          _onChunk(text);
+        }
+      });
       child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
 
       // input_mode handling
@@ -41,7 +48,7 @@ export class CliAdapter implements InvocationAdapter {
       child.on('close', (code) => {
         const elapsed = Date.now() - start;
         resolve({
-          response: this.cleanOutput(stdout),
+          response: this.cleanOutput(stdout, config.binary),
           elapsed_ms: elapsed,
           invocation_mode: 'cli',
           exit_code: code ?? 1,
@@ -79,11 +86,27 @@ export class CliAdapter implements InvocationAdapter {
     }
   }
 
-  private cleanOutput(raw: string): string {
-    return raw
+  private cleanOutput(raw: string, binary?: string): string {
+    let cleaned = raw
       .replace(/\x1b\[[0-9;]*m/g, '')  // ANSI escape codes
       .replace(/\r/g, '')               // carriage returns
       .trim();
+
+    // codex --json mode: extract text from JSONL item.completed events
+    if (binary === 'codex' && cleaned.includes('"type"')) {
+      const texts: string[] = [];
+      for (const line of cleaned.split('\n')) {
+        try {
+          const event = JSON.parse(line) as { type?: string; item?: { text?: string } };
+          if (event.type === 'item.completed' && event.item?.text) {
+            texts.push(event.item.text);
+          }
+        } catch { /* skip non-JSON lines */ }
+      }
+      if (texts.length > 0) return texts.join('\n');
+    }
+
+    return cleaned;
   }
 
   private checkBinaryExists(binary: string): Promise<boolean> {

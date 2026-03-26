@@ -25,8 +25,10 @@ export interface HealthStatus {
   checked_at: string;
 }
 
+export type OnChunk = (chunk: string) => void;
+
 export interface InvocationAdapter {
-  invoke(config: ModelConfig, prompt: string): Promise<InvocationResult>;
+  invoke(config: ModelConfig, prompt: string, onChunk?: OnChunk): Promise<InvocationResult>;
   healthCheck(config: ModelConfig): Promise<HealthStatus>;
 }
 
@@ -35,6 +37,7 @@ export interface ProviderCredential {
   refresh_token?: string;
   account_id?: string;
   expires_at?: number;
+  project_id?: string;
   source: 'env' | 'file';
 }
 

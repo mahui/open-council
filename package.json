@@ -4,7 +4,7 @@
   "description": "Local AI Council — 多模型辩论编排系统",
   "type": "module",
   "bin": {
-    "council": "dist/cli.js"
+    "council": "bin/council.js"
   },
   "scripts": {
     "build": "tsup",
