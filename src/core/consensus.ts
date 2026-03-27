@@ -13,41 +13,46 @@ export function calculateConsensus(
 ): ConsensusResult {
   // 1. Filter valid reviews (exclude PARSE_ERROR)
   const valid = reviews.filter(r => r.status === 'valid' || r.status === 'partial');
-  const N = valid.length;
-  if (N < 2) {
+  if (valid.length < 2) {
     return { consensus_score: 0, dimension_scores: {}, model_diversity_factor: 0, raw_agreement: 0 };
   }
 
-  // 2. z-score normalize (eliminate reviewer scale differences)
-  const normalized = zScoreNormalize(valid);
+  // 2. Group reviews by reviewer (agent_id) — each agent is one rater
+  const byReviewer = groupByReviewer(valid);
+  const reviewerCount = byReviewer.size;
 
-  // 3. Compute score standard deviations per answer
-  const answerScores = groupScoresByAnswer(normalized);
-  const sigmas = Object.values(answerScores).map(scores => standardDeviation(scores));
+  // 3. z-score normalize per reviewer (eliminate scale differences)
+  const normalized = zScoreNormalizeByReviewer(valid, byReviewer);
+
+  // 4. Compute score standard deviations per answer (on ORIGINAL scale for sigma)
+  //    Use raw scores for sigma-based agreement (1-10 scale), z-scores for Kendall's W
+  const answerScoresRaw = groupScoresByAnswer(valid);
+  const sigmas = Object.values(answerScoresRaw).map(scores => standardDeviation(scores));
   const sigmaAvg = mean(sigmas);
 
-  // 4. Kendall's W rank concordance
-  const W = kendallsW(normalized);
+  // 5. Kendall's W rank concordance (uses z-scored overall, grouped by reviewer)
+  const W = kendallsW(normalized, byReviewer);
 
-  // 5. Small sample correction
-  const rho = (N - 1) / N;
+  // 6. Small sample correction (based on number of raters, not total reviews)
+  const rho = reviewerCount < 3 ? (reviewerCount - 1) / reviewerCount : 1;
 
-  // 6. Model Diversity Factor (delta)
+  // 7. Model Diversity Factor (delta)
   const uniqueProviders = new Set(agents.map(a => getProviderFamily(a.config)));
   const D = uniqueProviders.size;
   const A = agents.length;
   let delta = D / A;
   if (D < 2) delta *= 0.7; // Single-supplier hard reduction
 
-  // 7. Combined consensus score
+  // 8. Combined consensus score
+  //    sigmaAvg is on 1-10 scale, divide by 4.5 to normalize
   const rawAgreement = 0.5 * (1 - sigmaAvg / 4.5) + 0.5 * W;
   const score = Math.max(0, Math.min(1, rawAgreement * rho * delta));
 
-  // 8. Per-dimension divergence analysis
+  // 9. Per-dimension divergence analysis (on raw scores)
   const dimensions = ['accuracy', 'completeness', 'practicality', 'insight'] as const;
   const dimensionScores: Record<string, { score: number; divergence: number }> = {};
   for (const dim of dimensions) {
-    const dimScores = groupScoresByDimension(normalized, dim);
+    const dimScores = groupScoresByDimension(valid, dim);
     const dimSigma = mean(Object.values(dimScores).map(standardDeviation));
     dimensionScores[dim] = {
       score: 1 - dimSigma / 4.5,
@@ -75,17 +80,43 @@ export function getProviderFamily(config: ModelConfig): string {
 
 // --- Statistical helpers ---
 
-function zScoreNormalize(reviews: ParsedReview[]): ParsedReview[] {
-  // Compute z-scores per reviewer (across all their given scores)
+/** Group reviews by their reviewer (agent_id). Each agent is one rater. */
+function groupByReviewer(reviews: ParsedReview[]): Map<string, ParsedReview[]> {
+  const result = new Map<string, ParsedReview[]>();
+  for (const review of reviews) {
+    const reviewerId = review.reviewer_agent_id ?? review.label;
+    const list = result.get(reviewerId) ?? [];
+    list.push(review);
+    result.set(reviewerId, list);
+  }
+  return result;
+}
+
+/**
+ * z-score normalize per reviewer.
+ * Each reviewer's overall scores are normalized to mean=0, std=1 within
+ * that reviewer's own scoring distribution. This eliminates scale differences
+ * between lenient and strict reviewers.
+ */
+function zScoreNormalizeByReviewer(
+  reviews: ParsedReview[],
+  byReviewer: Map<string, ParsedReview[]>,
+): ParsedReview[] {
+  // Pre-compute per-reviewer stats on the overall score
+  const reviewerStats = new Map<string, { mean: number; sd: number }>();
+  for (const [reviewerId, revs] of byReviewer) {
+    const overalls = revs.map(r => r.scores.overall);
+    reviewerStats.set(reviewerId, { mean: mean(overalls), sd: standardDeviation(overalls) });
+  }
+
   return reviews.map(review => {
-    const scores = Object.values(review.scores);
-    const m = mean(scores);
-    const sd = standardDeviation(scores);
-    if (sd === 0) return review;
+    const reviewerId = review.reviewer_agent_id ?? review.label;
+    const stats = reviewerStats.get(reviewerId);
+    if (!stats || stats.sd === 0) return review;
 
     const normalizedScores: Record<string, number> = {};
     for (const [key, val] of Object.entries(review.scores)) {
-      normalizedScores[key] = (val - m) / sd;
+      normalizedScores[key] = (val - stats.mean) / stats.sd;
     }
 
     return {
@@ -120,32 +151,59 @@ function groupScoresByDimension(
   return result;
 }
 
-function kendallsW(reviews: ParsedReview[]): number {
-  // Extract ranking info from overall scores
+/**
+ * Kendall's W (coefficient of concordance).
+ *
+ * Computes rank concordance across k raters on n items.
+ * Each rater's overall scores are converted to ranks (1 = highest score).
+ * W = 12S / (k²(n³ - n)) where S = Σ(Rⱼ - R̄)²
+ */
+function kendallsW(
+  reviews: ParsedReview[],
+  byReviewer: Map<string, ParsedReview[]>,
+): number {
   const labels = [...new Set(reviews.map(r => r.label))];
-  const k = reviews.length; // number of raters
-  const n = labels.length;  // number of items being ranked
+  const n = labels.length;   // number of items being ranked
+  const k = byReviewer.size; // number of raters (reviewers)
 
   if (k < 2 || n < 2) return 0;
 
-  // Create rank matrix: each reviewer ranks the items
-  const rankings: number[][] = [];
-  for (const review of reviews) {
-    // Use overall score as ranking basis (higher score = better rank)
-    const rank = labels.indexOf(review.label) + 1;
-    rankings.push([rank]);
-  }
-
-  // Compute sum of ranks per item
+  // For each rater, convert their overall scores to ranks
+  // rank 1 = highest score, ties get average rank
   const rankSums = new Array<number>(n).fill(0);
-  for (const review of reviews) {
-    const itemIndex = labels.indexOf(review.label);
-    if (itemIndex >= 0 && rankSums[itemIndex] !== undefined) {
-      rankSums[itemIndex] += review.scores.overall;
+
+  for (const [, raterReviews] of byReviewer) {
+    // Build score array for this rater's items
+    const scoresByLabel = new Map<string, number>();
+    for (const review of raterReviews) {
+      scoresByLabel.set(review.label, review.scores.overall);
+    }
+
+    // Sort by score descending to compute ranks
+    const sorted = labels
+      .map(label => ({ label, score: scoresByLabel.get(label) ?? 0 }))
+      .sort((a, b) => b.score - a.score);
+
+    // Assign ranks with tie averaging
+    const ranks = new Map<string, number>();
+    let i = 0;
+    while (i < sorted.length) {
+      let j = i;
+      while (j < sorted.length && sorted[j]!.score === sorted[i]!.score) j++;
+      const avgRank = (i + 1 + j) / 2; // average rank for tied items
+      for (let t = i; t < j; t++) {
+        ranks.set(sorted[t]!.label, avgRank);
+      }
+      i = j;
+    }
+
+    // Accumulate rank sums per item
+    for (let idx = 0; idx < labels.length; idx++) {
+      rankSums[idx] += ranks.get(labels[idx]!) ?? 0;
     }
   }
 
-  // Kendall's W = 12 * S / (k^2 * (n^3 - n))
+  // W = 12S / (k²(n³ - n))
   const meanRankSum = mean(rankSums);
   const S = rankSums.reduce((sum, r) => sum + (r - meanRankSum) ** 2, 0);
   const W = (12 * S) / (k * k * (n * n * n - n));

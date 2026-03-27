@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, unlinkSync, readdirSync, statSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Session } from '../types/session.js';
+import { safePath } from '../providers/utils.js';
 
 interface CheckpointData extends Session {
   pid: number;
@@ -91,7 +92,7 @@ export class CheckpointManager {
   }
 
   private getPath(sessionId: string): string {
-    return join(this.checkpointDir, `${sessionId}.ckpt.json`);
+    return safePath(this.checkpointDir, `${sessionId}.ckpt.json`);
   }
 }
 

@@ -10,5 +10,10 @@ export function getSchemaVersion(db: Database.Database): number {
 }
 
 export function setSchemaVersion(db: Database.Database, version: number): void {
+  if (!Number.isSafeInteger(version) || version < 0) {
+    throw new Error(`Invalid schema version: ${version}`);
+  }
+  // better-sqlite3 pragma() doesn't support parameterized values for user_version,
+  // so we validate the input above to prevent SQL injection.
   db.pragma(`user_version = ${version}`);
 }

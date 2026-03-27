@@ -17,6 +17,7 @@ import { Anonymizer } from './anonymizer.js';
 import { parseReviewResponse } from './score-parser.js';
 import { calculateConsensus } from './consensus.js';
 import { generateRoles, resolveModel } from './role-generator.js';
+import { resolveMode } from './router.js';
 import { buildCompressionPlan, applyFallbackCompression, type ScoredResponse, aggregateReviewScores } from './compression.js';
 
 const PHASE_SEQUENCES: Record<Exclude<DebateMode, 'auto'>, DebatePhase[]> = {
@@ -34,6 +35,7 @@ export class Orchestrator {
     private renderer: Renderer,
     private availableModels: ModelConfig[],
     private defaultChairman?: string,
+    private maxAgents: number = 5,
   ) {}
 
   async run(question: string, options: RunOptions): Promise<Session> {
@@ -58,7 +60,7 @@ export class Orchestrator {
   private async runDebateLoop(session: Session): Promise<void> {
     // Round 0: Initial broadcast
     await this.runPhases(['route', 'broadcast', 'review', 'consensus'], session);
-    if (session.status === 'failed' as SessionStatus) return;
+    if (session.status === 'failed') return;
 
     // Iterative rounds: cross-examine if consensus is low
     let round = 0;
@@ -75,7 +77,7 @@ export class Orchestrator {
 
       // Cross-examine: agents see each other's responses and divergence points, then revise
       await this.executeCrossExamine(session, round);
-      if (session.status === 'failed' as SessionStatus) break;
+      if (session.status === 'failed') break;
 
       // Re-review the new responses
       session.status = 'reviewing';
@@ -84,7 +86,7 @@ export class Orchestrator {
         await this.executeReview(session);
       } catch (err) {
         this.handlePhaseError('review', session, err);
-        if (session.status === 'failed' as SessionStatus) break;
+        if (session.status === 'failed') break;
       }
 
       // Re-calculate consensus
@@ -97,12 +99,12 @@ export class Orchestrator {
     }
 
     // Pre-Synthesis Compression (if needed)
-    if (session.status !== 'failed' as SessionStatus) {
+    if (session.status !== 'failed') {
       this.executePreSynthesisCompression(session);
     }
 
     // Final: synthesis
-    if (session.status !== 'failed' as SessionStatus) {
+    if (session.status !== 'failed') {
       session.status = 'synthesizing';
       this.renderer.onPhaseStart('synthesis', 0, 1);
       try {
@@ -122,7 +124,7 @@ export class Orchestrator {
         await this.executePhase(phase, session);
       } catch (err) {
         this.handlePhaseError(phase, session, err);
-        if (session.status === 'failed' as SessionStatus) break;
+        if (session.status === 'failed') break;
       }
     }
   }
@@ -148,19 +150,10 @@ export class Orchestrator {
   }
 
   private resolveAutoMode(question: string): Exclude<DebateMode, 'auto'> {
-    if (this.availableModels.length < 2) return 'quick';
-
-    const isShort = question.length < 20;
-    const isQuickKeyword = /^(hi|hello|hey|你好|帮我|翻译)\b/i.test(question.trim());
-
-    // Short greetings / trivial → quick
-    if (isShort && isQuickKeyword) return 'quick';
-
-    // Multiple models available → default to debate (full pipeline with review + consensus)
-    // Use compare only for very short simple questions
-    if (question.length < 15) return 'compare';
-
-    return 'debate';
+    // Delegate to the router module which has keyword classification,
+    // question type detection, and configurable heuristics.
+    const decision = resolveMode(question, this.availableModels);
+    return decision.mode;
   }
 
   private async executePhase(phase: DebatePhase, session: Session): Promise<void> {
@@ -199,13 +192,14 @@ export class Orchestrator {
       : models[0];
 
     // Generate roles AND model assignments in one AI call
+    const maxAgents = this.maxAgents;
     let agentCount: number;
     if (session.resolved_mode === 'quick') {
       agentCount = 1;
     } else if (session.resolved_mode === 'compare') {
-      agentCount = Math.max(models.length, 2); // min 2
+      agentCount = Math.min(Math.max(models.length, 2), maxAgents); // min 2, cap at max_agents
     } else {
-      agentCount = Math.max(models.length, 3); // debate: min 3
+      agentCount = Math.min(Math.max(models.length, 3), maxAgents); // debate: min 3, cap at max_agents
     }
     const roles = await generateRoles(
       session.question,
@@ -222,7 +216,7 @@ export class Orchestrator {
         role: `${role.icon} ${role.name}`,
         role_description: role.description,
         system_prompt: role.system_prompt,
-        is_chairman: model === chairmanModel,
+        is_chairman: model.name === chairmanModel?.name,
         is_devil_advocate: false,
       };
     });
@@ -437,15 +431,18 @@ export class Orchestrator {
     const stage = this.createStage('review');
     const anonymizer = new Anonymizer();
 
-    // Get broadcast responses
-    const broadcastStage = session.stages.find(s => s.phase === 'broadcast');
-    if (!broadcastStage) {
+    // Get the LATEST response stage (broadcast or cross_examine for multi-round debates)
+    const responseStages = session.stages.filter(
+      s => (s.phase === 'broadcast' || s.phase === 'cross_examine') && s.status === 'completed',
+    );
+    const latestResponseStage = responseStages[responseStages.length - 1];
+    if (!latestResponseStage) {
       stage.status = 'skipped';
       session.stages.push(stage);
       return;
     }
 
-    const validInvocations = broadcastStage.invocations.filter(i => !i.timed_out && i.response_raw);
+    const validInvocations = latestResponseStage.invocations.filter(i => !i.timed_out && i.response_raw);
     if (validInvocations.length < 2) {
       stage.status = 'skipped';
       session.stages.push(stage);
@@ -505,25 +502,30 @@ export class Orchestrator {
   private executeConsensus(session: Session): void {
     const stage = this.createStage('consensus');
 
-    // Parse review results
-    const reviewStage = session.stages.find(s => s.phase === 'review');
-    if (!reviewStage || reviewStage.status !== 'completed') {
+    // Find the LATEST review stage (not the first — important for multi-round debates)
+    const reviewStages = session.stages.filter(s => s.phase === 'review' && s.status === 'completed');
+    const reviewStage = reviewStages[reviewStages.length - 1];
+    if (!reviewStage) {
       stage.status = 'skipped';
       session.stages.push(stage);
       return;
     }
 
-    const broadcastStage = session.stages.find(s => s.phase === 'broadcast');
-    const expectedLabels = (broadcastStage?.invocations ?? [])
+    // Find the LATEST response stage (broadcast or cross_examine)
+    const responseStages = session.stages.filter(
+      s => (s.phase === 'broadcast' || s.phase === 'cross_examine') && s.status === 'completed',
+    );
+    const latestResponseStage = responseStages[responseStages.length - 1];
+    const expectedLabels = (latestResponseStage?.invocations ?? [])
       .filter(i => !i.timed_out && i.response_raw)
       .map((_, i) => String.fromCharCode(65 + i));
 
-    // Parse each review response
+    // Parse each review response, tagging with the reviewer's agent_id
     const allReviews = reviewStage.invocations
       .filter(inv => inv.response_raw)
       .flatMap(inv => {
         const result = parseReviewResponse(inv.response_raw, expectedLabels);
-        return result.reviews;
+        return result.reviews.map(r => ({ ...r, reviewer_agent_id: inv.agent_id }));
       });
 
     // Calculate consensus
@@ -558,13 +560,13 @@ export class Orchestrator {
       impact: `Compressing to fit synthesis context window`,
     });
 
-    // Extract review scores if available
+    // Extract review scores if available (use LATEST review stage for multi-round debates)
     const reviewScores = new Map<string, number>();
-    const reviewStage = session.stages.find(s => s.phase === 'review' && s.status === 'completed');
-    const broadcastStage = session.stages.find(s => s.phase === 'broadcast');
+    const allReviewStages = session.stages.filter(s => s.phase === 'review' && s.status === 'completed');
+    const reviewStage = allReviewStages[allReviewStages.length - 1];
 
-    if (reviewStage && broadcastStage) {
-      const broadcastInvocations = broadcastStage.invocations.filter(i => !i.timed_out && i.response_raw);
+    if (reviewStage && latestStage) {
+      const broadcastInvocations = latestStage.invocations.filter(i => !i.timed_out && i.response_raw);
       const expectedLabels = broadcastInvocations.map((_, i) => String.fromCharCode(65 + i));
 
       const labelToAgentId = new Map<string, string>();
