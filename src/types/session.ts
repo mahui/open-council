@@ -48,6 +48,8 @@ export interface Invocation {
   role: string;
   prompt: string;
   response_raw: string;
+  /** Compressed version of response_raw (set during pre-synthesis compression). Original is preserved. */
+  response_compressed?: string;
   result: InvocationResult;
   timed_out: boolean;
 }

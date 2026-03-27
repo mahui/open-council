@@ -10,7 +10,14 @@ const program = new Command()
 // Main command: council "question"
 program
   .argument('[question]', 'The question to debate')
-  .option('-m, --mode <mode>', 'Debate mode: quick | compare | debate | auto', 'auto')
+  .option('-m, --mode <mode>', 'Debate mode: quick | compare | debate | auto')
+  .hook('preAction', (cmd) => {
+    const mode = cmd.opts().mode;
+    if (mode && !['quick', 'compare', 'debate', 'auto'].includes(mode)) {
+      process.stderr.write(`Error: invalid mode "${mode}". Must be one of: quick, compare, debate, auto\n`);
+      process.exit(1);
+    }
+  })
   .option('-c, --chairman <model>', 'Specify Chairman model')
   .option('--models <models...>', 'Specify participating models')
   .option('-i, --interactive', 'Enable interactive Human-in-the-Loop')

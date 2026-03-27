@@ -4,7 +4,24 @@
  * Receives InvocationAdapter and Renderer via dependency injection.
  */
 
-import { randomUUID, createHash } from 'node:crypto';
+// Use globalThis.crypto (available in Node ≥20) to avoid importing node:crypto in core/ (ARCH-01)
+function generateId(): string {
+  return globalThis.crypto.randomUUID();
+}
+
+/** Simple deterministic hash for session dedup. Not cryptographic — just content fingerprinting. */
+function hashQuestion(question: string): string {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < question.length; i++) {
+    const ch = question.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return ((h2 >>> 0) * 0x100000000 + (h1 >>> 0)).toString(16).slice(0, 16);
+}
 import type {
   Session, Stage, Invocation, Agent, RunOptions,
   DebateMode, DebatePhase, SessionStatus, DegradationEvent,
@@ -135,9 +152,9 @@ export class Orchestrator {
       : options.mode;
 
     return {
-      session_id: randomUUID(),
+      session_id: generateId(),
       question,
-      question_hash: createHash('sha256').update(question).digest('hex').slice(0, 16),
+      question_hash: hashQuestion(question),
       mode: options.mode,
       resolved_mode: resolvedMode,
       status: 'routing',
@@ -211,7 +228,7 @@ export class Orchestrator {
     session.agents = roles.map(role => {
       const model = resolveModel(role, models);
       return {
-        agent_id: randomUUID(),
+        agent_id: generateId(),
         config: model,
         role: `${role.icon} ${role.name}`,
         role_description: role.description,
@@ -374,7 +391,7 @@ export class Orchestrator {
       .map(inv => ({
         role: inv.role,
         modelName: inv.model_name,
-        response: inv.response_raw,
+        response: inv.response_compressed ?? inv.response_raw,
       }));
 
     if (responses.length === 0) {
@@ -605,12 +622,12 @@ export class Orchestrator {
 
     const result = applyFallbackCompression(plan);
 
-    // Update invocations with compressed content
+    // Store compressed content separately (preserving original response_raw for audit)
     for (const compressed of result.responses) {
       if (!compressed.wasCompressed) continue;
       const inv = latestStage.invocations.find(i => i.agent_id === compressed.agentId);
       if (inv) {
-        inv.response_raw = compressed.content;
+        inv.response_compressed = compressed.content;
       }
     }
 
