@@ -17,7 +17,7 @@ import { Anonymizer } from './anonymizer.js';
 import { parseReviewResponse } from './score-parser.js';
 import { calculateConsensus } from './consensus.js';
 import { generateRoles, resolveModel } from './role-generator.js';
-import { buildCompressionPlan, applyFallbackCompression, type ScoredResponse } from './compression.js';
+import { buildCompressionPlan, applyFallbackCompression, type ScoredResponse, aggregateReviewScores } from './compression.js';
 
 const PHASE_SEQUENCES: Record<Exclude<DebateMode, 'auto'>, DebatePhase[]> = {
   quick:   ['route', 'broadcast'],
@@ -58,7 +58,7 @@ export class Orchestrator {
   private async runDebateLoop(session: Session): Promise<void> {
     // Round 0: Initial broadcast
     await this.runPhases(['route', 'broadcast', 'review', 'consensus'], session);
-    if (session.status === 'failed') return;
+    if (session.status === 'failed' as SessionStatus) return;
 
     // Iterative rounds: cross-examine if consensus is low
     let round = 0;
@@ -75,7 +75,7 @@ export class Orchestrator {
 
       // Cross-examine: agents see each other's responses and divergence points, then revise
       await this.executeCrossExamine(session, round);
-      if (session.status === 'failed') break;
+      if (session.status === 'failed' as SessionStatus) break;
 
       // Re-review the new responses
       session.status = 'reviewing';
@@ -84,7 +84,7 @@ export class Orchestrator {
         await this.executeReview(session);
       } catch (err) {
         this.handlePhaseError('review', session, err);
-        if (session.status === 'failed') break;
+        if (session.status === 'failed' as SessionStatus) break;
       }
 
       // Re-calculate consensus
@@ -97,12 +97,12 @@ export class Orchestrator {
     }
 
     // Pre-Synthesis Compression (if needed)
-    if (session.status !== 'failed') {
+    if (session.status !== 'failed' as SessionStatus) {
       this.executePreSynthesisCompression(session);
     }
 
     // Final: synthesis
-    if (session.status !== 'failed') {
+    if (session.status !== 'failed' as SessionStatus) {
       session.status = 'synthesizing';
       this.renderer.onPhaseStart('synthesis', 0, 1);
       try {
@@ -122,7 +122,7 @@ export class Orchestrator {
         await this.executePhase(phase, session);
       } catch (err) {
         this.handlePhaseError(phase, session, err);
-        if (session.status === 'failed') break;
+        if (session.status === 'failed' as SessionStatus) break;
       }
     }
   }
@@ -199,7 +199,14 @@ export class Orchestrator {
       : models[0];
 
     // Generate roles AND model assignments in one AI call
-    const agentCount = Math.max(models.length, 3); // at least 3 perspectives
+    let agentCount: number;
+    if (session.resolved_mode === 'quick') {
+      agentCount = 1;
+    } else if (session.resolved_mode === 'compare') {
+      agentCount = Math.max(models.length, 2); // min 2
+    } else {
+      agentCount = Math.max(models.length, 3); // debate: min 3
+    }
     const roles = await generateRoles(
       session.question,
       agentCount,
@@ -551,6 +558,33 @@ export class Orchestrator {
       impact: `Compressing to fit synthesis context window`,
     });
 
+    // Extract review scores if available
+    const reviewScores = new Map<string, number>();
+    const reviewStage = session.stages.find(s => s.phase === 'review' && s.status === 'completed');
+    const broadcastStage = session.stages.find(s => s.phase === 'broadcast');
+
+    if (reviewStage && broadcastStage) {
+      const broadcastInvocations = broadcastStage.invocations.filter(i => !i.timed_out && i.response_raw);
+      const expectedLabels = broadcastInvocations.map((_, i) => String.fromCharCode(65 + i));
+
+      const labelToAgentId = new Map<string, string>();
+      broadcastInvocations.forEach((inv, i) => {
+        labelToAgentId.set(String.fromCharCode(65 + i), inv.agent_id);
+      });
+
+      const allReviews = reviewStage.invocations
+        .filter(inv => inv.response_raw)
+        .flatMap(inv => {
+          const result = parseReviewResponse(inv.response_raw, expectedLabels);
+          return result.reviews;
+        });
+
+      const aggregatedScores = aggregateReviewScores(allReviews, labelToAgentId);
+      for (const [agentId, score] of aggregatedScores.entries()) {
+        reviewScores.set(agentId, score);
+      }
+    }
+
     // Build scored responses for compression ranking
     const scored: ScoredResponse[] = validInvocations.map(inv => {
       const agent = session.agents.find(a => a.agent_id === inv.agent_id);
@@ -559,7 +593,7 @@ export class Orchestrator {
         modelName: inv.model_name,
         role: inv.role,
         content: inv.response_raw,
-        reviewScore: undefined, // TODO: extract from review stage
+        reviewScore: reviewScores.get(inv.agent_id),
         modelPriority: agent?.config.priority ?? 100,
       };
     });

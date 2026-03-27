@@ -142,8 +142,8 @@ describe('Orchestrator', () => {
     const orchestrator = new Orchestrator(adapter, renderer, models);
     await orchestrator.run('Test question', { mode: 'compare' });
 
-    // 2 broadcast calls + 1 synthesis call = 3
-    expect(adapter.invoke).toHaveBeenCalledTimes(3);
+    // 1 role generation + 2 broadcast calls + 1 synthesis call = 4
+    expect(adapter.invoke).toHaveBeenCalledTimes(4);
   });
 
   it('should notify renderer of phase and agent events', async () => {
