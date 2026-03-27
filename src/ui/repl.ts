@@ -66,7 +66,8 @@ export async function startRepl(): Promise<void> {
       const config = loader.loadCouncilConfig();
       models = loader.loadAllModels();
       chairman = config.general.default_chairman;
-    } catch {
+    } catch (err) {
+      process.stderr.write(`Warning: config error, falling back to env discovery: ${err instanceof Error ? err.message : err}\n`);
       models = discoverModelsFromEnv(credentialManager);
     }
   } else {
@@ -183,7 +184,9 @@ async function handleCommand(input: string, state: ReplState): Promise<void> {
           state.models = loader.loadAllModels();
           state.chairman = config.general.default_chairman;
           process.stderr.write(`  ${GREEN}✓${RESET} Configuration reloaded.\n`);
-        } catch { /* keep existing */ }
+        } catch (err) {
+          process.stderr.write(`  ${YELLOW}⚠ Config reload failed: ${err instanceof Error ? err.message : err}${RESET}\n`);
+        }
       }
       break;
     }
@@ -192,8 +195,8 @@ async function handleCommand(input: string, state: ReplState): Promise<void> {
       try {
         const { runHistory } = await import('../commands/history.js');
         await runHistory({ limit: '10' });
-      } catch {
-        process.stderr.write(`  ${DIM}No history available.${RESET}\n`);
+      } catch (err) {
+        process.stderr.write(`  ${DIM}No history available: ${err instanceof Error ? err.message : err}${RESET}\n`);
       }
       break;
 
@@ -201,8 +204,8 @@ async function handleCommand(input: string, state: ReplState): Promise<void> {
       try {
         const { runStats } = await import('../commands/stats.js');
         await runStats({});
-      } catch {
-        process.stderr.write(`  ${DIM}No stats available.${RESET}\n`);
+      } catch (err) {
+        process.stderr.write(`  ${DIM}No stats available: ${err instanceof Error ? err.message : err}${RESET}\n`);
       }
       break;
 
@@ -266,7 +269,9 @@ async function handleQuestion(question: string, state: ReplState): Promise<void>
     try {
       const store = new SessionStore(PATHS.sessionsDir);
       await store.saveSession(session);
-    } catch { /* non-fatal */ }
+    } catch (err) {
+      process.stderr.write(`Warning: failed to save session: ${err instanceof Error ? err.message : err}\n`);
+    }
 
     renderer.renderResult(session);
 

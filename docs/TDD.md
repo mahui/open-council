@@ -1,13 +1,13 @@
 # Local AI Council — 技术设计文档 (TDD)
 
-**Technical Design Document v1.0**
+**Technical Design Document v2.0**
 
 | 项目 | 内容 |
 |------|------|
 | 文档状态 | Draft |
-| 版本 | 1.0 |
-| 日期 | 2026-03-25 |
-| 对应 PRD | docs/PRD.md v6.3 |
+| 版本 | 2.0 |
+| 日期 | 2026-03-26 |
+| 对应 PRD | docs/PRD.md v7.0 |
 | 主语言 | TypeScript (Node.js ≥ 20) |
 | 包管理 | pnpm |
 | 分发方式 | npm 全局包 (`npm install -g @anthropic-ai/council`) |
@@ -20,7 +20,7 @@
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
-| 语言 | **TypeScript 5.x** | 三大 Provider SDK 均以 TS 为一等公民；pi-mono 参考实现为 TS；类型安全减少运行时错误 |
+| 语言 | **TypeScript 5.x** | pi-ai 和主流 Provider SDK 均以 TS 为一等公民；类型安全减少运行时错误 |
 | 运行时 | **Node.js ≥ 20** | 原生 `fetch`、`crypto.subtle`（PKCE）、`node:test`；LTS 稳定 |
 | 包管理 | **pnpm** | workspace 支持好、磁盘占用小、lockfile 确定性强 |
 | 编译 | **tsup** (esbuild) | 编译为单个 CJS bundle，启动速度比 tsc 快 10x+ |
@@ -29,9 +29,7 @@
 
 | 模块 | 库 | 版本策略 | 选型理由 |
 |------|-----|---------|---------|
-| **Provider SDK** | `@anthropic-ai/sdk` | latest | Anthropic 官方，原生 streaming |
-| | `openai` | ≥ 5.x | OpenAI 官方，Responses API 支持 |
-| | `@google/genai` | latest | Google 官方 GenAI SDK |
+| **统一 LLM 库** | `@mariozechner/pi-ai` | latest | 统一 LLM 接口，内置 20+ Provider 适配（Anthropic/OpenAI/Google/Mistral/Bedrock 等）、OAuth 凭证管理、模型自动发现、流式输出；替代原来分散的 3 个 Provider SDK |
 | **CLI 框架** | `commander` | ^12 | 命令解析、子命令、选项管理；最成熟的 Node CLI 框架 |
 | **交互式 Prompt** | `@inquirer/prompts` | ^7 | Setup Wizard 的多选、确认、列表选择；模块化按需导入 |
 | **TUI 仪表盘** | `ink` + `ink-spinner` | ^5 | React 范式渲染终端 UI；组件化、声明式更新、天然支持实时刷新 |
@@ -46,7 +44,8 @@
 
 | 库 | 不选理由 |
 |----|---------|
-| `axios` | Node 20 原生 `fetch` 已足够；Provider SDK 内部已封装 HTTP |
+| `@anthropic-ai/sdk` / `openai` / `@google/genai` | 已被 `@mariozechner/pi-ai` 统一替代；pi-ai 内部封装了这些 SDK，无需直接依赖 |
+| `axios` | Node 20 原生 `fetch` 已足够；pi-ai 内部已封装 HTTP |
 | `knex` / `drizzle` | SQLite 查询简单（< 10 种 query），直接用 `better-sqlite3` 的 prepared statement，无需 ORM 抽象 |
 | `blessed` / `neo-blessed` | 过时，API 复杂；`ink` 的 React 范式更易维护 |
 | `chalk` | `ink` 内置颜色支持；CLI 输出少量颜色用 ANSI 常量即可 |
@@ -108,13 +107,8 @@ council/
 │   ├── providers/                  # 双模调用适配层
 │   │   ├── adapter.ts                # 统一接口 invoke(config, prompt) → InvocationResult
 │   │   ├── cli-adapter.ts            # CLI 模式：child_process.spawn + stdin/stdout pipe
-│   │   ├── api-adapter.ts            # API 模式：Provider SDK 直调
-│   │   ├── credentials/              # 凭证发现与 Token 刷新
-│   │   │   ├── discovery.ts            # 扫描本地凭证路径
-│   │   │   ├── anthropic.ts            # Anthropic OAuth token refresh
-│   │   │   ├── openai.ts              # OpenAI OAuth token refresh (读 ~/.codex/auth.json)
-│   │   │   ├── google.ts              # Google OAuth token refresh (读 ~/.gemini/oauth_creds.json)
-│   │   │   └── types.ts               # ProviderCredential 类型定义
+│   │   ├── api-adapter.ts            # API 模式：通过 pi-ai 统一接口调用
+│   │   ├── pi-ai-bridge.ts           # pi-ai 集成层：模型发现、凭证委托、Context 桥接
 │   │   └── health.ts                 # 健康检查 (CLI L1-L3 + API L1-L3) + 熔断器
 │   │
 │   ├── storage/                    # 持久化层
@@ -214,18 +208,23 @@ export interface InvocationResult {
   timed_out: boolean;
 }
 
+/** pi-ai 的 ThinkingLevel 类型 */
+export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+
 export interface InvocationAdapter {
   /**
    * 调用模型，返回完整响应。
    * 编排层通过此接口与所有模型交互，无需关心 CLI/API 差异。
+   * @param stageEffort 阶段级推理深度覆盖（与模型配置的 reasoning_effort 取较高值）
    */
-  invoke(config: ModelConfig, prompt: string): Promise<InvocationResult>;
+  invoke(config: ModelConfig, prompt: string, stageEffort?: ThinkingLevel): Promise<InvocationResult>;
 
   /**
    * 流式调用模型，通过 AsyncGenerator 逐 chunk 返回。
    * 用于 TUI 实时渲染。CLI 模式逐行读取 stdout，API 模式解析 SSE。
+   * @param stageEffort 阶段级推理深度覆盖
    */
-  stream(config: ModelConfig, prompt: string): AsyncGenerator<string, InvocationResult>;
+  stream(config: ModelConfig, prompt: string, stageEffort?: ThinkingLevel): AsyncGenerator<string, InvocationResult>;
 
   /**
    * 健康检查。CLI 模式检查 binary 存在 + version；API 模式检查凭证有效性。
@@ -333,308 +332,280 @@ export class CliAdapter implements InvocationAdapter {
 }
 ```
 
-### 3.3 API 适配器实现
+### 3.3 API 适配器实现（基于 pi-ai）
+
+Council 的 API 模式通过 `@mariozechner/pi-ai` 统一接口调用所有 Provider，不再分别引入各 Provider SDK。
 
 ```typescript
 // src/providers/api-adapter.ts
 
-import Anthropic from '@anthropic-ai/sdk';
-import OpenAI from 'openai';
-import { GoogleGenAI } from '@google/genai';
+import {
+  getModel, getModels, getProviders,
+  streamSimple, completeSimple,
+  supportsXhigh,
+  type Context, type SimpleStreamOptions, type ThinkingLevel,
+} from '@mariozechner/pi-ai';
+import { getEnvApiKey } from '@mariozechner/pi-ai/env-api-keys';
+import { getOAuthApiKey } from '@mariozechner/pi-ai/oauth';
 
 export class ApiAdapter implements InvocationAdapter {
-  private credentialManager: CredentialManager;
-
-  async invoke(config: ModelConfig, prompt: string): Promise<InvocationResult> {
-    const credential = await this.credentialManager.getValidCredential(config.provider!);
+  /**
+   * 通过 pi-ai 调用模型。pi-ai 自动处理：
+   * - Provider SDK 选择（Anthropic/OpenAI/Google/Mistral/Bedrock...）
+   * - 凭证获取（环境变量 > OAuth token > ADC）
+   * - Token 过期自动刷新
+   * - 推理深度（reasoning effort）跨 Provider 统一抽象
+   * - 流式/非流式输出
+   */
+  async invoke(
+    config: ModelConfig, prompt: string, stageEffort?: ThinkingLevel,
+  ): Promise<InvocationResult> {
+    const model = getModel(config.provider!, config.model!);
+    const apiKey = await this.resolveApiKey(config.provider!);
     const start = Date.now();
 
-    switch (config.provider) {
-      case 'anthropic':
-        return this.invokeAnthropic(config, prompt, credential, start);
-      case 'openai':
-        return this.invokeOpenAI(config, prompt, credential, start);
-      case 'google':
-        return this.invokeGoogle(config, prompt, credential, start);
-      default:
-        throw new Error(`Unsupported API provider: ${config.provider}`);
+    const context: Context = {
+      systemPrompt: config.system_prompt,
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+    };
+
+    // 解析 reasoning effort：stage_effort 与 model config 取较高值
+    const reasoning = this.resolveEffort(config.reasoning_effort, stageEffort, model);
+
+    const options: SimpleStreamOptions = {
+      apiKey,
+      reasoning,
+      temperature: config.temperature,
+      maxTokens: config.max_tokens,
+    };
+
+    try {
+      const result = await completeSimple(model, context, [], options);
+
+      return {
+        response: result.content
+          .filter((b) => b.type === 'text')
+          .map((b) => b.text)
+          .join(''),
+        elapsed_ms: Date.now() - start,
+        invocation_mode: 'api',
+        http_status: 200,
+        token_usage: result.usage ? {
+          input_tokens: result.usage.inputTokens,
+          output_tokens: result.usage.outputTokens,
+        } : undefined,
+        timed_out: false,
+      };
+    } catch (err) {
+      throw new InvocationError(config.name, 'api',
+        err instanceof Error ? err.message : String(err));
     }
   }
 
-  private async invokeAnthropic(
-    config: ModelConfig, prompt: string,
-    credential: ProviderCredential, start: number,
-  ): Promise<InvocationResult> {
-    const client = new Anthropic({
-      apiKey: credential.access_token,  // OAuth token 作为 API key
-      baseURL: config.api_base_url,
-    });
+  /**
+   * 流式调用，通过 pi-ai 的 streamSimple() 返回事件流。
+   * 自动应用 reasoning effort 配置。
+   */
+  async *stream(
+    config: ModelConfig, prompt: string, stageEffort?: ThinkingLevel,
+  ): AsyncGenerator<string, InvocationResult> {
+    const model = getModel(config.provider!, config.model!);
+    const apiKey = await this.resolveApiKey(config.provider!);
+    const start = Date.now();
 
-    const response = await client.messages.create({
-      model: config.model!,
-      max_tokens: 8192,
-      messages: [{ role: 'user', content: prompt }],
-    });
-
-    const text = response.content
-      .filter((b) => b.type === 'text')
-      .map((b) => b.text)
-      .join('');
-
-    return {
-      response: text,
-      elapsed_ms: Date.now() - start,
-      invocation_mode: 'api',
-      http_status: 200,
-      token_usage: {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
-      },
-      timed_out: false,
+    const context: Context = {
+      systemPrompt: config.system_prompt,
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
     };
-  }
 
-  private async invokeOpenAI(
-    config: ModelConfig, prompt: string,
-    credential: ProviderCredential, start: number,
-  ): Promise<InvocationResult> {
-    const client = new OpenAI({
-      apiKey: credential.access_token,
-      baseURL: config.api_base_url,
-    });
+    const reasoning = this.resolveEffort(config.reasoning_effort, stageEffort, model);
 
-    const response = await client.responses.create({
-      model: config.model!,
-      input: prompt,
+    const eventStream = streamSimple(model, context, [], {
+      apiKey,
+      reasoning,
+      temperature: config.temperature,
+      maxTokens: config.max_tokens,
     });
+    let fullText = '';
+    let usage: { inputTokens: number; outputTokens: number } | undefined;
+
+    for await (const event of eventStream) {
+      if (event.type === 'text') {
+        fullText += event.text;
+        yield event.text;
+      }
+      if (event.type === 'complete') {
+        usage = event.usage;
+      }
+    }
 
     return {
-      response: response.output_text,
+      response: fullText,
       elapsed_ms: Date.now() - start,
       invocation_mode: 'api',
       http_status: 200,
-      token_usage: {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
-      },
-      timed_out: false,
-    };
-  }
-
-  private async invokeGoogle(
-    config: ModelConfig, prompt: string,
-    credential: ProviderCredential, start: number,
-  ): Promise<InvocationResult> {
-    const ai = new GoogleGenAI({ apiKey: credential.access_token });
-
-    const response = await ai.models.generateContent({
-      model: config.model!,
-      contents: prompt,
-    });
-
-    return {
-      response: response.text ?? '',
-      elapsed_ms: Date.now() - start,
-      invocation_mode: 'api',
-      http_status: 200,
-      token_usage: response.usageMetadata ? {
-        input_tokens: response.usageMetadata.promptTokenCount ?? 0,
-        output_tokens: response.usageMetadata.candidatesTokenCount ?? 0,
+      token_usage: usage ? {
+        input_tokens: usage.inputTokens,
+        output_tokens: usage.outputTokens,
       } : undefined,
       timed_out: false,
     };
   }
-}
-```
 
-### 3.4 凭证管理器
+  /**
+   * 解析最终使用的 reasoning effort。
+   * 取 modelEffort 和 stageEffort 中较高的那个。
+   * xhigh 不支持时自动降级为 high。
+   */
+  private resolveEffort(
+    modelEffort?: string,
+    stageEffort?: ThinkingLevel,
+    model?: any,
+  ): ThinkingLevel | undefined {
+    const levels: ThinkingLevel[] = ['minimal', 'low', 'medium', 'high', 'xhigh'];
+    const modelIdx = modelEffort ? levels.indexOf(modelEffort as ThinkingLevel) : -1;
+    const stageIdx = stageEffort ? levels.indexOf(stageEffort) : -1;
+    const maxIdx = Math.max(modelIdx, stageIdx);
+    if (maxIdx < 0) return undefined;
 
-```typescript
-// src/providers/credentials/discovery.ts
-
-import { readFileSync, existsSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-
-/** 已知 CLI 客户端的凭证文件路径 */
-const CREDENTIAL_PATHS: Record<string, string> = {
-  openai:    join(homedir(), '.codex', 'auth.json'),
-  google:    join(homedir(), '.gemini', 'oauth_creds.json'),
-  'google-vertex': join(homedir(), '.config', 'gcloud', 'application_default_credentials.json'),
-};
-
-/** OAuth Token 刷新端点 */
-const TOKEN_ENDPOINTS: Record<string, string> = {
-  anthropic: 'https://platform.claude.com/v1/oauth/token',
-  openai:    'https://auth.openai.com/oauth/token',
-  google:    'https://oauth2.googleapis.com/token',
-};
-
-/** OpenAI Codex OAuth Client ID（公开值，用于 token refresh） */
-const OPENAI_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
-
-export class CredentialManager {
-  private cache = new Map<string, ProviderCredential>();
-
-  /** 扫描所有已知路径，返回可用凭证列表 */
-  async discoverAll(): Promise<DiscoveryReport> {
-    const results: DiscoveryReport = {};
-
-    // 1. 环境变量优先
-    for (const [provider, envVar] of Object.entries(ENV_VARS)) {
-      const key = process.env[envVar];
-      if (key) {
-        results[provider] = {
-          source: 'env',
-          status: 'valid',
-          env_var: envVar,
-        };
-        this.cache.set(provider, { access_token: key, source: 'env' });
-      }
+    let resolved = levels[maxIdx];
+    // xhigh 不支持时降级为 high
+    if (resolved === 'xhigh' && model && !supportsXhigh(model)) {
+      resolved = 'high';
     }
-
-    // 2. 本地凭证文件
-    for (const [provider, path] of Object.entries(CREDENTIAL_PATHS)) {
-      if (results[provider]) continue;  // 环境变量已覆盖
-      if (!existsSync(path)) {
-        results[provider] = { source: 'file', status: 'not_found', path };
-        continue;
-      }
-
-      try {
-        const credential = this.parseCredentialFile(provider, path);
-        if (this.isExpired(credential)) {
-          const refreshed = await this.refreshToken(provider, credential);
-          if (refreshed) {
-            this.writeBackCredential(provider, path, refreshed);
-            this.cache.set(provider, refreshed);
-            results[provider] = { source: 'file', status: 'refreshed', path };
-          } else {
-            results[provider] = { source: 'file', status: 'expired', path };
-          }
-        } else {
-          this.cache.set(provider, credential);
-          results[provider] = { source: 'file', status: 'valid', path };
-        }
-      } catch {
-        results[provider] = { source: 'file', status: 'parse_error', path };
-      }
-    }
-
-    return results;
+    return resolved;
   }
 
-  /** 获取有效凭证（自动刷新过期 token） */
-  async getValidCredential(provider: string): Promise<ProviderCredential> {
-    let cred = this.cache.get(provider);
-    if (!cred) throw new CredentialNotFoundError(provider);
+  /**
+   * 凭证解析优先级：环境变量 > OAuth token。
+   * 全部委托给 pi-ai，Council 不自行管理凭证。
+   */
+  private async resolveApiKey(provider: string): Promise<string> {
+    // 1. 环境变量（pi-ai 自动检测对应的 env var）
+    const envKey = getEnvApiKey(provider);
+    if (envKey) return envKey;
 
-    if (this.isExpired(cred) && cred.refresh_token) {
-      const refreshed = await this.refreshToken(provider, cred);
-      if (!refreshed) throw new CredentialExpiredError(provider);
-      cred = refreshed;
-      this.cache.set(provider, cred);
-    }
+    // 2. OAuth token（pi-ai 自动刷新过期 token）
+    const oauthKey = await getOAuthApiKey(provider);
+    if (oauthKey) return oauthKey;
 
-    return cred;
+    throw new CredentialNotFoundError(provider);
   }
 
-  /** 解析不同 Provider 的凭证文件格式 */
-  private parseCredentialFile(provider: string, path: string): ProviderCredential {
-    const raw = JSON.parse(readFileSync(path, 'utf-8'));
-
-    switch (provider) {
-      case 'openai':
-        return {
-          access_token: raw.tokens?.access_token,
-          refresh_token: raw.tokens?.refresh_token,
-          account_id: raw.tokens?.account_id,
-          expires_at: raw.tokens?.expires_at,
-          source: 'file',
-        };
-      case 'google':
-        return {
-          access_token: raw.access_token,
-          refresh_token: raw.refresh_token,
-          expires_at: raw.expiry_date,
-          source: 'file',
-        };
-      default:
-        return { access_token: raw.access_token, source: 'file' };
-    }
-  }
-
-  /** 使用 refresh_token 刷新 access_token */
-  private async refreshToken(
-    provider: string, cred: ProviderCredential,
-  ): Promise<ProviderCredential | null> {
-    const endpoint = TOKEN_ENDPOINTS[provider];
-    if (!endpoint || !cred.refresh_token) return null;
-
-    const body: Record<string, string> = {
-      grant_type: 'refresh_token',
-      refresh_token: cred.refresh_token,
-    };
-
-    // OpenAI 需要 client_id
-    if (provider === 'openai') {
-      body.client_id = OPENAI_CLIENT_ID;
-    }
-
+  async healthCheck(config: ModelConfig): Promise<HealthStatus> {
     try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams(body),
-      });
-
-      if (!res.ok) return null;
-
-      const data = await res.json();
+      const apiKey = await this.resolveApiKey(config.provider!);
       return {
-        ...cred,
-        access_token: data.access_token,
-        expires_at: Date.now() + (data.expires_in ?? 3600) * 1000,
+        level: apiKey ? 'healthy' : 'unavailable',
+        message: apiKey ? 'API credentials available' : 'No credentials',
+        checked_at: new Date().toISOString(),
       };
     } catch {
-      return null;
+      return {
+        level: 'unavailable',
+        message: 'No credentials found',
+        checked_at: new Date().toISOString(),
+      };
     }
-  }
-
-  /** 将刷新后的 token 写回原凭证文件（保持与 CLI 共享） */
-  private writeBackCredential(
-    provider: string, path: string, cred: ProviderCredential,
-  ): void {
-    // 读取原始文件，只更新 token 字段，保留其他内容
-    const raw = JSON.parse(readFileSync(path, 'utf-8'));
-
-    switch (provider) {
-      case 'openai':
-        raw.tokens.access_token = cred.access_token;
-        if (cred.expires_at) raw.tokens.expires_at = cred.expires_at;
-        raw.last_refresh = new Date().toISOString();
-        break;
-      case 'google':
-        raw.access_token = cred.access_token;
-        if (cred.expires_at) raw.expiry_date = cred.expires_at;
-        break;
-    }
-
-    writeFileSync(path, JSON.stringify(raw, null, 2), { mode: 0o600 });
-  }
-
-  private isExpired(cred: ProviderCredential): boolean {
-    if (!cred.expires_at) return false;
-    return cred.expires_at < Date.now() - 60_000;  // 提前 60s 判定过期
   }
 }
-
-const ENV_VARS: Record<string, string> = {
-  anthropic: 'ANTHROPIC_API_KEY',
-  openai: 'OPENAI_API_KEY',
-  google: 'GEMINI_API_KEY',
-};
 ```
+
+**pi-ai 集成层**（模型发现与 Provider 注册）：
+
+```typescript
+// src/providers/pi-ai-bridge.ts
+
+import { getProviders, getModels, getModel, supportsXhigh } from '@mariozechner/pi-ai';
+import { getEnvApiKey } from '@mariozechner/pi-ai/env-api-keys';
+import {
+  getOAuthProviders,
+  getOAuthApiKey,
+  type OAuthProviderId,
+} from '@mariozechner/pi-ai/oauth';
+
+/**
+ * 发现所有可用的 API Provider 和模型。
+ * Council 的模型注册不再硬编码 Provider 列表，而是动态从 pi-ai 获取。
+ */
+export async function discoverApiModels(): Promise<DiscoveredProvider[]> {
+  const results: DiscoveredProvider[] = [];
+
+  for (const providerId of getProviders()) {
+    // 检查是否有可用凭证
+    const envKey = getEnvApiKey(providerId);
+    const oauthProviders = getOAuthProviders();
+    const hasOAuth = oauthProviders.some(p => p.id === providerId);
+
+    let hasCredential = !!envKey;
+    if (!hasCredential && hasOAuth) {
+      try {
+        const oauthKey = await getOAuthApiKey(providerId as OAuthProviderId);
+        hasCredential = !!oauthKey;
+      } catch {
+        // OAuth 凭证不可用
+      }
+    }
+
+    if (hasCredential) {
+      const models = getModels(providerId);
+      results.push({
+        provider: providerId,
+        authMethod: envKey ? 'env' : 'oauth',
+        models: models.map(m => ({
+          id: m.id,
+          name: m.name ?? m.id,
+          contextWindow: m.contextWindow,
+          maxTokens: m.maxTokens,
+          reasoning: m.reasoning ?? false,
+          supportsXhigh: supportsXhigh(m),
+        })),
+      });
+    }
+  }
+
+  return results;
+}
+
+interface DiscoveredModel {
+  id: string;
+  name: string;
+  contextWindow?: number;     // pi-ai 动态提供
+  maxTokens?: number;         // pi-ai 动态提供
+  reasoning: boolean;         // 模型是否支持推理/思考
+  supportsXhigh: boolean;     // 是否支持 xhigh 级别思考
+}
+
+interface DiscoveredProvider {
+  provider: string;
+  authMethod: 'env' | 'oauth';
+  models: DiscoveredModel[];
+}
+```
+
+### 3.4 凭证管理（委托给 pi-ai）
+
+Council **不再自行实现**凭证解析、Token 刷新、OAuth 流程。所有鉴权逻辑统一委托给 `@mariozechner/pi-ai`。
+
+**原有的 `src/providers/credentials/` 目录整体移除**，替换为 `src/providers/pi-ai-bridge.ts` 中的薄封装（见 §3.3）。
+
+**pi-ai 鉴权能力总结**：
+
+| 能力 | pi-ai 函数 | Council 原实现 |
+|------|-----------|---------------|
+| 环境变量 API Key | `getEnvApiKey(provider)` | `CredentialManager` 的 ENV_VARS 字典 → **删除** |
+| OAuth 凭证发现 | `getOAuthProviders()` + `getOAuthApiKey()` | `CredentialManager` 的 `parseCredentialFile()` → **删除** |
+| Token 自动刷新 | `getOAuthApiKey()` 内部自动处理 | `CredentialManager` 的 `refreshToken()` → **删除** |
+| OAuth 登录流程 | `OAuthProviderInterface.login()` | 原计划 Phase 4+ 自行实现 → **不再需要** |
+| 模型发现 | `getProviders()` + `getModels(provider)` | 硬编码预设列表 → **替换为动态发现** |
+| 自定义 OAuth Provider | `registerOAuthProvider()` | 无 → **可扩展** |
+
+**迁移影响**：
+
+- 删除 `src/providers/credentials/` 目录（`discovery.ts`, `anthropic.ts`, `openai.ts`, `google.ts`, `types.ts`）
+- 删除 `src/types/provider.ts` 中的 `ProviderCredential` 接口
+- 新增 `src/providers/pi-ai-bridge.ts`（模型发现 + 凭证委托）
+- `ApiAdapter` 简化为统一的 `complete()` / `stream()` 调用，不再 switch-case 各 Provider
 
 ---
 
@@ -1198,7 +1169,7 @@ export const ModelConfigSchema = z.object({
   // 通用字段
   name: z.string(),
   invocation: z.enum(['cli', 'api', 'auto']).default('auto'),
-  provider: z.enum(['anthropic', 'openai', 'google', 'github-copilot', 'ollama', 'custom']).optional(),
+  provider: z.string().optional(),  // pi-ai 支持的所有 Provider ID（通过 getProviders() 动态获取）
   model: z.string().optional(),
   timeout_seconds: z.number().int().positive().default(120),
   capabilities: z.array(z.string()).default(['general']),
@@ -1221,6 +1192,11 @@ export const ModelConfigSchema = z.object({
     cache_seconds: z.number().int().default(300),
     timeout_seconds: z.number().int().default(10),
   }).optional(),
+
+  // 推理与生成参数
+  reasoning_effort: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']).optional(),
+  temperature: z.number().min(0).max(2).optional(),
+  max_tokens: z.number().int().positive().optional(),
 
   // API 专用
   api_credential_path: z.string().optional(),
@@ -1255,6 +1231,11 @@ export const CouncilConfigSchema = z.object({
     compression_threshold_ratio: z.number().min(0).max(1).default(0.6),
     devil_advocate: z.enum(['auto', 'always', 'never']).default('auto'),
     high_risk_keywords: z.array(z.string()).default([]),
+    stage_effort: z.object({
+      broadcast: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']).default('medium'),
+      review: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']).default('low'),
+      synthesis: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']).default('high'),
+    }).optional(),
   }),
 
   storage: z.object({
@@ -1381,12 +1362,7 @@ export const PATHS = {
   logs:         join(COUNCIL_HOME, 'logs'),
 } as const;
 
-/** 已知 CLI 客户端凭证路径 */
-export const KNOWN_CREDENTIALS = {
-  openai:  join(homedir(), '.codex', 'auth.json'),
-  google:  join(homedir(), '.gemini', 'oauth_creds.json'),
-  'google-vertex': join(homedir(), '.config', 'gcloud', 'application_default_credentials.json'),
-} as const;
+// 凭证路径不再由 Council 管理，统一委托给 pi-ai
 ```
 
 ---
@@ -1478,11 +1454,10 @@ export async function runCouncil(question: string | undefined, options: any) {
   const config = loader.loadCouncilConfig();
   const models = loader.loadAllModels();
 
-  // 2. 初始化各层
+  // 2. 初始化各层（鉴权由 pi-ai 管理，无需手动创建 CredentialManager）
   const db = initDatabase(PATHS.database);
-  const credentialManager = new CredentialManager();
   const adapter = new AutoAdapter(
-    new ApiAdapter(credentialManager),
+    new ApiAdapter(),   // 内部通过 pi-ai 的 getEnvApiKey / getOAuthApiKey 获取凭证
     new CliAdapter(),
   );
   const sessionStore = new SessionStore(PATHS.sessionsDir, db);

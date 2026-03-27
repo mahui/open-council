@@ -71,7 +71,7 @@ export class Anonymizer {
   /** Layer 3: Format normalization (eliminate stylistic fingerprints) */
   private normalizeFormatting(text: string): string {
     return text
-      .replace(/[\u{1F600}-\u{1F9FF}]/gu, '')           // Remove emoji
+      .replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1FA00}-\u{1FAFF}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]/gu, '') // Remove emoji (comprehensive ranges)
       .replace(/^#{1,2}\s/gm, '### ')                    // Normalize heading levels
       .replace(/^\*/gm, '-')                              // Normalize list markers
       .replace(/\*\*(.+?)\*\*/g, '**$1**');               // Keep bold (already unified)

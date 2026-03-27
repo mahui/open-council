@@ -2,13 +2,13 @@
 
 **基于本地 CLI 工具的多模型辩论编排系统**
 
-**产品需求文档 (PRD) v6.3**
+**产品需求文档 (PRD) v7.0**
 
 | 项目 | 内容 |
 |------|------|
 | 文档状态 | Draft |
-| 版本 | 6.3 |
-| 日期 | 2026-03-25 |
+| 版本 | 7.0 |
+| 日期 | 2026-03-26 |
 | 作者 | Henry |
 | 重点模块 | 辩论流程编排 / 过程数据持久化 / 模型工具配置 / 用户交互体验 |
 
@@ -27,7 +27,7 @@ Local AI Council 是一个本地化的多 Agent 辩论编排系统。其本质�
 | **CLI 模式** | 通过 subprocess 调用本地已安装的 CLI 工具（claude-code、codex、gemini-cli） | 零配置、复用 CLI 的完整能力（如 codex 的代码执行沙箱） | 已安装 CLI 且不需要极致性能 |
 | **API 模式** | 直接调用 Provider SDK/HTTP API，复用本地 CLI 客户端已存储的 OAuth 凭证 | 更低延迟、原生流式输出、更精细的错误处理、无 subprocess 开销 | 追求性能、或 CLI 工具不可用但本地有有效凭证 |
 
-API 模式的核心思路参考 [pi-mono/packages/ai](https://github.com/badlogic/pi-mono/tree/main/packages/ai) 项目——不依赖 CLI 二进制，而是直接使用 Provider SDK（`@anthropic-ai/sdk`、`openai`、`@google/genai`），**自动发现并复用用户本机已安装 CLI 客户端的 OAuth 凭证**，实现零额外登录。
+API 模式直接依赖 [`@mariozechner/pi-ai`](https://github.com/badlogic/pi-mono/tree/main/packages/ai) 统一 LLM 库——不自行管理各 Provider SDK，而是通过 pi-ai 的统一接口接入所有主流模型。pi-ai 内置了自动模型发现、OAuth 凭证管理（含 token 刷新）、环境变量 API Key 探测等能力。Council 的 API 模式支持的 Provider 和鉴权方式与 pi-ai 保持一致——**pi-ai 支持几种模型、几种接入方式，Council 就支持几种**。
 
 **核心概念**：Agent ≠ 模型。一个模型可以通过不同的角色 prompt 扮演多个 Agent。即使用户只安装了一个 CLI 工具（如 Claude Code），也能让同一模型分别扮演"分析师"、"工程师"、"创新者"三个 Agent 参与辩论，通过角色差异化的 prompt 激发多视角碰撞。多模型 + 多角色的组合效果最佳；**单模型多角色可用，但置信度较低**——同一底模的多角色更接近"多次有偏采样"而非独立 ensemble，系统会通过 `model_diversity_factor` 自动调低其置信度（见 Phase 3 共识评估）。
 
@@ -838,63 +838,81 @@ SQLite 仅存储元数据索引，不存储完整的 prompt/response 内容。�
 - 某些 CLI 工具提供额外的 context 管理（如 Claude Code 的项目上下文）
 - 用户明确需要 CLI 特有功能时，应使用 CLI 模式
 
-#### 4.2.2 本地凭证自动发现（Credential Discovery）
+#### 4.2.2 凭证与鉴权（统一由 pi-ai 管理）
 
-系统启动时自动扫描已安装 CLI 客户端的本地凭证存储，实现**零额外登录**接入。用户已在 CLI 中完成的登录可直接复用。
+凭证发现、Token 刷新、OAuth 登录等**全部委托给 `@mariozechner/pi-ai`**，Council 不自行实现鉴权逻辑。pi-ai 支持以下鉴权方式，Council 透传使用：
 
-**已知凭证路径：**
+**方式一：环境变量 API Key**
 
-| Provider | CLI 工具 | 凭证文件路径 | 格式 | 关键字段 |
-|----------|---------|------------|------|---------|
-| **Anthropic** (Claude) | claude-code | `~/.claude/` 下的 OAuth 会话 | — | 通过 OAuth PKCE 流程获取（authorize: `claude.ai/oauth/authorize` → token: `platform.claude.com/v1/oauth/token`） |
-| **OpenAI** (Codex) | codex-cli | `~/.codex/auth.json` | JSON | `tokens.access_token`, `tokens.refresh_token`, `tokens.account_id` |
-| **Google** (Gemini) | gemini-cli | `~/.gemini/oauth_creds.json` | JSON | `access_token`, `refresh_token`, `expiry_date` |
-| **Google Vertex** | gcloud | `~/.config/gcloud/application_default_credentials.json` | JSON | ADC (Application Default Credentials) |
+pi-ai 的 `getEnvApiKey(provider)` 自动检测以下环境变量：
 
-**凭证发现流程**：
+| Provider | 环境变量 |
+|----------|---------|
+| OpenAI | `OPENAI_API_KEY` |
+| Anthropic | `ANTHROPIC_OAUTH_TOKEN`（优先）, `ANTHROPIC_API_KEY` |
+| Google | `GEMINI_API_KEY` |
+| Google Vertex | `GOOGLE_CLOUD_API_KEY` 或 ADC（`GOOGLE_CLOUD_PROJECT` + `GOOGLE_CLOUD_LOCATION`） |
+| Azure OpenAI | `AZURE_OPENAI_API_KEY` |
+| Mistral | `MISTRAL_API_KEY` |
+| Groq | `GROQ_API_KEY` |
+| Cerebras | `CEREBRAS_API_KEY` |
+| xAI | `XAI_API_KEY` |
+| OpenRouter | `OPENROUTER_API_KEY` |
+| Vercel AI Gateway | `AI_GATEWAY_API_KEY` |
+| MiniMax | `MINIMAX_API_KEY` |
+| HuggingFace | `HF_TOKEN` |
+| GitHub Copilot | `COPILOT_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN` |
+| Kimi/Moonshot | `KIMI_API_KEY` |
+| Amazon Bedrock | AWS 标准凭证链（IAM Key / Profile / ECS / IRSA） |
+
+**方式二：OAuth 自动凭证发现与刷新**
+
+pi-ai 内置 5 个 OAuth Provider 的完整登录 + Token 刷新流程：
+
+| OAuth Provider | 对应订阅 | 凭证来源 |
+|---------------|---------|---------|
+| **Anthropic** | Claude Pro/Max | Claude Code OAuth 会话 |
+| **OpenAI Codex** | ChatGPT Plus/Pro | `~/.codex/auth.json` |
+| **GitHub Copilot** | Copilot 订阅 | Device Code Flow |
+| **Google Gemini CLI** | Gemini CLI OAuth | `~/.gemini/oauth_creds.json` |
+| **Antigravity** | 多模型访问 via Google Cloud | Antigravity OAuth |
+
+Council 通过 pi-ai 的 `getOAuthApiKey(providerId, credentials)` 获取有效 token，pi-ai 自动处理过期检测和 refresh_token 刷新。
+
+**凭证发现流程（Council 启动时）**：
 
 ```
-1. 扫描已知凭证路径
-   ├── ~/.codex/auth.json → 检查 tokens.access_token 是否存在
-   ├── ~/.gemini/oauth_creds.json → 检查 access_token 是否存在
-   ├── ~/.config/gcloud/application_default_credentials.json → ADC
-   └── 环境变量 fallback: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY
+1. 调用 pi-ai 的 getEnvApiKey() 检查环境变量
+   └── 有值 → 直接使用，跳过 OAuth
 
-2. 验证凭证有效性
-   ├── 检查 expiry_date/expires 是否过期
-   ├── 若过期 → 使用 refresh_token 自动刷新
-   └── 刷新失败 → 标记为 expired，引导用户重新登录对应 CLI
+2. 调用 pi-ai 的 OAuth Provider 获取已存储凭证
+   ├── pi-ai 自动扫描已知路径（~/.codex/auth.json 等）
+   ├── 检查 token 过期 → 自动 refresh
+   └── 刷新失败 → 标记为 expired，引导用户重新登录
 
-3. 注册可用的 API 端点
-   └── 为每个有效凭证生成 invocation: api 的模型配置
+3. 为每个有效凭证注册可用的模型配置
+   └── 调用 pi-ai 的 getModels(provider) 获取可用模型列表
 ```
 
-**Token 刷新机制**：
+> **设计原则**: Council **不自行实现**任何凭证解析、Token 刷新、OAuth 流程。所有鉴权逻辑通过 pi-ai 统一处理。当 pi-ai 新增 Provider 支持时，Council 自动获得该 Provider 的接入能力，无需修改代码。
 
-| Provider | Token 端点 | 刷新方式 |
-|----------|-----------|---------|
-| Anthropic | `platform.claude.com/v1/oauth/token` | OAuth refresh_token 交换 |
-| OpenAI | `auth.openai.com/oauth/token` | OAuth refresh_token 交换（需 client_id: `app_EMoamEEZ73f0CkXaXp7hrann`） |
-| Google | `oauth2.googleapis.com/token` | OAuth refresh_token 交换 |
+> **安全边界**: pi-ai 的凭证操作均在本地完成，不向外部上报凭证信息。发现的凭证状态可通过 `council models` 查看，但不显示 token 值。
 
-> **安全原则**: Council 只**读取**本地凭证文件，不修改、不迁移、不复制到自己的存储目录。Token 刷新后的新 token 写回原文件路径（保持与原 CLI 工具共享同一份凭证）。如果用户在 CLI 中登出，Council 的 API 模式也自然失效。
+#### 4.2.3 OAuth 登录流程（由 pi-ai 提供）
 
-> **隐私边界**: 凭证发现过程仅在本地文件系统操作，不向任何外部服务上报凭证信息。发现的凭证路径和状态（有效/过期/不存在）可通过 `council models` 查看，但不显示 token 值本身。
+当本地无有效凭证且环境变量也未设置时，Council 可通过 pi-ai 的 OAuth Provider 接口触发交互式登录流程。pi-ai 内置以下 OAuth 提供者：
 
-#### 4.2.3 OAuth 登录流程（Fallback）
+| OAuth Provider | 订阅要求 | 登录方式 |
+|---------------|---------|---------|
+| Anthropic | Claude Pro/Max | Authorization Code + PKCE |
+| OpenAI Codex | ChatGPT Plus/Pro | Authorization Code + PKCE |
+| GitHub Copilot | Copilot 订阅 | Device Code Flow |
+| Google Gemini CLI | Gemini 访问权限 | Authorization Code + PKCE |
+| Antigravity | Google Cloud 多模型 | Authorization Code + PKCE |
 
-当本地无有效凭证且 CLI 工具也未安装时，Council 可以**内置 OAuth 登录流程**作为 fallback，让用户直接在 Council 中完成授权：
+Council 通过 pi-ai 的 `OAuthProviderInterface` 调用 `login()` 方法触发登录，凭证由 pi-ai 管理和持久化。
 
-| Provider | OAuth 流程 | 本地回调端口 |
-|----------|-----------|------------|
-| Anthropic | Authorization Code + PKCE | `127.0.0.1:53692/callback` |
-| OpenAI | Authorization Code + PKCE | `localhost:1455/auth/callback` |
-| Google (Gemini) | Authorization Code + PKCE | `localhost:8085/oauth2callback` |
-| GitHub Copilot | Device Code Flow（轮询） | 无需回调 |
-
-OAuth 登录获取的凭证存储在 `~/.council/credentials/` 目录下（独立于 CLI 工具的凭证目录），文件权限 `600`。
-
-> **实现优先级**: 内置 OAuth 登录是 Phase 4+ 的功能。v1 优先复用已安装 CLI 客户端的凭证，不需要自己实现 OAuth 流程。
+> **实现简化**: 由于 pi-ai 已完整实现 OAuth 登录 + Token 刷新，Council 无需自行实现任何 OAuth 流程，大幅降低了实现复杂度。
 
 ### 4.3 引导式配置（Setup Wizard）
 
@@ -914,7 +932,7 @@ OAuth 登录获取的凭证存储在 `~/.council/credentials/` 目录下（独�
   让我们花 2 分钟完成初始配置
 ══════════════════════════════════════════════════════
 
-Step 1/5 — 扫描本地 AI 工具与凭证
+Step 1/6 — 扫描本地 AI 工具与凭证
 ──────────────────────────────────────────────────────
   正在扫描已安装的 CLI 工具...
 
@@ -922,30 +940,32 @@ Step 1/5 — 扫描本地 AI 工具与凭证
   ✓ gemini    Gemini CLI        /usr/local/bin/gemini
   ✗ codex     Codex CLI         未找到
 
-  正在扫描本地 OAuth 凭证...
+  正在通过 pi-ai 扫描可用 API Provider...
 
-  ✓ ~/.codex/auth.json                  OpenAI 凭证有效 (account: user@example.com)
-  ✓ ~/.gemini/oauth_creds.json          Google 凭证有效 (expires: 2026-03-26)
-  ✗ ~/.config/gcloud/application_default_credentials.json   未找到
+  ✓ anthropic       Claude Pro/Max OAuth 凭证有效
+  ✓ openai          Codex OAuth 凭证有效 (via ~/.codex/auth.json)
+  ✓ google          Gemini OAuth 凭证有效
+  ✗ github-copilot  未发现凭证
+  ✗ mistral         未发现 MISTRAL_API_KEY
 
-  检测到 2 个 CLI 工具 + 1 个额外 API 凭证 (OpenAI) ✓
-  Codex CLI 未安装，但发现本地 OpenAI 凭证 → 可通过 API 模式接入 ✓
+  检测到 2 个 CLI 工具 + 3 个 API Provider ✓
   (即使只有 1 个来源也可以使用 — 同一模型可扮演多个角色参与辩论)
 
-Step 2/5 — 选择模型与调用模式
+Step 2/6 — 选择模型与调用模式
 ──────────────────────────────────────────────────────
-  每个来源支持多个模型，请选择要启用的:
+  每个 Provider 的可用模型列表由 pi-ai 动态获取:
 
-  Claude Code (CLI 模式):
+  Anthropic (CLI: claude / API: OAuth):
   > [✓] claude-sonnet-4-20250514     均衡, 速度快 (推荐)
     [✓] claude-opus-4-20250514       最强, 适合 Chairman (推荐)
     [ ] claude-haiku-4-5-20251001    最快, 能力较弱
 
-  OpenAI (API 模式 — 复用 ~/.codex/auth.json 凭证):
+  OpenAI (API 模式 — 复用 Codex OAuth 凭证):
   > [✓] o4-mini                      均衡, 代码能力强 (推荐)
     [ ] o3                           最强, 较慢
+    [ ] gpt-4.1                      通用
 
-  Gemini CLI (CLI 模式):
+  Google (CLI: gemini / API: OAuth):
   > [✓] gemini-2.5-pro              综合能力强 (推荐)
     [ ] gemini-2.5-flash             快速, 适合简单问题
 
@@ -953,26 +973,49 @@ Step 2/5 — 选择模型与调用模式
 
   已选择 3 个模型: claude-opus, claude-sonnet, gemini-pro  ✓
 
-Step 3/5 — 验证模型可用性
+Step 3/6 — 验证模型可用性
 ──────────────────────────────────────────────────────
   正在验证各模型是否正常工作...
 
   ✓ claude --version        → Claude Code v1.2.3
   ✓ gemini --version        → Gemini CLI v0.5.1
+  ✓ anthropic API           → 凭证有效
+  ✓ openai API              → 凭证有效
 
   全部验证通过 ✓
 
-Step 4/5 — 选择默认主持人 (Chairman)
+Step 4/6 — 配置推理深度 (Reasoning Effort)
+──────────────────────────────────────────────────────
+  推理深度控制模型的"思考力度"。推荐使用默认值:
+
+  claude-opus:
+  > ● high     深度推理, 适合 Chairman 综合 (推荐)
+    ○ medium   均衡
+    ○ xhigh    最深度推理 (仅部分模型支持)
+
+  claude-sonnet:
+  > ● medium   均衡推理 (推荐)
+    ○ low      轻度推理, 更快
+    ○ high     深度推理
+
+  gemini-pro:
+  > ● medium   均衡推理 (推荐)
+    ○ low      轻度推理, 更快
+    ○ high     深度推理
+
+  [↑↓ 选择, Enter 确认]   [s] 全部使用推荐值
+
+Step 5/6 — 选择默认主持人 (Chairman)
 ──────────────────────────────────────────────────────
   Chairman 负责最终综合各方观点，建议选择综合能力最强的模型。
 
-  > ● claude-opus     (推荐 — 最强综合能力)
+  > ● claude-opus     (推荐 — 最强综合能力, reasoning: high)
     ○ claude-sonnet
     ○ gemini-pro
 
   [↑↓ 选择, Enter 确认]
 
-Step 5/5 — 选择默认辩论模式
+Step 6/6 — 选择默认辩论模式
 ──────────────────────────────────────────────────────
   > ● auto     自动根据问题复杂度选择 (推荐)
     ○ quick    单模型快速回答
@@ -1216,24 +1259,36 @@ council models add --id codex-o4mini --binary codex --model o4-mini --args "--qu
 
 系统内置常见工具的预设配置，引导过程中自动匹配，减少用户输入。每个 Provider 同时支持 CLI 和 API 两种调用模式：
 
-**CLI 模式预设：**
+**CLI 模式预设（仅定义 CLI 工具的调用参数，不硬编码模型列表）：**
 
-| 工具 | binary | 可选模型 | 模型切换参数 | 预设 input_mode |
+| 工具 | binary | 模型来源 | 模型切换参数 | 预设 input_mode |
 |------|--------|---------|-------------|----------------|
-| Claude Code | `claude` | claude-sonnet-4-20250514, claude-opus-4-20250514, claude-haiku-4-5-20251001 等 | `--model {model}` | stdin |
-| Codex CLI | `codex` | o4-mini, o3, codex-mini 等 | `--model {model}` | arg |
-| Gemini CLI | `gemini` | gemini-2.5-pro, gemini-2.5-flash 等 | `--model {model}` | stdin |
-| Ollama | `ollama` | 本地已拉取的模型（qwen2.5, llama3, deepseek 等） | `run {model}` | stdin |
+| Claude Code | `claude` | pi-ai `getModels('anthropic')` 动态获取 | `--model {model}` | stdin |
+| Codex CLI | `codex` | pi-ai `getModels('openai')` 动态获取 | `--model {model}` | arg |
+| Gemini CLI | `gemini` | pi-ai `getModels('google')` 动态获取 | `--model {model}` | stdin |
+| Ollama | `ollama` | `ollama list` 动态获取本地已拉取的模型 | `run {model}` | stdin |
 | Aider | `aider` | 取决于配置的 provider | `--model {model}` | arg |
 
-**API 模式预设（凭证自动发现）：**
+> **动态模型列表**: CLI 模式预设只定义工具的调用方式（binary、args、input_mode），**可用模型列表不硬编码在预设中**，而是通过 pi-ai 的 `getModels(provider)` 在 Setup Wizard 和 `models add` 时动态获取。这样当 Provider 发布新模型时，用户无需更新 Council 即可使用。
 
-| Provider | SDK | 凭证来源 | 可用模型 | Token 刷新端点 |
-|----------|-----|---------|---------|--------------|
-| Anthropic | `@anthropic-ai/sdk` | Claude Code OAuth 凭证 / `ANTHROPIC_API_KEY` | claude-opus-4, claude-sonnet-4, claude-haiku-4.5 等 | `platform.claude.com/v1/oauth/token` |
-| OpenAI | `openai` | `~/.codex/auth.json` / `OPENAI_API_KEY` | o4-mini, o3, gpt-4.1 等 | `auth.openai.com/oauth/token` |
-| Google | `@google/genai` | `~/.gemini/oauth_creds.json` / `GEMINI_API_KEY` | gemini-2.5-pro, gemini-2.5-flash 等 | `oauth2.googleapis.com/token` |
-| GitHub Copilot | `openai`（兼容端点） | `COPILOT_GITHUB_TOKEN` / `GH_TOKEN` | copilot-chat 等 | Device Code Flow |
+**API 模式预设（统一由 pi-ai 管理，模型列表通过 `getModels(provider)` 自动发现）：**
+
+| Provider | 鉴权方式 | 典型可用模型 |
+|----------|---------|------------|
+| Anthropic | OAuth（Claude Pro/Max）/ `ANTHROPIC_API_KEY` | claude-opus-4, claude-sonnet-4, claude-haiku-4.5 等 |
+| OpenAI | OAuth（Codex CLI）/ `OPENAI_API_KEY` | o4-mini, o3, gpt-4.1, gpt-5.x 等 |
+| Google | OAuth（Gemini CLI）/ `GEMINI_API_KEY` | gemini-2.5-pro, gemini-2.5-flash 等 |
+| Google Vertex | ADC / `GOOGLE_CLOUD_API_KEY` | gemini-2.5-pro 等（Vertex 端点） |
+| Azure OpenAI | `AZURE_OPENAI_API_KEY` | 由企业部署决定 |
+| Mistral | `MISTRAL_API_KEY` | mistral-large, codestral 等 |
+| GitHub Copilot | OAuth（Device Code）/ `GH_TOKEN` | copilot-chat 等 |
+| Amazon Bedrock | AWS 凭证链 | claude, llama, mistral 等（Bedrock 端点） |
+| Groq | `GROQ_API_KEY` | llama, mixtral 等（Groq 加速推理） |
+| xAI | `XAI_API_KEY` | grok 系列 |
+| OpenRouter | `OPENROUTER_API_KEY` | 聚合多 Provider 模型 |
+| Ollama / vLLM / LM Studio | 本地服务（OpenAI 兼容端点） | 用户本地部署的任意模型 |
+
+> **模型发现**: Council 启动时调用 pi-ai 的 `getProviders()` 和 `getModels(provider)` 动态获取完整模型列表，而非硬编码。当 pi-ai 新增 Provider 或模型时，Council 自动可见。
 
 > **核心概念**：一个 Provider 可以注册多个模型配置，且 CLI 和 API 模式可共存。例如 Anthropic 可以同时注册 `claude-opus`（CLI 模式，利用 Claude Code 的项目上下文能力）和 `anthropic-opus-api`（API 模式，更低延迟），路由时按需选择。
 
@@ -1262,7 +1317,7 @@ council models add --id codex-o4mini --binary codex --model o4-mini --args "--qu
 |------|------|------|---------|------|
 | name | string | ✓ | Step 1 | 显示名称，如 "Claude Opus" |
 | invocation | enum | ✓ | Step 2 | `cli` \| `api` \| `auto` — 调用模式（见 4.2.1）。`auto` 优先 API，回退 CLI |
-| provider | enum | — | 自动推断 | `anthropic` \| `openai` \| `google` \| `github-copilot` \| `ollama` \| `custom` — API 模式下标识 Provider |
+| provider | enum | — | 自动推断 | pi-ai 支持的所有 Provider ID（`anthropic` \| `openai` \| `google` \| `google-vertex` \| `azure-openai-responses` \| `mistral` \| `github-copilot` \| `bedrock` \| `groq` \| `cerebras` \| `xai` \| `openrouter` \| `ollama` \| `custom` 等）— API 模式下标识 Provider |
 | model | string | — | Step 2 | 具体模型标识（如 "claude-opus-4-20250514"）。同一 provider/binary 可注册多个 model |
 | timeout_seconds | int | ✓ | Step 5 | 默认 120，每次调用的超时时间 |
 | capabilities | string[] | ✓ | Step 4 | 能力声明，见 4.6。同一工具的不同模型可有不同能力标签 |
@@ -1270,6 +1325,13 @@ council models add --id codex-o4mini --binary codex --model o4-mini --args "--qu
 | max_concurrent | int | ✓ | Step 5 | 默认 1。该模型的最大并发调用数 |
 | resource_weight | int | ✓ | Step 5 | 默认 1。资源权重（本地模型自动设为 3-5，云端设为 1） |
 | enabled | bool | ✓ | 默认 true | 设为 false 可临时禁用而不删配置 |
+| reasoning_effort | enum | — | Step 6 | `minimal` \| `low` \| `medium` \| `high` \| `xhigh` — 推理深度控制（见 4.4.2）。未设置时由模型默认行为决定 |
+
+> **`reasoning_effort` 说明**: 该字段映射到 pi-ai 的 `ThinkingLevel`，控制模型的"思考深度"。不同 Provider 的底层实现不同（OpenAI 的 `reasoningEffort`、Anthropic 的 `thinkingEnabled` + token 预算、Google 的 `thinking` 配置），但 pi-ai 统一抽象为 5 个档位。Council 通过此字段让用户按场景灵活控制：
+> - Chairman（综合者）建议 `high` 或 `xhigh` — 需要深度分析和综合
+> - Review 阶段建议 `medium` — 均衡的评审深度
+> - Quick 模式可用 `low` — 快速响应
+> - `xhigh` 仅部分模型支持（pi-ai 的 `supportsXhigh(model)` 可检测），不支持时自动降级为 `high`
 
 **CLI 模式专用字段**（`invocation: cli` 或 `auto` 时使用）：
 
@@ -1292,6 +1354,8 @@ council models add --id codex-o4mini --binary codex --model o4-mini --args "--qu
 | api_base_url | string | — | 自定义 API 端点（用于代理、企业版、或 Azure OpenAI 等场景） |
 | api_key_env | string | — | 环境变量名（如 `ANTHROPIC_API_KEY`），优先级高于凭证文件。适用于用户持有独立 API Key 的场景 |
 | streaming | bool | — | 是否使用流式输出，默认 `true` |
+| temperature | float | — | 模型温度参数（0.0-2.0），未设置时使用模型默认值 |
+| max_tokens | int | — | 最大输出 token 数，未设置时使用模型默认值 |
 
 **`health_check` 子字段定义**（CLI 模式）：
 
@@ -1315,7 +1379,34 @@ council models add --id codex-o4mini --binary codex --model o4-mini --args "--qu
 - `priority`: 首次添加时根据预设库推荐（同工具下旗舰模型优先级更高）；后续可通过 `council setup` 调整或由动态权重自动优化
 - `resource_weight`: 根据"云端/本地"选择自动设定（云端=1, 本地=5）
 
-#### 4.4.2 配置示例
+#### 4.4.2 推理深度（Reasoning Effort）配置
+
+`reasoning_effort` 通过 pi-ai 的 `SimpleStreamOptions.reasoning` 透传给各 Provider，控制模型的"思考深度"：
+
+| reasoning_effort | 适用场景 | 效果 |
+|-----------------|---------|------|
+| `minimal` | 快速分类、简单格式化 | 最低 token 消耗，几乎无思考 |
+| `low` | quick 模式、简单问答 | 轻度推理，响应快 |
+| `medium`（默认） | compare 模式、常规 Review | 均衡的推理深度 |
+| `high` | debate 模式、Chairman 综合 | 深度推理，适合复杂分析 |
+| `xhigh` | 高价值决策、数学证明 | 最深度推理，仅部分模型支持 |
+
+**阶段级 Effort Override**: 除了模型配置中的全局 `reasoning_effort`，编排器还支持按辩论阶段动态覆盖：
+
+```yaml
+# council.yaml
+general:
+  stage_effort:
+    broadcast: medium        # 各 Agent 回答：均衡
+    review: low              # 互评：不需要太深的推理
+    synthesis: high          # Chairman 综合：需要深度分析
+```
+
+当 `stage_effort` 与模型配置中的 `reasoning_effort` 同时存在时，取**较高**的那个（不会降低模型自身配置的推理深度）。
+
+**动态模型信息**: 模型的 `contextWindow`、`maxTokens`、是否支持 reasoning、是否支持 `xhigh` 等元信息通过 pi-ai 的 `getModel()` 返回的 `Model` 对象动态获取，Council 不硬编码这些值。编排器在构建 prompt 时参考 `contextWindow` 计算是否需要压缩。
+
+#### 4.4.3 配置示例
 
 引导流程自动生成的 YAML 文件示例。注意同一 Provider 可以注册多个模型配置，且 CLI 和 API 模式可混用：
 
@@ -1341,6 +1432,7 @@ capabilities: [general, code, analysis, chinese, architecture]
 priority: 10              # 旗舰模型，最高优先级，推荐作为 Chairman
 max_concurrent: 1
 resource_weight: 1
+reasoning_effort: high    # 旗舰模型用于综合，深度推理
 enabled: true
 ```
 
@@ -1364,6 +1456,7 @@ capabilities: [general, code, analysis, chinese]
 priority: 20              # 均衡模型，速度更快
 max_concurrent: 2
 resource_weight: 1
+reasoning_effort: medium  # 均衡模型，中等推理深度
 enabled: true
 ```
 
@@ -1426,6 +1519,7 @@ capabilities: [general, code, analysis, chinese, architecture]
 priority: 10
 max_concurrent: 3
 resource_weight: 1
+reasoning_effort: high          # 综合者角色，深度推理
 enabled: true
 ```
 
@@ -2354,7 +2448,7 @@ Found 3 related debates:
 
 目标：**验证核心假设** —— 多模型编排的回答质量是否优于单模型
 
-- 硬编码 2 个模型（如 claude + gemini），**优先使用 API 模式**（直接读取本地凭证调用 SDK），CLI 模式作为 fallback
+- 硬编码 2 个模型（如 claude + gemini），**优先使用 API 模式**（通过 pi-ai 统一接口调用），CLI 模式作为 fallback
 - 仅实现 Broadcast + Synthesis 两阶段，无 review
 - 结果直接输出到 stdout，无持久化
 - 无异常处理、无中断恢复
@@ -2363,10 +2457,10 @@ Found 3 related debates:
 ### Phase 1: MVP + 引导式配置（建议 3-5 天）
 
 - **首次运行引导**: First-Run Wizard（5 步：扫描工具+凭证 → 选择模型+调用模式 → 验证 → 选 Chairman → 选模式）
-- **双模调用适配**: CLI 模式（subprocess）+ API 模式（SDK 直调），`invocation: auto` 自动选择
-- **凭证自动发现**: 扫描 `~/.codex/auth.json`、`~/.gemini/oauth_creds.json` 等已知路径，复用已有登录
-- **Token 自动刷新**: 凭证过期时使用 refresh_token 自动续期
-- **预设库**: 内置 claude/codex/gemini 的 CLI 和 API 双模预设配置
+- **双模调用适配**: CLI 模式（subprocess）+ API 模式（通过 pi-ai 统一接口），`invocation: auto` 自动选择
+- **鉴权统一**: 凭证发现、Token 刷新、OAuth 登录全部委托给 `@mariozechner/pi-ai`，Council 不自行实现鉴权逻辑
+- **模型发现**: 通过 pi-ai 的 `getProviders()` / `getModels()` 动态发现可用模型，支持 20+ Provider
+- **预设库**: CLI 模式内置 claude/codex/gemini 预设；API 模式由 pi-ai 自动管理
 - **配置加载**: YAML 读取、模型注册、L1 健康检查（CLI: binary 存在检查；API: 凭证有效性检查）
 - **基础编排**: Broadcast + Synthesis 两阶段（跳过 review）
 - **基础持久化**: Session JSON 写入、目录初始化

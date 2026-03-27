@@ -6,7 +6,8 @@
 
 import type { ModelConfig, CouncilConfig, RoleSet } from '../types/config.js';
 import type { DebateMode, Agent, RunOptions } from '../types/session.js';
-import { randomUUID } from 'node:crypto';
+// Use globalThis.crypto to avoid importing node:crypto in core/ (ARCH-01)
+const randomUUID = (): string => globalThis.crypto.randomUUID();
 
 // ---------------------------------------------------------------------------
 // Question type classification

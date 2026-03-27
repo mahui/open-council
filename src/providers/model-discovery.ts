@@ -8,6 +8,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { CredentialManager } from './credentials/discovery.js';
+import { hasBinary } from './utils.js';
 
 export interface DiscoveredModel {
   id: string;
@@ -235,11 +236,4 @@ function parseModelsFromOutput(output: string): DiscoveredModel[] {
   return models;
 }
 
-function hasBinary(name: string): boolean {
-  try {
-    execSync(`which ${name}`, { stdio: 'pipe' });
-    return true;
-  } catch {
-    return false;
-  }
-}
+// hasBinary imported from ./utils.js (uses execFileSync to avoid command injection)

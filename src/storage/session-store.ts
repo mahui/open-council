@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Session } from '../types/session.js';
+import { safePath } from '../providers/utils.js';
 
 export interface SessionFilter {
   status?: string;
@@ -73,6 +74,6 @@ export class SessionStore {
   }
 
   private getPath(sessionId: string): string {
-    return join(this.sessionsDir, `${sessionId}.json`);
+    return safePath(this.sessionsDir, `${sessionId}.json`);
   }
 }

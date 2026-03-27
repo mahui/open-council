@@ -1,9 +1,9 @@
-import { execSync } from 'node:child_process';
 import type { ModelConfig } from '../types/config.js';
 import type { InvocationAdapter, InvocationResult, HealthStatus, OnChunk } from '../types/provider.js';
 import { ModelUnavailableError } from '../types/errors.js';
 import type { ApiAdapter } from './api-adapter.js';
 import type { CliAdapter } from './cli-adapter.js';
+import { hasBinary } from './utils.js';
 
 /** Maps provider to CLI binary + args for fallback */
 const CLI_FALLBACKS: Record<string, { binary: string; args: (model: string) => string[] }> = {
@@ -11,10 +11,6 @@ const CLI_FALLBACKS: Record<string, { binary: string; args: (model: string) => s
   openai:    { binary: 'codex',  args: (m) => ['exec', '-m', m, '-c', 'approval_policy="never"', '--json'] },
   google:    { binary: 'gemini', args: (_m) => ['-p'] },
 };
-
-function hasBinary(name: string): boolean {
-  try { execSync(`which ${name}`, { stdio: 'pipe' }); return true; } catch { return false; }
-}
 
 export class AutoAdapter implements InvocationAdapter {
   constructor(

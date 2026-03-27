@@ -24,7 +24,7 @@ const GOOGLE_CLIENT_ID = '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.goo
 const GOOGLE_CLIENT_SECRET = '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';
 
 // Claude Code OAuth client ID (base64: OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl)
-const ANTHROPIC_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d19625e';
+const ANTHROPIC_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 
 const ENV_VARS: Record<string, string> = {
   anthropic: 'ANTHROPIC_API_KEY',

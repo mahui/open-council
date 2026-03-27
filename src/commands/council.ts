@@ -48,7 +48,8 @@ export async function runCouncil(question: string | undefined, options: CouncilO
       const config = loader.loadCouncilConfig();
       models = loader.loadAllModels();
       if (!chairman) chairman = config.general.default_chairman;
-    } catch {
+    } catch (err) {
+      process.stderr.write(`Warning: config error, falling back to env discovery: ${err instanceof Error ? err.message : err}\n`);
       models = discoverModelsFromEnv(credentialManager);
     }
   } else {
@@ -65,8 +66,11 @@ export async function runCouncil(question: string | undefined, options: CouncilO
   }
 
   const modelList = models.map(m => `${m.name}${m.invocation === 'cli' ? ' (CLI)' : ''}`).join(', ');
+  const isTTY = process.stderr.isTTY;
   process.stderr.write(
-    `\x1b[1m🏛️  Council\x1b[0m \x1b[2m${models.length} model(s): ${modelList}\x1b[0m\n`,
+    isTTY
+      ? `\x1b[1m🏛️  Council\x1b[0m \x1b[2m${models.length} model(s): ${modelList}\x1b[0m\n`
+      : `Council: ${models.length} model(s): ${modelList}\n`,
   );
 
   const apiAdapter = new ApiAdapter(credentialManager);
@@ -100,8 +104,8 @@ export async function runCouncil(question: string | undefined, options: CouncilO
     try {
       const store = new SessionStore(PATHS.sessionsDir);
       await store.saveSession(session);
-    } catch {
-      // Non-fatal: directory may not exist yet
+    } catch (err) {
+      process.stderr.write(`Warning: failed to save session: ${err instanceof Error ? err.message : err}\n`);
     }
   }
 

@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { setSchemaVersion } from './migration.js';
 
 const CURRENT_SCHEMA_VERSION = 1;
 
@@ -55,6 +56,22 @@ function migrate(db: Database.Database): void {
         content=sessions, content_rowid=rowid
       );
 
+      -- FTS5 content-sync triggers (keep FTS in sync with sessions table)
+      CREATE TRIGGER IF NOT EXISTS sessions_ai AFTER INSERT ON sessions BEGIN
+        INSERT INTO sessions_fts(rowid, question_preview, synthesis_preview)
+          VALUES (new.rowid, new.question_preview, new.synthesis_preview);
+      END;
+      CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN
+        INSERT INTO sessions_fts(sessions_fts, rowid, question_preview, synthesis_preview)
+          VALUES ('delete', old.rowid, old.question_preview, old.synthesis_preview);
+      END;
+      CREATE TRIGGER IF NOT EXISTS sessions_au AFTER UPDATE ON sessions BEGIN
+        INSERT INTO sessions_fts(sessions_fts, rowid, question_preview, synthesis_preview)
+          VALUES ('delete', old.rowid, old.question_preview, old.synthesis_preview);
+        INSERT INTO sessions_fts(rowid, question_preview, synthesis_preview)
+          VALUES (new.rowid, new.question_preview, new.synthesis_preview);
+      END;
+
       -- Session tags
       CREATE TABLE IF NOT EXISTS session_tags (
         session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
@@ -89,7 +106,7 @@ function migrate(db: Database.Database): void {
       CREATE INDEX IF NOT EXISTS idx_resource_slots_pid ON resource_slots(pid);
     `);
 
-    db.pragma(`user_version = ${CURRENT_SCHEMA_VERSION}`);
+    setSchemaVersion(db, CURRENT_SCHEMA_VERSION);
   }
 }
 

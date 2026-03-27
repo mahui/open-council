@@ -92,16 +92,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
   },
 ];
 
-import { execSync } from 'node:child_process';
-
-function hasBinary(name: string): boolean {
-  try {
-    execSync(`which ${name}`, { stdio: 'pipe' });
-    return true;
-  } catch {
-    return false;
-  }
-}
+import { hasBinary } from '../providers/utils.js';
 
 /** Discover models from environment variables, OAuth credentials, and CLI tools (Phase 0 fallback). */
 export function discoverModelsFromEnv(credentialManager?: { hasCredential(provider: string): boolean }): ModelConfig[] {

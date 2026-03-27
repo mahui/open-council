@@ -5,6 +5,7 @@ import { ModelConfigSchema, CouncilConfigSchema } from './schema.js';
 import type { CouncilConfig, ModelConfig, RoleSet } from '../types/config.js';
 import { ConfigNotFoundError, RoleSetNotFoundError } from '../types/errors.js';
 import { PATHS } from './paths.js';
+import { safePath } from '../providers/utils.js';
 
 export class ConfigLoader {
   constructor(private configDir: string = PATHS.config) {}
@@ -39,19 +40,22 @@ export class ConfigLoader {
   saveModelConfig(config: ModelConfig): void {
     const modelsDir = join(this.configDir, 'models');
     mkdirSync(modelsDir, { recursive: true });
-    const path = join(modelsDir, `${config.name}.yaml`);
+    const path = safePath(modelsDir, `${config.name}.yaml`);
     writeFileSync(path, stringifyYaml(config), { mode: 0o600 });
   }
 
   loadRoleSet(name: string): RoleSet {
-    // Check user-defined roles first
-    const userPath = join(this.configDir, 'roles', `${name}.yaml`);
+    const rolesDir = join(this.configDir, 'roles');
+    const builtinDir = join(import.meta.dirname, '..', '..', 'defaults', 'roles');
+
+    // Check user-defined roles first (safePath prevents path traversal)
+    const userPath = safePath(rolesDir, `${name}.yaml`);
     if (existsSync(userPath)) {
       return parseYaml(readFileSync(userPath, 'utf-8')) as RoleSet;
     }
 
     // Fall back to built-in defaults
-    const builtinPath = join(import.meta.dirname, '..', '..', 'defaults', 'roles', `${name}.yaml`);
+    const builtinPath = safePath(builtinDir, `${name}.yaml`);
     if (existsSync(builtinPath)) {
       return parseYaml(readFileSync(builtinPath, 'utf-8')) as RoleSet;
     }

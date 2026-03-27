@@ -1,18 +1,18 @@
 /**
  * ModelConfig, CouncilConfig type definitions.
  * Pure types — no runtime code (ARCH-04).
- * Actual zod schemas are in src/config/schema.ts (Phase 1).
- * For Phase 0, these are hand-defined minimal types.
+ * Actual zod schemas are in src/config/schema.ts.
+ * NOTE: These must stay in sync with the zod schemas.
  */
 
 export type InvocationMode = 'cli' | 'api' | 'auto';
 
-export type ProviderName = 'anthropic' | 'openai' | 'google' | 'github-copilot' | 'ollama' | 'custom';
+export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
 export interface ModelConfig {
   name: string;
   invocation: InvocationMode;
-  provider?: ProviderName;
+  provider?: string;  // pi-ai provider ID (dynamic, not a fixed enum)
   model?: string;
   timeout_seconds: number;
   capabilities: string[];
@@ -20,6 +20,11 @@ export interface ModelConfig {
   max_concurrent: number;
   resource_weight: number;
   enabled: boolean;
+
+  // Reasoning & generation params
+  reasoning_effort?: ReasoningEffort;
+  temperature?: number;
+  max_tokens?: number;
 
   // CLI-specific
   binary?: string;

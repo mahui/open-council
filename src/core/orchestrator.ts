@@ -4,7 +4,24 @@
  * Receives InvocationAdapter and Renderer via dependency injection.
  */
 
-import { randomUUID, createHash } from 'node:crypto';
+// Use globalThis.crypto (available in Node ≥20) to avoid importing node:crypto in core/ (ARCH-01)
+function generateId(): string {
+  return globalThis.crypto.randomUUID();
+}
+
+/** Simple deterministic hash for session dedup. Not cryptographic — just content fingerprinting. */
+function hashQuestion(question: string): string {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < question.length; i++) {
+    const ch = question.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return ((h2 >>> 0) * 0x100000000 + (h1 >>> 0)).toString(16).slice(0, 16);
+}
 import type {
   Session, Stage, Invocation, Agent, RunOptions,
   DebateMode, DebatePhase, SessionStatus, DegradationEvent,
@@ -17,7 +34,8 @@ import { Anonymizer } from './anonymizer.js';
 import { parseReviewResponse } from './score-parser.js';
 import { calculateConsensus } from './consensus.js';
 import { generateRoles, resolveModel } from './role-generator.js';
-import { buildCompressionPlan, applyFallbackCompression, type ScoredResponse } from './compression.js';
+import { resolveMode } from './router.js';
+import { buildCompressionPlan, applyFallbackCompression, type ScoredResponse, aggregateReviewScores } from './compression.js';
 
 const PHASE_SEQUENCES: Record<Exclude<DebateMode, 'auto'>, DebatePhase[]> = {
   quick:   ['route', 'broadcast'],
@@ -34,6 +52,7 @@ export class Orchestrator {
     private renderer: Renderer,
     private availableModels: ModelConfig[],
     private defaultChairman?: string,
+    private maxAgents: number = 5,
   ) {}
 
   async run(question: string, options: RunOptions): Promise<Session> {
@@ -133,9 +152,9 @@ export class Orchestrator {
       : options.mode;
 
     return {
-      session_id: randomUUID(),
+      session_id: generateId(),
       question,
-      question_hash: createHash('sha256').update(question).digest('hex').slice(0, 16),
+      question_hash: hashQuestion(question),
       mode: options.mode,
       resolved_mode: resolvedMode,
       status: 'routing',
@@ -148,19 +167,10 @@ export class Orchestrator {
   }
 
   private resolveAutoMode(question: string): Exclude<DebateMode, 'auto'> {
-    if (this.availableModels.length < 2) return 'quick';
-
-    const isShort = question.length < 20;
-    const isQuickKeyword = /^(hi|hello|hey|你好|帮我|翻译)\b/i.test(question.trim());
-
-    // Short greetings / trivial → quick
-    if (isShort && isQuickKeyword) return 'quick';
-
-    // Multiple models available → default to debate (full pipeline with review + consensus)
-    // Use compare only for very short simple questions
-    if (question.length < 15) return 'compare';
-
-    return 'debate';
+    // Delegate to the router module which has keyword classification,
+    // question type detection, and configurable heuristics.
+    const decision = resolveMode(question, this.availableModels);
+    return decision.mode;
   }
 
   private async executePhase(phase: DebatePhase, session: Session): Promise<void> {
@@ -199,7 +209,15 @@ export class Orchestrator {
       : models[0];
 
     // Generate roles AND model assignments in one AI call
-    const agentCount = Math.max(models.length, 3); // at least 3 perspectives
+    const maxAgents = this.maxAgents;
+    let agentCount: number;
+    if (session.resolved_mode === 'quick') {
+      agentCount = 1;
+    } else if (session.resolved_mode === 'compare') {
+      agentCount = Math.min(Math.max(models.length, 2), maxAgents); // min 2, cap at max_agents
+    } else {
+      agentCount = Math.min(Math.max(models.length, 3), maxAgents); // debate: min 3, cap at max_agents
+    }
     const roles = await generateRoles(
       session.question,
       agentCount,
@@ -210,12 +228,12 @@ export class Orchestrator {
     session.agents = roles.map(role => {
       const model = resolveModel(role, models);
       return {
-        agent_id: randomUUID(),
+        agent_id: generateId(),
         config: model,
         role: `${role.icon} ${role.name}`,
         role_description: role.description,
         system_prompt: role.system_prompt,
-        is_chairman: model === chairmanModel,
+        is_chairman: model.name === chairmanModel?.name,
         is_devil_advocate: false,
       };
     });
@@ -373,7 +391,7 @@ export class Orchestrator {
       .map(inv => ({
         role: inv.role,
         modelName: inv.model_name,
-        response: inv.response_raw,
+        response: inv.response_compressed ?? inv.response_raw,
       }));
 
     if (responses.length === 0) {
@@ -430,15 +448,18 @@ export class Orchestrator {
     const stage = this.createStage('review');
     const anonymizer = new Anonymizer();
 
-    // Get broadcast responses
-    const broadcastStage = session.stages.find(s => s.phase === 'broadcast');
-    if (!broadcastStage) {
+    // Get the LATEST response stage (broadcast or cross_examine for multi-round debates)
+    const responseStages = session.stages.filter(
+      s => (s.phase === 'broadcast' || s.phase === 'cross_examine') && s.status === 'completed',
+    );
+    const latestResponseStage = responseStages[responseStages.length - 1];
+    if (!latestResponseStage) {
       stage.status = 'skipped';
       session.stages.push(stage);
       return;
     }
 
-    const validInvocations = broadcastStage.invocations.filter(i => !i.timed_out && i.response_raw);
+    const validInvocations = latestResponseStage.invocations.filter(i => !i.timed_out && i.response_raw);
     if (validInvocations.length < 2) {
       stage.status = 'skipped';
       session.stages.push(stage);
@@ -498,25 +519,30 @@ export class Orchestrator {
   private executeConsensus(session: Session): void {
     const stage = this.createStage('consensus');
 
-    // Parse review results
-    const reviewStage = session.stages.find(s => s.phase === 'review');
-    if (!reviewStage || reviewStage.status !== 'completed') {
+    // Find the LATEST review stage (not the first — important for multi-round debates)
+    const reviewStages = session.stages.filter(s => s.phase === 'review' && s.status === 'completed');
+    const reviewStage = reviewStages[reviewStages.length - 1];
+    if (!reviewStage) {
       stage.status = 'skipped';
       session.stages.push(stage);
       return;
     }
 
-    const broadcastStage = session.stages.find(s => s.phase === 'broadcast');
-    const expectedLabels = (broadcastStage?.invocations ?? [])
+    // Find the LATEST response stage (broadcast or cross_examine)
+    const responseStages = session.stages.filter(
+      s => (s.phase === 'broadcast' || s.phase === 'cross_examine') && s.status === 'completed',
+    );
+    const latestResponseStage = responseStages[responseStages.length - 1];
+    const expectedLabels = (latestResponseStage?.invocations ?? [])
       .filter(i => !i.timed_out && i.response_raw)
       .map((_, i) => String.fromCharCode(65 + i));
 
-    // Parse each review response
+    // Parse each review response, tagging with the reviewer's agent_id
     const allReviews = reviewStage.invocations
       .filter(inv => inv.response_raw)
       .flatMap(inv => {
         const result = parseReviewResponse(inv.response_raw, expectedLabels);
-        return result.reviews;
+        return result.reviews.map(r => ({ ...r, reviewer_agent_id: inv.agent_id }));
       });
 
     // Calculate consensus
@@ -551,6 +577,33 @@ export class Orchestrator {
       impact: `Compressing to fit synthesis context window`,
     });
 
+    // Extract review scores if available (use LATEST review stage for multi-round debates)
+    const reviewScores = new Map<string, number>();
+    const allReviewStages = session.stages.filter(s => s.phase === 'review' && s.status === 'completed');
+    const reviewStage = allReviewStages[allReviewStages.length - 1];
+
+    if (reviewStage && latestStage) {
+      const broadcastInvocations = latestStage.invocations.filter(i => !i.timed_out && i.response_raw);
+      const expectedLabels = broadcastInvocations.map((_, i) => String.fromCharCode(65 + i));
+
+      const labelToAgentId = new Map<string, string>();
+      broadcastInvocations.forEach((inv, i) => {
+        labelToAgentId.set(String.fromCharCode(65 + i), inv.agent_id);
+      });
+
+      const allReviews = reviewStage.invocations
+        .filter(inv => inv.response_raw)
+        .flatMap(inv => {
+          const result = parseReviewResponse(inv.response_raw, expectedLabels);
+          return result.reviews;
+        });
+
+      const aggregatedScores = aggregateReviewScores(allReviews, labelToAgentId);
+      for (const [agentId, score] of aggregatedScores.entries()) {
+        reviewScores.set(agentId, score);
+      }
+    }
+
     // Build scored responses for compression ranking
     const scored: ScoredResponse[] = validInvocations.map(inv => {
       const agent = session.agents.find(a => a.agent_id === inv.agent_id);
@@ -559,7 +612,7 @@ export class Orchestrator {
         modelName: inv.model_name,
         role: inv.role,
         content: inv.response_raw,
-        reviewScore: undefined, // TODO: extract from review stage
+        reviewScore: reviewScores.get(inv.agent_id),
         modelPriority: agent?.config.priority ?? 100,
       };
     });
@@ -569,12 +622,12 @@ export class Orchestrator {
 
     const result = applyFallbackCompression(plan);
 
-    // Update invocations with compressed content
+    // Store compressed content separately (preserving original response_raw for audit)
     for (const compressed of result.responses) {
       if (!compressed.wasCompressed) continue;
       const inv = latestStage.invocations.find(i => i.agent_id === compressed.agentId);
       if (inv) {
-        inv.response_raw = compressed.content;
+        inv.response_compressed = compressed.content;
       }
     }
 

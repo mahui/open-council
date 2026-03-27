@@ -18,6 +18,8 @@ export interface ParsedReview {
   weaknesses: string;
   ranking: number;
   status: 'valid' | 'partial' | 'parse_error';
+  /** The agent_id of the reviewer. Set by the orchestrator after parsing. */
+  reviewer_agent_id?: string;
 }
 
 export interface ReviewParseResult {
