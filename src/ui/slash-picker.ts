@@ -12,6 +12,51 @@ const CLEAR_LINE = '\x1b[2K';
 const HIDE_CURSOR = '\x1b[?25l';
 const SHOW_CURSOR = '\x1b[?25h';
 
+/** Truncate an ANSI-bearing string to fit within `width` visible columns,
+ *  appending "…" + RESET when cut. Treats CJK/emoji as 2 columns. */
+function truncateAnsi(text: string, width: number): string {
+  if (width <= 1) return '';
+  let visCount = 0;
+  let out = '';
+  let inEsc = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch === '\x1b') { inEsc = true; out += ch; continue; }
+    if (inEsc) { out += ch; if (ch === 'm') inEsc = false; continue; }
+    const code = text.charCodeAt(i);
+    let w = 1;
+    if (code >= 0xD800 && code <= 0xDBFF) w = 2;
+    else if (
+      (code >= 0x1100 && code <= 0x115F) ||
+      (code >= 0x2E80 && code <= 0x303E) ||
+      (code >= 0x3040 && code <= 0x33BF) ||
+      (code >= 0x3400 && code <= 0x4DBF) ||
+      (code >= 0x4E00 && code <= 0xA4CF) ||
+      (code >= 0xAC00 && code <= 0xD7AF) ||
+      (code >= 0xFF01 && code <= 0xFF60)
+    ) w = 2;
+
+    if (visCount + w > width - 1) {
+      return out + '\x1b[0m\u2026';
+    }
+    out += ch;
+    if (w === 2 && code >= 0xD800 && code <= 0xDBFF && i + 1 < text.length) {
+      out += text[i + 1];
+      i++;
+    }
+    visCount += w;
+  }
+  return out + '\x1b[0m';
+}
+
+function formatRow(cmd: SlashCommand, isSelected: boolean, cols: number): string {
+  const argStr = cmd.args ? ` ${cmd.args}` : '';
+  const raw = isSelected
+    ? `  ${BG_HIGHLIGHT} ${cmd.name}${argStr} ${RESET} ${DIM}${cmd.desc}${RESET}`
+    : `  ${CYAN}${cmd.name}${RESET}${DIM}${argStr}  ${cmd.desc}${RESET}`;
+  return truncateAnsi(raw, cols);
+}
+
 export interface SlashCommand {
   name: string;
   args?: string;
@@ -36,7 +81,8 @@ export function showSlashPicker(
     let selectedIndex = 0;
     let filtered = commands;
 
-    const cols = process.stderr.columns || 80;
+    const MENU_HEIGHT = 8;
+    let reserved = false;
 
     const updateFilter = () => {
       filtered = commands.filter(c =>
@@ -47,65 +93,48 @@ export function showSlashPicker(
       }
     };
 
+    /** Reserve MENU_HEIGHT blank lines below the prompt once, so subsequent
+     *  renders never trigger terminal scroll (which would invalidate cursor math). */
+    const reserveSpace = () => {
+      if (reserved) return;
+      reserved = true;
+      process.stderr.write('\n'.repeat(MENU_HEIGHT));
+      process.stderr.write(`\x1b[${MENU_HEIGHT}A`);
+    };
+
     const render = () => {
-      // Clear menu area: move up to erase previous render, then redraw
-      // First, clear all menu lines from previous render
-      const menuLines = Math.min(filtered.length, 8);
+      reserveSpace();
+      const cols = (process.stderr.columns || 80);
 
-      // Move to menu start (below prompt line) and clear
-      for (let i = 0; i < menuLines + 1; i++) {
-        process.stderr.write(`${CLEAR_LINE}\n`);
-      }
-      // Move back up
-      process.stderr.write(`\x1b[${menuLines + 1}A`);
+      // Redraw prompt line first.
+      process.stderr.write(`\r${CLEAR_LINE}${promptPrefix}/${filter}`);
 
-      // Redraw prompt line with current filter
-      process.stderr.write(`${CLEAR_LINE}\r${promptPrefix}/${filter}`);
+      const visible = filtered.slice(0, MENU_HEIGHT);
 
-      // Draw menu below
-      if (filtered.length === 0) {
-        process.stderr.write(`\n${CLEAR_LINE}  ${DIM}No matching commands${RESET}`);
-        process.stderr.write(`\n${CLEAR_LINE}`); // extra blank to clear leftover
-        // Move cursor back to prompt line
-        process.stderr.write(`\x1b[2A\r${promptPrefix}/${filter}`);
-        return;
-      }
-
-      const visible = filtered.slice(0, 8);
-      for (let i = 0; i < visible.length; i++) {
-        const cmd = visible[i]!;
-        const isSelected = i === selectedIndex;
-        const argStr = cmd.args ? ` ${cmd.args}` : '';
-
-        if (isSelected) {
-          process.stderr.write(
-            `\n${CLEAR_LINE}  ${BG_HIGHLIGHT} ${cmd.name}${argStr} ${RESET} ${DIM}${cmd.desc}${RESET}`,
-          );
-        } else {
-          process.stderr.write(
-            `\n${CLEAR_LINE}  ${CYAN}${cmd.name}${RESET}${DIM}${argStr}  ${cmd.desc}${RESET}`,
-          );
+      // Always paint MENU_HEIGHT lines (even if blank) so stale rows from a
+      // previous render with more matches get fully erased.
+      for (let i = 0; i < MENU_HEIGHT; i++) {
+        process.stderr.write(`\n${CLEAR_LINE}`);
+        if (i < visible.length) {
+          process.stderr.write(formatRow(visible[i]!, i === selectedIndex, cols));
+        } else if (i === 0 && visible.length === 0) {
+          process.stderr.write(`  ${DIM}No matching commands${RESET}`);
         }
       }
 
-      // Clear any remaining old lines
-      process.stderr.write(`\n${CLEAR_LINE}`);
-
-      // Move cursor back to prompt
-      process.stderr.write(`\x1b[${visible.length + 1}A\r${promptPrefix}/${filter}`);
+      // Move cursor back up to the prompt line and reposition at end of input.
+      process.stderr.write(`\x1b[${MENU_HEIGHT}A\r${promptPrefix}/${filter}`);
     };
 
     const cleanup = () => {
-      // Clear the menu
-      const menuLines = Math.min(filtered.length, 8) + 1;
-      for (let i = 0; i < menuLines; i++) {
-        process.stderr.write(`\n${CLEAR_LINE}`);
+      if (reserved) {
+        // Erase the MENU_HEIGHT rows we own, then restore cursor to prompt line.
+        for (let i = 0; i < MENU_HEIGHT; i++) {
+          process.stderr.write(`\n${CLEAR_LINE}`);
+        }
+        process.stderr.write(`\x1b[${MENU_HEIGHT}A\r${CLEAR_LINE}`);
       }
-      // Move back to prompt line
-      process.stderr.write(`\x1b[${menuLines}A`);
-      process.stderr.write(`${CLEAR_LINE}\r`);
       process.stderr.write(SHOW_CURSOR);
-
       process.stdin.removeListener('data', onData);
       // Don't touch rawMode/pause — caller (input.ts) manages stdin lifecycle
     };
