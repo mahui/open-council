@@ -221,19 +221,21 @@ export class Orchestrator {
       ? models.find(m => m.name === this.defaultChairman) ?? models[0]
       : models[0];
 
-    // Generate roles AND model assignments in one AI call
+    // Compute an agent-count interval per mode; the LLM picks the size that
+    // fits the question's complexity (no longer driven solely by model count).
     const maxAgents = this.maxAgents;
-    let agentCount: number;
+    const upperBound = Math.min(models.length, maxAgents);
+    let range: { min: number; max: number };
     if (session.resolved_mode === 'quick') {
-      agentCount = 1;
+      range = { min: 1, max: 1 };
     } else if (session.resolved_mode === 'compare') {
-      agentCount = Math.min(Math.max(models.length, 2), maxAgents); // min 2, cap at max_agents
+      range = { min: 2, max: Math.max(upperBound, 2) };
     } else {
-      agentCount = Math.min(Math.max(models.length, 3), maxAgents); // debate: min 3, cap at max_agents
+      range = { min: 3, max: Math.max(upperBound, 3) };
     }
     const roles = await generateRoles(
       session.question,
-      agentCount,
+      range,
       this.adapter,
       models,
     );

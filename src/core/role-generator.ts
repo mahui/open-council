@@ -38,8 +38,24 @@ function buildModelDescription(m: ModelConfig): string {
   return `${m.name} (${id}) — ${traits.join(', ')}`;
 }
 
-const ROLE_GEN_PROMPT = (question: string, models: ModelConfig[], agentCount: number, language: string) => {
+export interface AgentCountRange {
+  /** Minimum number of agents (inclusive). Always satisfied. */
+  min: number;
+  /** Maximum number of agents (inclusive). LLM picks within [min, max]. */
+  max: number;
+}
+
+const ROLE_GEN_PROMPT = (question: string, models: ModelConfig[], range: AgentCountRange, language: string) => {
   const modelList = models.map((m, i) => `  ${i + 1}. ${buildModelDescription(m)}`).join('\n');
+  const fixed = range.min === range.max;
+
+  const countDirective = fixed
+    ? `Create exactly ${range.min} expert role${range.min === 1 ? '' : 's'} for this debate.`
+    : `Decide how many experts this question actually needs — between ${range.min} and ${range.max} (inclusive).
+  - Simple, single-domain, factual questions → use ${range.min} (the minimum)
+  - Multi-stakeholder, architectural, value-laden, or ambiguous questions → use ${range.max} (the maximum)
+  - Most questions land in the middle — pick the smallest count that still produces *productive* disagreement
+  - Do NOT pad with redundant roles to fill the maximum. Every expert must add a perspective the others can't.`;
 
   return `You are designing a multi-expert debate panel for a specific question.
 
@@ -48,7 +64,8 @@ QUESTION: "${question}"
 AVAILABLE MODELS:
 ${modelList}
 
-TASK: Create exactly ${agentCount} expert roles for this debate, and assign each role to the most suitable model.
+TASK: ${countDirective}
+Then assign each role to the most suitable model.
 
 Rules:
 - Each role must have a UNIQUE and CONTRASTING perspective — they should DISAGREE on key points
@@ -59,7 +76,7 @@ Rules:
 - Assign reasoning-heavy roles to stronger models, data/speed roles to faster models
 - Respond in ${language}
 
-Return a JSON array with exactly ${agentCount} objects:
+Return a JSON array of role objects:
 [
   {
     "name": "short role name (2-4 words, in ${language})",
@@ -75,29 +92,35 @@ IMPORTANT: Return ONLY the JSON array. The "assigned_model" field MUST match one
 
 /**
  * Generate roles and assign models in one AI call.
+ * @param range Acceptable count interval; the LLM picks the size that fits the question.
+ *              Pass `{min:N, max:N}` for legacy fixed-count behavior.
  */
 export async function generateRoles(
   question: string,
-  agentCount: number,
+  range: AgentCountRange,
   adapter: InvocationAdapter,
   models: ModelConfig[],
 ): Promise<GeneratedRole[]> {
+  const min = Math.max(1, range.min);
+  const max = Math.max(min, range.max);
+
   const genModel = pickFastestModel(models);
-  if (!genModel) return defaultRoles(agentCount, models);
+  if (!genModel) return defaultRoles(min, models);
 
   const language = detectLanguage(question);
-  const prompt = ROLE_GEN_PROMPT(question, models, agentCount, language);
+  const prompt = ROLE_GEN_PROMPT(question, models, { min, max }, language);
 
   try {
     const result = await adapter.invoke(genModel, prompt);
     const roles = parseRoleResponse(result.response, models);
-    if (roles && roles.length >= agentCount) {
-      return roles.slice(0, agentCount);
-    }
     if (roles && roles.length > 0) {
-      const defaults = defaultRoles(agentCount, models);
-      while (roles.length < agentCount) {
-        roles.push(defaults[roles.length % defaults.length]!);
+      // Honor the LLM's count if it lands in [min, max]; otherwise clamp.
+      if (roles.length > max) return roles.slice(0, max);
+      if (roles.length < min) {
+        const defaults = defaultRoles(min, models);
+        while (roles.length < min) {
+          roles.push(defaults[roles.length % defaults.length]!);
+        }
       }
       return roles;
     }
@@ -105,7 +128,7 @@ export async function generateRoles(
     // Fall through
   }
 
-  return defaultRoles(agentCount, models);
+  return defaultRoles(min, models);
 }
 
 /**
