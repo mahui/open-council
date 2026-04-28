@@ -337,20 +337,42 @@ export class LiveRenderer implements Renderer {
     this.render();
   }
 
+  private resizeDebounce: NodeJS.Timeout | null = null;
+
   private listenResize(): void {
     if (this.resizeHandler) return;
     this.resizeHandler = () => {
-      this.rows = process.stderr.rows || 40;
-      this.cols = process.stderr.columns || 80;
-      // Clear and fully re-render with new dimensions
-      process.stderr.write(CLEAR_SCREEN);
-      this.render();
+      // Debounce: dragging the corner fires many resize events per second.
+      // Coalesce them so we only do one full repaint when the user stops.
+      if (this.resizeDebounce) clearTimeout(this.resizeDebounce);
+      this.resizeDebounce = setTimeout(() => {
+        this.resizeDebounce = null;
+        this.rows = process.stderr.rows || 40;
+        this.cols = process.stderr.columns || 80;
+
+        // Clamp scroll on every tab so a smaller window doesn't leave
+        // tab.scrollUp pointing past the new bottom of the buffer.
+        const contentRows = Math.max(1, this.rows - this.headerLines - this.footerLines);
+        for (const tab of this.tabs) {
+          const totalLines = this.getRenderedLines(tab).length;
+          const maxScroll = Math.max(0, totalLines - contentRows);
+          if (tab.scrollUp > maxScroll) tab.scrollUp = maxScroll;
+        }
+
+        process.stderr.write(CLEAR_SCREEN);
+        this.render();
+      }, 80);
     };
+    // stderr is the real TTY in our case (stdout may be piped); listen on both
+    // so we react regardless of which stream the terminal reports resize on.
+    process.stderr.on('resize', this.resizeHandler);
     process.stdout.on('resize', this.resizeHandler);
   }
 
   private stopResize(): void {
+    if (this.resizeDebounce) { clearTimeout(this.resizeDebounce); this.resizeDebounce = null; }
     if (this.resizeHandler) {
+      process.stderr.removeListener('resize', this.resizeHandler);
       process.stdout.removeListener('resize', this.resizeHandler);
       this.resizeHandler = null;
     }
