@@ -3,7 +3,7 @@ import { z } from 'zod';
 export const ModelConfigSchema = z.object({
   name: z.string(),
   invocation: z.enum(['cli', 'api', 'auto']).default('auto'),
-  provider: z.enum(['anthropic', 'openai', 'google', 'github-copilot', 'ollama', 'custom']).optional(),
+  provider: z.string().optional(),  // pi-ai provider ID (dynamic, 20+ providers)
   model: z.string().optional(),
   timeout_seconds: z.number().int().positive().default(120),
   capabilities: z.array(z.string()).default(['general']),
@@ -49,7 +49,7 @@ export const CouncilConfigSchema = z.object({
 
   general: z.object({
     default_mode: z.enum(['quick', 'compare', 'debate', 'auto']).default('auto'),
-    default_chairman: z.string(),
+    default_chairman: z.string().default(''),
     min_agents: z.number().int().min(1).default(2),
     max_agents: z.number().int().min(1).default(5),
     allow_same_model_agents: z.boolean().default(true),
@@ -76,8 +76,8 @@ export const CouncilConfigSchema = z.object({
     exploration_rate: z.number().min(0).max(1).default(0.1),
     rules: z.array(z.unknown()).default([]),
     default: z.object({
-      prefer: z.array(z.string()),
-      chairman: z.string(),
+      prefer: z.array(z.string()).default([]),
+      chairman: z.string().default(''),
       role_set: z.string().default('default'),
     }),
   }),

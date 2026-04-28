@@ -92,18 +92,33 @@ export class CliAdapter implements InvocationAdapter {
       .replace(/\r/g, '')               // carriage returns
       .trim();
 
-    // codex --json mode: extract text from JSONL item.completed events
+    // codex --json mode: extract text from JSONL events
     if (binary === 'codex' && cleaned.includes('"type"')) {
       const texts: string[] = [];
+      let errorMsg = '';
       for (const line of cleaned.split('\n')) {
         try {
-          const event = JSON.parse(line) as { type?: string; item?: { text?: string } };
+          const event = JSON.parse(line) as {
+            type?: string;
+            item?: { text?: string };
+            message?: string;
+            error?: { message?: string };
+          };
           if (event.type === 'item.completed' && event.item?.text) {
             texts.push(event.item.text);
+          } else if (event.type === 'error' && event.message) {
+            // Extract readable error from codex error events
+            try {
+              const inner = JSON.parse(event.message) as { error?: { message?: string } };
+              errorMsg = inner.error?.message ?? event.message;
+            } catch {
+              errorMsg = event.message;
+            }
           }
         } catch { /* skip non-JSON lines */ }
       }
       if (texts.length > 0) return texts.join('\n');
+      if (errorMsg) return `[Error] ${errorMsg}`;
     }
 
     return cleaned;

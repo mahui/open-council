@@ -4,7 +4,7 @@ import { Command } from 'commander';
 
 const program = new Command()
   .name('council')
-  .description('Local AI Council — Multi-model debate orchestration system')
+  .description('Open Council — Multi-model debate orchestration system')
   .version('0.1.0');
 
 // Main command: council "question"
@@ -38,6 +38,32 @@ program
       await startRepl();
       return;
     }
+
+    // Auto-redirect to setup when nothing is configured and no env credentials
+    if (!options.models && !options.chairman) {
+      const { ConfigLoader } = await import('./config/loader.js');
+      const { CredentialManager } = await import('./providers/credentials/discovery.js');
+      const loader = new ConfigLoader();
+      if (!loader.isConfigured()) {
+        const credManager = new CredentialManager();
+        await credManager.discoverAll();
+        const hasAny = credManager.getAvailableProviders().length > 0;
+        if (!hasAny) {
+          if (process.stderr.isTTY) {
+            process.stderr.write(
+              '\n\x1b[33m⚠  No models configured and no API credentials found.\x1b[0m\n' +
+              '   Run \x1b[1mcouncil setup\x1b[0m to get started.\n\n',
+            );
+          } else {
+            process.stderr.write(
+              'Error: No models configured. Run "council setup" to get started.\n',
+            );
+          }
+          process.exit(1);
+        }
+      }
+    }
+
     const { runCouncil } = await import('./commands/council.js');
     await runCouncil(question, options);
   });
@@ -46,6 +72,7 @@ program
 program.command('setup').description('Configuration wizard').action(async () => {
   const { runSetup } = await import('./commands/setup.js');
   await runSetup();
+  process.exit(0);
 });
 
 // Model management

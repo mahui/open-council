@@ -8,11 +8,20 @@ export function buildBroadcastPrompt(
   role: string,
   systemPrompt: string,
   parentSynthesis?: string,
+  historicalContext?: string,
 ): string {
   let prompt = '';
 
   if (systemPrompt) {
     prompt += `${systemPrompt}\n\n`;
+  }
+
+  // Background context from similar past debates (injected automatically when available)
+  if (historicalContext) {
+    prompt += `=== Background: related past discussions ===\n`;
+    prompt += historicalContext;
+    prompt += `\n=== End of background ===\n\n`;
+    prompt += `Use the above as background context. Provide your own fresh analysis for the current question.\n\n`;
   }
 
   if (parentSynthesis) {
@@ -22,10 +31,25 @@ export function buildBroadcastPrompt(
     prompt += `Question: ${question}\n\n`;
   }
 
-  prompt += `You are participating in a multi-model debate as the "${role}". `;
-  prompt += `Provide a thorough, detailed analysis (at least several paragraphs). `;
-  prompt += `Be specific, use evidence or examples, and structure your response with clear sections. `;
-  prompt += `Do NOT use any tools or run any commands — just provide your written analysis directly.`;
+  prompt += `You are participating in a multi-model debate as the "${role}".\n`;
+  prompt += `Structure your response using the following sections — this structure helps peer reviewers compare responses fairly:\n\n`;
+
+  prompt += `## Position\n`;
+  prompt += `State your core claim in 1–2 sentences.\n\n`;
+
+  prompt += `## Evidence\n`;
+  prompt += `Provide 3–5 concrete supporting points. Be specific — use data, examples, or established principles.\n\n`;
+
+  prompt += `## Strongest Counter-argument\n`;
+  prompt += `State the most compelling objection to your position, then give your rebuttal.\n\n`;
+
+  prompt += `## Confidence\n`;
+  prompt += `Rate your confidence: High / Medium / Low. Explain what drives this rating and what evidence would change your mind.\n\n`;
+
+  prompt += `## Conclusion\n`;
+  prompt += `Give a clear, actionable recommendation or key takeaway.\n\n`;
+
+  prompt += `Do NOT use any tools or run any commands — provide your written analysis directly.`;
 
   return prompt;
 }
@@ -36,19 +60,20 @@ export function buildSynthesisPrompt(
 ): string {
   let prompt = `You are the Chairman synthesizing multiple expert perspectives on a question.\n\n`;
   prompt += `Original question: ${question}\n\n`;
-  prompt += `The following experts have provided their analyses:\n\n`;
+  prompt += `Expert responses (each structured as Position / Evidence / Counter-argument / Confidence / Conclusion):\n\n`;
 
   for (const [i, r] of responses.entries()) {
     prompt += `--- Expert ${i + 1} (${r.role}) ---\n`;
     prompt += `${r.response}\n\n`;
   }
 
-  prompt += `As Chairman, please:\n`;
-  prompt += `1. Synthesize the key insights from all experts\n`;
-  prompt += `2. Identify points of agreement and disagreement\n`;
-  prompt += `3. Provide a balanced, comprehensive conclusion\n`;
-  prompt += `4. Note any important caveats or limitations\n`;
-  prompt += `\nProvide a clear, well-structured synthesis.`;
+  prompt += `As Chairman, synthesize these perspectives by:\n`;
+  prompt += `1. Identifying where experts' **Positions** converge and diverge\n`;
+  prompt += `2. Evaluating the strength of **Evidence** across responses — note what's well-supported vs. asserted\n`;
+  prompt += `3. Weighing shared **Counter-arguments** seriously — recurring objections deserve explicit acknowledgment\n`;
+  prompt += `4. Calibrating overall confidence from experts' stated confidence levels\n`;
+  prompt += `5. Producing a **unified Conclusion** that is more complete than any single expert's view\n\n`;
+  prompt += `Provide a clear, well-structured synthesis.`;
 
   return prompt;
 }
@@ -59,14 +84,21 @@ export function buildReviewPrompt(
 ): string {
   let prompt = `You are a peer reviewer evaluating anonymous responses to a question.\n\n`;
   prompt += `Original question: ${question}\n\n`;
-  prompt += `Please review each response and provide scores.\n\n`;
+  prompt += `Responses use a structured format: Position / Evidence / Strongest Counter-argument / Confidence / Conclusion.\n\n`;
 
   for (const r of anonymizedResponses) {
     prompt += `--- Response ${r.label} ---\n`;
     prompt += `${r.content}\n\n`;
   }
 
-  prompt += `For each response, provide a JSON evaluation:\n`;
+  prompt += `Score each response on these dimensions (1–10):\n`;
+  prompt += `- accuracy: Are the claims factually correct? Is the evidence credible and well-sourced?\n`;
+  prompt += `- completeness: Are key aspects covered? Is the counter-argument honestly acknowledged?\n`;
+  prompt += `- practicality: Is the conclusion actionable? Is the confidence level well-calibrated?\n`;
+  prompt += `- insight: How novel and deep is the analysis? Does it surface non-obvious considerations?\n`;
+  prompt += `- overall: Overall quality across all dimensions\n\n`;
+
+  prompt += `Return this JSON:\n`;
   prompt += `{\n`;
   prompt += `  "reviews": [\n`;
   prompt += `    {\n`;
@@ -86,6 +118,31 @@ export function buildReviewPrompt(
   prompt += `}\n`;
 
   return prompt;
+}
+
+/**
+ * Devil's Advocate variant of the review prompt.
+ * Identical to the standard review but adds critical-auditor instructions:
+ * the agent must surface risks, edge cases, and unstated assumptions in addition to normal scoring.
+ */
+export function buildDevilAdvocateReviewPrompt(
+  question: string,
+  anonymizedResponses: Array<{ label: string; content: string }>,
+): string {
+  const base = buildReviewPrompt(question, anonymizedResponses);
+
+  const devilAdvocateAddendum = `
+
+[Devil's Advocate — Additional Instructions]
+Beyond the standard evaluation above, you also serve as a critical auditor. For each response:
+1. Actively identify unstated assumptions and potential failure modes
+2. Consider edge cases, second-order effects, and what could go wrong long-term
+3. Challenge conclusions that appear overly optimistic or underspecified
+4. Add a "devil_advocate_notes" field to each review entry listing the key risks found
+
+Your scores should reflect these critical concerns — penalise responses that overlook significant risks even if they are well-structured.`;
+
+  return base + devilAdvocateAddendum;
 }
 
 export function buildCrossExaminePrompt(

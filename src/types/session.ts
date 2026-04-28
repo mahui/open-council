@@ -60,6 +60,8 @@ export interface Stage {
   invocations: Invocation[];
   started_at?: string;
   completed_at?: string;
+  /** Anonymized label → agent_id mapping, set by the review stage to preserve shuffle order. */
+  label_map?: Record<string, string>;
 }
 
 export interface DegradationEvent {
@@ -94,6 +96,10 @@ export interface Session {
   created_at: string;
   completed_at?: string;
   total_elapsed_ms?: number;
+  /** Whether devil's advocate mode was requested for this session. */
+  devil_advocate_mode?: boolean;
+  /** Synthesis snippets from similar past sessions injected as broadcast background context. */
+  historical_context?: string;
 }
 
 export interface RunOptions {
@@ -108,4 +114,8 @@ export interface RunOptions {
   devilAdvocate?: boolean;
   roleSet?: string;
   parentSessionId?: string;
+  /** Synthesis snippets from similar past sessions, injected as broadcast context. */
+  historicalContext?: string;
+  /** Synthesis text from the parent session (loaded when --follow is used). */
+  parentSynthesis?: string;
 }

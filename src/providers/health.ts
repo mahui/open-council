@@ -1,3 +1,16 @@
+import { initDatabase, closeDatabase } from '../storage/database.js';
+import { PATHS } from '../config/paths.js';
+
+interface ProviderHealthRow {
+  provider: string;
+  status: string;
+  consecutive_failures: number;
+  last_failure_time: number;
+  last_success_time: number;
+  circuit_opened_at: number;
+  throttle_ms: number;
+}
+
 /**
  * Provider health manager — circuit breaker + adaptive throttle.
  *
@@ -29,25 +42,75 @@ const BASE_THROTTLE: Record<string, number> = {
   openai: 500,
 };
 
-const states = new Map<string, ProviderState>();
+const memoryStates = new Map<string, ProviderState>();
 
 function getState(provider: string): ProviderState {
-  let state = states.get(provider);
+  let state = memoryStates.get(provider);
   if (!state) {
     const base = BASE_THROTTLE[provider] ?? 1000;
-    state = {
-      status: 'healthy',
-      consecutiveFailures: 0,
-      lastFailureTime: 0,
-      lastSuccessTime: 0,
-      throttleMs: base,
-      baseThrottleMs: base,
-      circuitOpenedAt: 0,
-      lastRequestTime: 0,
-    };
-    states.set(provider, state);
+    
+    // Load from DB
+    try {
+      const db = initDatabase(PATHS.database);
+      let row: ProviderHealthRow | undefined;
+      try {
+        row = db.prepare('SELECT * FROM provider_health WHERE provider = ?').get(provider) as ProviderHealthRow | undefined;
+      } finally {
+        closeDatabase(db);
+      }
+
+      if (row) {
+        state = {
+          status: row.status as ProviderStatus,
+          consecutiveFailures: row.consecutive_failures,
+          lastFailureTime: row.last_failure_time,
+          lastSuccessTime: row.last_success_time,
+          throttleMs: row.throttle_ms,
+          baseThrottleMs: base,
+          circuitOpenedAt: row.circuit_opened_at,
+          lastRequestTime: 0,
+        };
+      }
+    } catch {
+      // ignore
+    }
+
+    if (!state) {
+      state = {
+        status: 'healthy',
+        consecutiveFailures: 0,
+        lastFailureTime: 0,
+        lastSuccessTime: 0,
+        throttleMs: base,
+        baseThrottleMs: base,
+        circuitOpenedAt: 0,
+        lastRequestTime: 0,
+      };
+    }
+    memoryStates.set(provider, state);
   }
   return state;
+}
+
+function saveState(provider: string, state: ProviderState) {
+  try {
+    const db = initDatabase(PATHS.database);
+    try {
+      db.prepare(`
+        INSERT OR REPLACE INTO provider_health (
+          provider, status, consecutive_failures, last_failure_time,
+          last_success_time, circuit_opened_at, throttle_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        provider, state.status, state.consecutiveFailures, state.lastFailureTime,
+        state.lastSuccessTime, state.circuitOpenedAt, state.throttleMs,
+      );
+    } finally {
+      closeDatabase(db);
+    }
+  } catch {
+    // ignore
+  }
 }
 
 /** Check circuit breaker status. 'open' = skip API, go straight to CLI. */
@@ -81,6 +144,7 @@ export function recordSuccess(provider: string): void {
   state.status = 'healthy';
   state.circuitOpenedAt = 0;
   state.throttleMs = Math.max(state.baseThrottleMs, Math.floor(state.throttleMs * 0.8));
+  saveState(provider, state);
 }
 
 /** Record failed call. Opens circuit after threshold, increases throttle for 429. */
@@ -99,6 +163,15 @@ export function recordFailure(provider: string, is429: boolean): void {
     state.circuitOpenedAt = Date.now();
     state.status = 'open';
   }
+  saveState(provider, state);
+}
+
+export function resetCircuitBreaker(provider: string): void {
+  const state = getState(provider);
+  state.status = 'healthy';
+  state.consecutiveFailures = 0;
+  state.circuitOpenedAt = 0;
+  saveState(provider, state);
 }
 
 /** Get health summary for all tracked providers. */
@@ -108,10 +181,47 @@ export function getHealthSummary(): Array<{
   failures: number;
   throttleMs: number;
 }> {
-  return [...states.entries()].map(([provider, state]) => ({
-    provider,
-    status: getProviderStatus(provider),
-    failures: state.consecutiveFailures,
-    throttleMs: state.throttleMs,
-  }));
+  // Try to load all from DB
+  try {
+    const db = initDatabase(PATHS.database);
+    let rows: ProviderHealthRow[] = [];
+    try {
+      rows = db.prepare('SELECT * FROM provider_health').all() as ProviderHealthRow[];
+    } finally {
+      closeDatabase(db);
+    }
+
+    for (const row of rows) {
+      if (!memoryStates.has(row.provider)) {
+        memoryStates.set(row.provider, {
+          status: row.status as ProviderStatus,
+          consecutiveFailures: row.consecutive_failures,
+          lastFailureTime: row.last_failure_time,
+          lastSuccessTime: row.last_success_time,
+          throttleMs: row.throttle_ms,
+          baseThrottleMs: BASE_THROTTLE[row.provider] ?? 1000,
+          circuitOpenedAt: row.circuit_opened_at,
+          lastRequestTime: 0,
+        });
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return [...memoryStates.entries()].map(([provider, state]) => {
+    // Re-evaluate dynamic status based on time
+    let effectiveStatus = state.status;
+    if (state.circuitOpenedAt > 0) {
+      const elapsed = Date.now() - state.circuitOpenedAt;
+      effectiveStatus = elapsed < CIRCUIT_RECOVERY_MS ? 'open' : 'degraded';
+    }
+    
+    return {
+      provider,
+      status: effectiveStatus,
+      failures: state.consecutiveFailures,
+      throttleMs: state.throttleMs,
+    };
+  });
 }

@@ -1,10 +1,12 @@
 import { existsSync } from 'node:fs';
+import { confirm } from '@inquirer/prompts';
 import { PATHS } from '../config/paths.js';
 import { ConfigLoader } from '../config/loader.js';
 import { CredentialManager } from '../providers/credentials/discovery.js';
 import { AutoAdapter } from '../providers/adapter.js';
 import { ApiAdapter } from '../providers/api-adapter.js';
 import { CliAdapter } from '../providers/cli-adapter.js';
+import { getHealthSummary, resetCircuitBreaker } from '../providers/health.js';
 
 export async function runModelsList(): Promise<void> {
   if (!existsSync(PATHS.config)) {
@@ -62,4 +64,24 @@ export async function runModelsCheck(): Promise<void> {
   }
 
   process.stdout.write('\n');
+
+  // Display circuit breaker status
+  const summary = getHealthSummary();
+  const melted = summary.filter(s => s.status === 'open');
+
+  if (melted.length > 0) {
+    process.stderr.write('\x1b[31m⚠ The following providers have open circuits (melted due to repeated failures):\x1b[0m\n');
+    for (const p of melted) {
+      process.stderr.write(`  - ${p.provider} (${p.failures} consecutive failures)\n`);
+    }
+
+    const reset = await confirm({ message: 'Would you like to manually reset these circuit breakers?' });
+    if (reset) {
+      for (const p of melted) {
+        resetCircuitBreaker(p.provider);
+      }
+      process.stderr.write('Circuit breakers reset successfully.\n');
+    }
+  }
 }
+

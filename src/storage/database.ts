@@ -104,6 +104,17 @@ function migrate(db: Database.Database): void {
 
       CREATE INDEX IF NOT EXISTS idx_resource_slots_model ON resource_slots(model_id);
       CREATE INDEX IF NOT EXISTS idx_resource_slots_pid ON resource_slots(pid);
+
+      -- Provider Health tracking for Circuit Breaker
+      CREATE TABLE IF NOT EXISTS provider_health (
+        provider             TEXT PRIMARY KEY,
+        status               TEXT NOT NULL,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        last_failure_time    INTEGER NOT NULL DEFAULT 0,
+        last_success_time    INTEGER NOT NULL DEFAULT 0,
+        circuit_opened_at    INTEGER NOT NULL DEFAULT 0,
+        throttle_ms          INTEGER NOT NULL DEFAULT 1000
+      );
     `);
 
     setSchemaVersion(db, CURRENT_SCHEMA_VERSION);

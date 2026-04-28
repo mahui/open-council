@@ -1,5 +1,5 @@
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { ModelConfigSchema, CouncilConfigSchema } from './schema.js';
 import type { CouncilConfig, ModelConfig, RoleSet } from '../types/config.js';
@@ -42,6 +42,17 @@ export class ConfigLoader {
     mkdirSync(modelsDir, { recursive: true });
     const path = safePath(modelsDir, `${config.name}.yaml`);
     writeFileSync(path, stringifyYaml(config), { mode: 0o600 });
+  }
+
+  /** Delete every model YAML in the models directory. Used by reconfigure to avoid stale entries. */
+  clearAllModels(): void {
+    const modelsDir = join(this.configDir, 'models');
+    if (!existsSync(modelsDir)) return;
+    for (const f of readdirSync(modelsDir)) {
+      if (f.endsWith('.yaml')) {
+        try { unlinkSync(join(modelsDir, f)); } catch { /* best-effort */ }
+      }
+    }
   }
 
   loadRoleSet(name: string): RoleSet {

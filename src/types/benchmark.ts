@@ -3,12 +3,20 @@
  * Pure types — no runtime code (ARCH-04).
  */
 
+export interface BenchmarkTrap {
+  type: string;
+  description: string;
+}
+
 export interface BenchmarkQuestion {
   id: string;
   category: string;
   question: string;
   expected_points: string[];
+  /** Flat strings, kept for backwards-compat display. */
   error_traps: string[];
+  /** Structured traps used by the evaluator. */
+  known_traps: BenchmarkTrap[];
   difficulty: 'easy' | 'medium' | 'hard';
 }
 

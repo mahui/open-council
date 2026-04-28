@@ -29,7 +29,7 @@ import type {
 import type { ModelConfig } from '../types/config.js';
 import type { InvocationAdapter, InvocationResult } from '../types/provider.js';
 import type { Renderer } from '../ui/renderer.js';
-import { buildBroadcastPrompt, buildSynthesisPrompt, buildReviewPrompt, buildCrossExaminePrompt, extractDivergencePoints } from './prompt-builder.js';
+import { buildBroadcastPrompt, buildSynthesisPrompt, buildReviewPrompt, buildDevilAdvocateReviewPrompt, buildCrossExaminePrompt, extractDivergencePoints } from './prompt-builder.js';
 import { Anonymizer } from './anonymizer.js';
 import { parseReviewResponse } from './score-parser.js';
 import { calculateConsensus } from './consensus.js';
@@ -56,6 +56,13 @@ export class Orchestrator {
   ) {}
 
   async run(question: string, options: RunOptions): Promise<Session> {
+    // Apply per-run model filter without mutating the instance list so that
+    // successive calls on the same Orchestrator instance remain independent.
+    const savedModels = this.availableModels;
+    if (options.models && options.models.length > 0) {
+      const allowed = new Set(options.models);
+      this.availableModels = this.availableModels.filter(m => allowed.has(m.name));
+    }
     const session = this.createSession(question, options);
 
     if (session.resolved_mode === 'debate') {
@@ -69,6 +76,9 @@ export class Orchestrator {
     session.status = session.status === 'failed' ? 'failed' : 'completed';
     session.completed_at = new Date().toISOString();
     session.total_elapsed_ms = Date.now() - new Date(session.created_at).getTime();
+
+    // Restore the original model list so successive calls remain independent.
+    this.availableModels = savedModels;
 
     return session;
   }
@@ -163,6 +173,9 @@ export class Orchestrator {
       tags: options.tags,
       parent_session_id: options.parentSessionId,
       created_at: new Date().toISOString(),
+      devil_advocate_mode: options.devilAdvocate ?? false,
+      historical_context: options.historicalContext,
+      parent_synthesis: options.parentSynthesis,
     };
   }
 
@@ -238,6 +251,15 @@ export class Orchestrator {
       };
     });
 
+    // Assign devil's advocate to one non-chairman agent when enabled in debate mode
+    if (session.devil_advocate_mode && session.resolved_mode === 'debate') {
+      const nonChairmen = session.agents.filter(a => !a.is_chairman);
+      if (nonChairmen.length > 0) {
+        const target = nonChairmen[Math.floor(Math.random() * nonChairmen.length)]!;
+        target.is_devil_advocate = true;
+      }
+    }
+
     stage.status = 'completed';
     stage.completed_at = new Date().toISOString();
     session.stages.push(stage);
@@ -259,6 +281,7 @@ export class Orchestrator {
             agent.role,
             agent.system_prompt,
             session.parent_synthesis,
+            session.historical_context,
           );
 
           this.renderer.onAgentStart(agent);
@@ -466,12 +489,18 @@ export class Orchestrator {
       return;
     }
 
-    // Anonymize responses
+    // Anonymize responses (shuffles order to eliminate position bias)
     const agentResponses = validInvocations.map((inv, i) => ({
       agentIndex: i,
       content: inv.response_raw,
     }));
     const anonymized = anonymizer.anonymize(agentResponses);
+
+    // P0-2 fix: persist the shuffle-aware label→agent_id mapping on the stage.
+    // anonymizer.deanonymize() uses original_agent_index (set during shuffle) to
+    // correctly resolve which label maps to which agent — regardless of shuffle order.
+    const labelMap = anonymizer.deanonymize(anonymized, validInvocations);
+    stage.label_map = Object.fromEntries(labelMap);
 
     // Each agent reviews all responses — output goes to the __review__ tab
     const reviewAgent: Agent = {
@@ -485,23 +514,43 @@ export class Orchestrator {
     };
     this.renderer.onAgentStart(reviewAgent);
 
-    const allInvocations: Invocation[] = [];
-    for (let i = 0; i < session.agents.length; i++) {
-      const agent = session.agents[i]!;
-      const prompt = buildReviewPrompt(session.question, anonymized);
+    // Pre-build standard prompt (shared by all non-DA agents)
+    const basePrompt = buildReviewPrompt(session.question, anonymized);
 
-      this.renderer.onAgentProgress(reviewAgent, `\n--- ${agent.role} [${agent.config.name}] reviewing... ---\n`);
-      try {
-        const result = await this.adapter.invoke(agent.config, prompt, (chunk) => {
-          this.renderer.onAgentProgress(reviewAgent, chunk);
-        });
-        this.renderer.onAgentProgress(reviewAgent, `\n✓ ${agent.role} review complete\n`);
-        allInvocations.push(this.toInvocation(agent, result, prompt));
-      } catch (err) {
-        this.renderer.onAgentProgress(reviewAgent, `\n✗ ${agent.role} review failed\n`);
-        this.renderer.onDegradation({ phase: 'review', reason: err instanceof Error ? err.message : String(err), impact: `Review by ${agent.config.name} failed` });
-      }
-    }
+    // P0-3 fix: parallel review — same model → serial, different models → parallel
+    // (mirrors executeBroadcast pattern)
+    const groups = this.groupByModel(session.agents);
+    const groupResults = await Promise.all(
+      groups.map(async (group) => {
+        const results: Invocation[] = [];
+        for (const agent of group) {
+          // P0-1 fix: devil's advocate gets an augmented prompt that requires
+          // critical auditing (risk hunting, edge cases, assumption challenging)
+          const prompt = agent.is_devil_advocate
+            ? buildDevilAdvocateReviewPrompt(session.question, anonymized)
+            : basePrompt;
+
+          this.renderer.onAgentProgress(reviewAgent, `\n--- ${agent.role} [${agent.config.name}] reviewing... ---\n`);
+          try {
+            const result = await this.adapter.invoke(agent.config, prompt, (chunk) => {
+              this.renderer.onAgentProgress(reviewAgent, chunk);
+            });
+            this.renderer.onAgentProgress(reviewAgent, `\n✓ ${agent.role} review complete\n`);
+            results.push(this.toInvocation(agent, result, prompt));
+          } catch (err) {
+            this.renderer.onAgentProgress(reviewAgent, `\n✗ ${agent.role} review failed\n`);
+            this.renderer.onDegradation({
+              phase: 'review',
+              reason: err instanceof Error ? err.message : String(err),
+              impact: `Review by ${agent.config.name} failed`,
+            });
+          }
+        }
+        return results;
+      }),
+    );
+
+    const allInvocations = groupResults.flat();
 
     this.renderer.onAgentComplete(reviewAgent, {
       response: `${allInvocations.length} reviews completed`,
@@ -586,10 +635,19 @@ export class Orchestrator {
       const broadcastInvocations = latestStage.invocations.filter(i => !i.timed_out && i.response_raw);
       const expectedLabels = broadcastInvocations.map((_, i) => String.fromCharCode(65 + i));
 
+      // P0-2 fix: use the shuffle-aware label_map stored by executeReview() instead of
+      // recomputing from sequential position (which ignores anonymizer shuffle order).
       const labelToAgentId = new Map<string, string>();
-      broadcastInvocations.forEach((inv, i) => {
-        labelToAgentId.set(String.fromCharCode(65 + i), inv.agent_id);
-      });
+      if (reviewStage.label_map) {
+        for (const [label, agentId] of Object.entries(reviewStage.label_map)) {
+          labelToAgentId.set(label, agentId);
+        }
+      } else {
+        // Fallback for stages that pre-date this fix
+        broadcastInvocations.forEach((inv, i) => {
+          labelToAgentId.set(String.fromCharCode(65 + i), inv.agent_id);
+        });
+      }
 
       const allReviews = reviewStage.invocations
         .filter(inv => inv.response_raw)

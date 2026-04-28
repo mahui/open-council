@@ -1,11 +1,37 @@
-import Anthropic from '@anthropic-ai/sdk';
-import OpenAI from 'openai';
-import { GoogleGenAI } from '@google/genai';
+import { readFileSync, existsSync } from 'node:fs';
+import {
+  getModel,
+  getModels,
+  streamSimple,
+  completeSimple,
+} from '@mariozechner/pi-ai';
+import type { Api, Model, KnownProvider } from '@mariozechner/pi-ai';
+import { getOAuthProvider } from '@mariozechner/pi-ai/oauth';
 import type { ModelConfig } from '../types/config.js';
-import type { InvocationAdapter, InvocationResult, HealthStatus, ProviderCredential, OnChunk } from '../types/provider.js';
+import type { InvocationAdapter, InvocationResult, HealthStatus, OnChunk } from '../types/provider.js';
 import { InvocationError } from '../types/errors.js';
 import type { CredentialManager } from './credentials/discovery.js';
 import { throttle, recordSuccess, recordFailure, getProviderStatus } from './health.js';
+
+/**
+ * Map from provider names (legacy or pi-ai) to all related pi-ai providers.
+ * Used to expand a single provider into all places a model might live.
+ */
+const RELATED_PROVIDERS: Record<string, string[]> = {
+  'anthropic': ['anthropic'],
+  'openai': ['openai', 'openai-codex'],
+  'openai-codex': ['openai-codex', 'openai'],
+  'google': ['google-antigravity', 'google-gemini-cli', 'google'],
+  'google-gemini-cli': ['google-antigravity', 'google-gemini-cli', 'google'],
+  'google-antigravity': ['google-antigravity', 'google-gemini-cli', 'google'],
+  'github-copilot': ['github-copilot'],
+};
+
+const DEBUG = !!process.env['COUNCIL_DEBUG'];
+
+function debug(msg: string): void {
+  if (DEBUG) process.stderr.write(`[api-adapter] ${msg}\n`);
+}
 
 export class ApiAdapter implements InvocationAdapter {
   constructor(private credentialManager: CredentialManager) {}
@@ -13,13 +39,48 @@ export class ApiAdapter implements InvocationAdapter {
   async invoke(config: ModelConfig, prompt: string, onChunk?: OnChunk): Promise<InvocationResult> {
     const provider = config.provider!;
 
-    // Circuit breaker: if provider is 'open', fail fast so AutoAdapter falls back to CLI
+    // Circuit breaker check
     const status = getProviderStatus(provider);
     if (status === 'open') {
       throw new InvocationError(config.name, 'api', `Provider ${provider} circuit open (too many failures), falling back to CLI`);
     }
 
-    const credential = await this.credentialManager.getValidCredential(provider);
+    // Custom OpenAI-compatible endpoint branch — bypass pi-ai model registry entirely.
+    // Isolated from the OAuth/env path so existing call paths remain untouched.
+    if (config.api_base_url) {
+      debug(`invoke: provider=${provider}, model=${config.model}, streaming=${!!onChunk}, customEndpoint=true`);
+      await throttle(provider);
+      const start = Date.now();
+      try {
+        const model = this.buildCustomModel(config);
+        const apiKey = await this.resolveApiKey(config);
+        debug(`custom model built: id=${model.id}, baseUrl=${model.baseUrl}, apiKeyLen=${apiKey.length}, customEndpoint=true`);
+
+        const result = onChunk
+          ? await this.invokeStreaming(model, prompt, apiKey, config, onChunk)
+          : await this.invokeComplete(model, prompt, apiKey, config);
+
+        debug(`result: responseLen=${result.response.length}, tokens=${JSON.stringify(result.token_usage)}, customEndpoint=true`);
+
+        recordSuccess(provider);
+        return {
+          ...result,
+          elapsed_ms: Date.now() - start,
+        };
+      } catch (err) {
+        debug(`error (customEndpoint=true): ${err instanceof Error ? err.message : String(err)}`);
+        const is429 = err instanceof Error && (err.message.includes('429') || err.message.includes('rate'));
+        recordFailure(provider, is429);
+        if (err instanceof InvocationError) throw err;
+        throw new InvocationError(
+          config.name, 'api',
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+
+    const piaiProvider = this.credentialManager.getPiaiProvider(provider);
+    debug(`invoke: provider=${provider}, piaiProvider=${piaiProvider}, model=${config.model}, streaming=${!!onChunk}`);
 
     // Adaptive throttle
     await throttle(provider);
@@ -27,24 +88,29 @@ export class ApiAdapter implements InvocationAdapter {
     const start = Date.now();
 
     try {
-      let result: InvocationResult;
-      switch (provider) {
-        case 'anthropic':
-          result = await this.invokeAnthropic(config, prompt, credential.access_token, start, onChunk);
-          break;
-        case 'openai':
-          result = await this.invokeOpenAI(config, prompt, credential, start, onChunk);
-          break;
-        case 'google':
-          result = await this.invokeGoogle(config, prompt, credential, start, onChunk);
-          break;
-        default:
-          throw new InvocationError(config.name, 'api', `Unsupported API provider: ${provider}`);
-      }
+      const model = this.resolveModel(piaiProvider, config.model ?? config.name);
+      debug(`resolved model: id=${model.id}, provider=${model.provider}, api=${model.api}, baseUrl=${model.baseUrl}`);
+
+      // Get API key matching the resolved model's provider, not the config provider.
+      // E.g. config says 'google' but model resolved to 'google-gemini-cli' — use OAuth key.
+      const apiKey = await this.credentialManager.getApiKey(model.provider)
+        .catch(() => this.credentialManager.getApiKey(provider));
+      debug(`apiKey prefix: ${apiKey.substring(0, 12)}...`);
+
+      const result = onChunk
+        ? await this.invokeStreaming(model, prompt, apiKey, config, onChunk)
+        : await this.invokeComplete(model, prompt, apiKey, config);
+
+      debug(`result: responseLen=${result.response.length}, tokens=${JSON.stringify(result.token_usage)}`);
+
       recordSuccess(provider);
-      return result;
+      return {
+        ...result,
+        elapsed_ms: Date.now() - start,
+      };
     } catch (err) {
-      const is429 = err instanceof InvocationError && err.message.includes('429');
+      debug(`error: ${err instanceof Error ? err.message : String(err)}`);
+      const is429 = err instanceof Error && (err.message.includes('429') || err.message.includes('rate'));
       recordFailure(provider, is429);
       if (err instanceof InvocationError) throw err;
       throw new InvocationError(
@@ -60,6 +126,40 @@ export class ApiAdapter implements InvocationAdapter {
       return { level: 'unavailable', message: 'No provider configured', checked_at: now };
     }
 
+    // Custom OpenAI-compatible endpoint — credential check is local only (no pi-ai registry lookup).
+    if (config.api_base_url) {
+      if (config.api_key_env) {
+        const val = process.env[config.api_key_env];
+        if (val && val.length > 0) {
+          return { level: 'healthy', message: `env ${config.api_key_env} present`, checked_at: now };
+        }
+        return {
+          level: 'unavailable',
+          message: `Custom endpoint requires env var ${config.api_key_env} (not set)`,
+          checked_at: now,
+        };
+      }
+      if (config.api_credential_path) {
+        if (existsSync(config.api_credential_path)) {
+          return { level: 'healthy', message: `credential file present`, checked_at: now };
+        }
+        return {
+          level: 'unavailable',
+          message: `Custom endpoint credential file missing: ${config.api_credential_path}`,
+          checked_at: now,
+        };
+      }
+      // No api_key_env, no api_credential_path → only allow if baseUrl is localhost (no-auth scenario, e.g. ollama).
+      if (isLocalBaseUrl(config.api_base_url)) {
+        return { level: 'healthy', message: 'localhost endpoint, no auth required', checked_at: now };
+      }
+      return {
+        level: 'unavailable',
+        message: `Custom endpoint ${config.api_base_url} has no api_key_env or api_credential_path configured`,
+        checked_at: now,
+      };
+    }
+
     try {
       const hasCredential = this.credentialManager.hasCredential(config.provider);
       if (!hasCredential) {
@@ -71,496 +171,239 @@ export class ApiAdapter implements InvocationAdapter {
     }
   }
 
-  private async invokeAnthropic(
-    config: ModelConfig, prompt: string,
-    accessToken: string, start: number, onChunk?: OnChunk,
-  ): Promise<InvocationResult> {
-    const isOAuth = accessToken.includes('sk-ant-oat');
+  /**
+   * Build a Model object for a custom OpenAI-compatible endpoint without consulting pi-ai's registry.
+   * Pure literal construction — no spread of an existing model — so the model has no inherited
+   * cost/contextWindow assumptions. `compat` left undefined so pi-ai auto-detects from baseUrl.
+   * WHY: lets users point at any OpenAI-compatible service (ollama, vLLM, LiteLLM, third-party gateways)
+   * without us shipping a registry entry.
+   */
+  private buildCustomModel(config: ModelConfig): Model<'openai-completions'> {
+    return {
+      id: config.model!,
+      name: config.model!,
+      api: 'openai-completions' as const,
+      provider: config.provider!,
+      baseUrl: config.api_base_url!,
+      reasoning: false,
+      input: ['text' as const],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 8192,
+      maxTokens: config.max_tokens ?? 4096,
+    };
+  }
 
-    if (isOAuth) {
-      return this.invokeAnthropicOAuth(config, prompt, accessToken, start, onChunk);
-    }
-
-    const client = new Anthropic({
-      apiKey: accessToken,
-      ...(config.api_base_url ? { baseURL: config.api_base_url } : {}),
-    });
-
-    if (onChunk) {
-      const textParts: string[] = [];
-      const stream = client.messages.stream({
-        model: config.model!,
-        max_tokens: 8192,
-        messages: [{ role: 'user', content: prompt }],
-      });
-      for await (const event of stream) {
-        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-          onChunk(event.delta.text);
-          textParts.push(event.delta.text);
-        }
+  /**
+   * Resolve API key for a custom endpoint. Priority: api_key_env → api_credential_path → CredentialManager fallback.
+   * WHY empty string is allowed: ollama and similar local servers accept any value (or none) for the auth header,
+   * so we transparently pass through an empty key rather than refusing the call.
+   */
+  private async resolveApiKey(config: ModelConfig): Promise<string> {
+    if (config.api_key_env) {
+      const val = process.env[config.api_key_env];
+      if (val === undefined) {
+        throw new InvocationError(
+          config.name, 'api',
+          `api_key_env '${config.api_key_env}' is not set in environment`,
+        );
       }
-      const finalMessage = await stream.finalMessage();
-      return {
-        response: textParts.join(''),
-        elapsed_ms: Date.now() - start,
-        invocation_mode: 'api',
-        http_status: 200,
-        token_usage: {
-          input_tokens: finalMessage.usage.input_tokens,
-          output_tokens: finalMessage.usage.output_tokens,
-        },
-        timed_out: false,
+      return val;
+    }
+    if (config.api_credential_path) {
+      try {
+        return readFileSync(config.api_credential_path, 'utf8').trim();
+      } catch (err) {
+        throw new InvocationError(
+          config.name, 'api',
+          `Failed to read api_credential_path '${config.api_credential_path}': ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    // Fallback to CredentialManager. May return empty string for no-auth localhost endpoints.
+    try {
+      return await this.credentialManager.getApiKey(config.provider!);
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * Resolve a model from pi-ai's registry.
+   * Builds an ordered list of providers to try — those with OAuth credentials first
+   * (since they're more likely to work), then generic providers.
+   */
+  private resolveModel(piaiProvider: string, modelId: string): Model<Api> {
+    const candidates = RELATED_PROVIDERS[piaiProvider] ?? [piaiProvider];
+    // Sort: providers with direct OAuth credentials first, then env, then unknown.
+    // Uses getDirectSource (no legacy mapping) so each candidate is scored independently.
+    const sorted = [...candidates].sort((a, b) => {
+      const scoreOf = (p: string) => {
+        const src = this.credentialManager.getDirectSource(p);
+        if (src === 'oauth') return 2;
+        if (src === 'env') return 1;
+        return 0;
       };
+      return scoreOf(b) - scoreOf(a);
+    });
+    debug(`resolveModel: modelId=${modelId}, candidates=[${sorted.join(',')}]`);
+
+    // 1. Exact match
+    for (const p of sorted) {
+      try {
+        const model = getModel(p as KnownProvider, modelId as never);
+        return this.applyOAuthModifications(p, model);
+      } catch { /* not found in this provider */ }
     }
 
-    const response = await client.messages.create({
-      model: config.model!,
-      max_tokens: 8192,
-      messages: [{ role: 'user', content: prompt }],
+    // 2. Fuzzy match (model ID contains or is contained)
+    for (const p of sorted) {
+      try {
+        const models = getModels(p as KnownProvider);
+        const match = models.find(m =>
+          m.id === modelId ||
+          m.id.includes(modelId) ||
+          modelId.includes(m.id),
+        );
+        if (match) return this.applyOAuthModifications(p, match as Model<Api>);
+      } catch { /* provider not found */ }
+    }
+
+    throw new InvocationError(modelId, 'api', `Model '${modelId}' not found in providers [${sorted.join(', ')}]`);
+  }
+
+  /** Apply OAuth provider's modifyModels() if available (e.g. GitHub Copilot sets baseUrl). */
+  private applyOAuthModifications(piaiProvider: string, model: Model<Api>): Model<Api> {
+    const oauthCreds = this.credentialManager.getOAuthCredentials(piaiProvider);
+    if (!oauthCreds) return model;
+
+    const oauthProvider = getOAuthProvider(piaiProvider);
+    if (!oauthProvider?.modifyModels) return model;
+
+    const modified = oauthProvider.modifyModels([model], oauthCreds);
+    return modified[0] ?? model;
+  }
+
+  private async invokeStreaming(
+    model: Model<Api>, prompt: string, apiKey: string,
+    config: ModelConfig, onChunk: OnChunk,
+  ): Promise<Omit<InvocationResult, 'elapsed_ms'>> {
+    const textParts: string[] = [];
+    const eventStream = streamSimple(model, {
+      messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
+    }, {
+      apiKey,
+      maxTokens: config.max_tokens ?? 8192,
+      temperature: config.temperature,
+      reasoning: config.reasoning_effort,
     });
 
-    const text = response.content
-      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('');
+    let eventCount = 0;
+    const eventTypes = new Set<string>();
+    for await (const event of eventStream) {
+      eventCount++;
+      eventTypes.add(event.type);
+      if (event.type === 'text_delta') {
+        onChunk(event.delta);
+        textParts.push(event.delta);
+      }
+    }
+    debug(`stream events: count=${eventCount}, types=[${[...eventTypes].join(',')}], textParts=${textParts.length}`);
+
+    const message = await eventStream.result();
+    debug(`stream result: stopReason=${message.stopReason}, contentBlocks=${message.content.length}, types=[${message.content.map(c => c.type).join(',')}]`);
+    if (message.errorMessage) debug(`stream errorMessage: ${message.errorMessage}`);
+
+    // pi-ai returns stopReason='error' on API failures — must propagate
+    if (message.stopReason === 'error' || message.stopReason === 'aborted') {
+      throw new InvocationError(
+        config.name, 'api',
+        message.errorMessage ?? `API call failed (${message.stopReason})`,
+      );
+    }
+
+    // Fallback: if streaming collected nothing, extract from final message
+    let response = textParts.join('');
+    if (!response) {
+      response = extractText(message);
+      debug(`stream fallback extractText: len=${response.length}`);
+    }
 
     return {
-      response: text,
-      elapsed_ms: Date.now() - start,
+      response,
       invocation_mode: 'api',
       http_status: 200,
       token_usage: {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
+        input_tokens: message.usage.input,
+        output_tokens: message.usage.output,
       },
       timed_out: false,
     };
   }
 
-  private async invokeAnthropicOAuth(
-    config: ModelConfig, prompt: string,
-    accessToken: string, start: number, onChunk?: OnChunk,
-  ): Promise<InvocationResult> {
-    const url = (config.api_base_url ?? 'https://api.anthropic.com') + '/v1/messages';
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-      'anthropic-version': '2023-06-01',
-      'anthropic-beta': 'oauth-2025-04-20',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    };
-
-    const body = {
-      model: config.model!,
-      max_tokens: 8192,
-      stream: true,
-      messages: [{ role: 'user', content: prompt }],
-    };
-
-    const res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
+  private async invokeComplete(
+    model: Model<Api>, prompt: string, apiKey: string,
+    config: ModelConfig,
+  ): Promise<Omit<InvocationResult, 'elapsed_ms'>> {
+    debug(`complete: calling completeSimple...`);
+    const message = await completeSimple(model, {
+      messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
+    }, {
+      apiKey,
+      maxTokens: config.max_tokens ?? 8192,
+      temperature: config.temperature,
+      reasoning: config.reasoning_effort,
     });
+    debug(`complete result: stopReason=${message.stopReason}, contentBlocks=${message.content.length}, types=[${message.content.map(c => c.type).join(',')}]`);
+    if (message.errorMessage) debug(`complete errorMessage: ${message.errorMessage}`);
 
-    if (!res.ok) {
-      const errBody = await res.text();
-      throw new InvocationError(config.name, 'api', `Anthropic ${res.status}: ${errBody.substring(0, 300)}`);
-    }
-
-    // Parse SSE stream
-    const textParts: string[] = [];
-    let usage: { input_tokens: number; output_tokens: number } | undefined;
-    const reader = res.body?.getReader();
-    if (!reader) throw new InvocationError(config.name, 'api', 'No response body');
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const event = JSON.parse(line.slice(6)) as {
-            type?: string;
-            delta?: { type?: string; text?: string };
-            usage?: { input_tokens: number; output_tokens: number };
-            message?: { usage?: { input_tokens: number; output_tokens: number } };
-          };
-          if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && event.delta.text) {
-            if (onChunk) onChunk(event.delta.text);
-            textParts.push(event.delta.text);
-          }
-          if (event.type === 'message_delta' && event.usage) {
-            usage = event.usage;
-          }
-          if (event.type === 'message_start' && event.message?.usage) {
-            usage = { ...event.message.usage, output_tokens: 0 };
-          }
-        } catch { /* skip */ }
-      }
-    }
-
-    return {
-      response: textParts.join(''),
-      elapsed_ms: Date.now() - start,
-      invocation_mode: 'api',
-      http_status: res.status,
-      token_usage: usage,
-      timed_out: false,
-    };
-  }
-
-  private async invokeOpenAI(
-    config: ModelConfig, prompt: string,
-    credential: ProviderCredential, start: number, onChunk?: OnChunk,
-  ): Promise<InvocationResult> {
-    // Codex OAuth tokens use chatgpt.com/backend-api; API keys use api.openai.com
-    const isOAuth = credential.source === 'file';
-    const baseURL = isOAuth ? 'https://chatgpt.com/backend-api' : config.api_base_url;
-    const client = new OpenAI({
-      apiKey: credential.access_token,
-      ...(baseURL ? { baseURL } : {}),
-    });
-
-    if (isOAuth) {
-      // Codex OAuth → use chat completions API (backend-api doesn't support responses API)
-      return this.invokeOpenAIOAuth(client, config, prompt, credential, start, onChunk);
-    }
-
-    if (onChunk) {
-      const textParts: string[] = [];
-      const stream = await client.responses.create({
-        model: config.model!,
-        input: prompt,
-        stream: true,
-      });
-      for await (const event of stream) {
-        if (event.type === 'response.output_text.delta') {
-          onChunk(event.delta);
-          textParts.push(event.delta);
-        }
-      }
-      return {
-        response: textParts.join(''),
-        elapsed_ms: Date.now() - start,
-        invocation_mode: 'api',
-        http_status: 200,
-        timed_out: false,
-      };
-    }
-
-    const response = await client.responses.create({
-      model: config.model!,
-      input: prompt,
-    });
-
-    return {
-      response: response.output_text,
-      elapsed_ms: Date.now() - start,
-      invocation_mode: 'api',
-      http_status: 200,
-      token_usage: response.usage ? {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
-      } : undefined,
-      timed_out: false,
-    };
-  }
-
-  private async invokeOpenAIOAuth(
-    client: OpenAI, config: ModelConfig, prompt: string,
-    credential: ProviderCredential, start: number, onChunk?: OnChunk,
-  ): Promise<InvocationResult> {
-    // chatgpt.com/backend-api uses the responses API format
-    const url = 'https://chatgpt.com/backend-api/responses';
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${credential.access_token}`,
-      'Content-Type': 'application/json',
-    };
-    if (credential.account_id) {
-      headers['Chatgpt-Account-Id'] = credential.account_id;
-    }
-
-    const body = {
-      model: config.model!,
-      input: prompt,
-      stream: !!onChunk,
-    };
-
-    const res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const errBody = await res.text();
-      throw new InvocationError(config.name, 'api', `OpenAI ${res.status}: ${errBody.substring(0, 300)}`);
-    }
-
-    if (onChunk && res.body) {
-      const textParts: string[] = [];
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-        for (const line of lines) {
-          if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
-          try {
-            const chunk = JSON.parse(line.slice(6)) as {
-              type?: string;
-              delta?: string;
-            };
-            if (chunk.type === 'response.output_text.delta' && chunk.delta) {
-              onChunk(chunk.delta);
-              textParts.push(chunk.delta);
-            }
-          } catch { /* skip */ }
-        }
-      }
-      return {
-        response: textParts.join(''),
-        elapsed_ms: Date.now() - start,
-        invocation_mode: 'api',
-        http_status: res.status,
-        timed_out: false,
-      };
-    }
-
-    const data = await res.json() as { output_text?: string; output?: Array<{ content?: Array<{ text?: string }> }> };
-    const text = data.output_text
-      ?? data.output?.flatMap(o => o.content?.map(c => c.text) ?? []).join('')
-      ?? '';
-
-    return {
-      response: text,
-      elapsed_ms: Date.now() - start,
-      invocation_mode: 'api',
-      http_status: res.status,
-      timed_out: false,
-    };
-  }
-
-  private async invokeGoogle(
-    config: ModelConfig, prompt: string,
-    credential: ProviderCredential, start: number, onChunk?: OnChunk,
-  ): Promise<InvocationResult> {
-    // env-sourced credentials are API keys; file-sourced (gemini-cli) are OAuth tokens
-    if (credential.source === 'file') {
-      return this.invokeGoogleOAuth(config, prompt, credential, start, onChunk);
-    }
-
-    if (onChunk) {
-      const ai = new GoogleGenAI({ apiKey: credential.access_token });
-      const textParts: string[] = [];
-      let usageMetadata: { promptTokenCount?: number; candidatesTokenCount?: number } | undefined;
-
-      const stream = await ai.models.generateContentStream({
-        model: config.model!,
-        contents: prompt,
-      });
-      for await (const chunk of stream) {
-        const text = chunk.text;
-        if (text) {
-          onChunk(text);
-          textParts.push(text);
-        }
-        if (chunk.usageMetadata) {
-          usageMetadata = chunk.usageMetadata;
-        }
-      }
-      return {
-        response: textParts.join(''),
-        elapsed_ms: Date.now() - start,
-        invocation_mode: 'api',
-        http_status: 200,
-        token_usage: usageMetadata ? {
-          input_tokens: usageMetadata.promptTokenCount ?? 0,
-          output_tokens: usageMetadata.candidatesTokenCount ?? 0,
-        } : undefined,
-        timed_out: false,
-      };
-    }
-
-    const ai = new GoogleGenAI({ apiKey: credential.access_token });
-    const response = await ai.models.generateContent({
-      model: config.model!,
-      contents: prompt,
-    });
-
-    return {
-      response: response.text ?? '',
-      elapsed_ms: Date.now() - start,
-      invocation_mode: 'api',
-      http_status: 200,
-      token_usage: response.usageMetadata ? {
-        input_tokens: response.usageMetadata.promptTokenCount ?? 0,
-        output_tokens: response.usageMetadata.candidatesTokenCount ?? 0,
-      } : undefined,
-      timed_out: false,
-    };
-  }
-
-  private async invokeGoogleOAuth(
-    config: ModelConfig, prompt: string,
-    credential: ProviderCredential, start: number, onChunk?: OnChunk,
-  ): Promise<InvocationResult> {
-    // gemini-cli OAuth tokens work with Cloud Code Assist API, not the public Gemini API
-    const url = 'https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse';
-    const reqBody = JSON.stringify({
-      model: config.model!,
-      project: credential.project_id,
-      request: {
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { maxOutputTokens: 8192 },
-      },
-    });
-    const headers = {
-      Authorization: `Bearer ${credential.access_token}`,
-      'Content-Type': 'application/json',
-    };
-
-    // Check quota before sending request
-    const quotaWait = await this.checkGoogleQuota(credential, config.model!);
-    if (quotaWait > 0) {
-      if (onChunk) onChunk(`[waiting ${quotaWait}s for quota reset...]\n`);
-      await new Promise(r => setTimeout(r, quotaWait * 1000));
-    }
-
-    // Retry on 429 — max 2 retries then let AutoAdapter fall back to CLI
-    const maxRetries = 2;
-    let res: Response | undefined;
-    let lastError = '';
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      res = await fetch(url, { method: 'POST', headers, body: reqBody });
-      if (res.status !== 429) break;
-      lastError = await res.text();
-      if (attempt === maxRetries) { res = undefined; break; }
-      // Use server-suggested wait time
-      const retryMatch = lastError.match(/after (\d+)s/);
-      const waitSec = retryMatch ? Math.min(Number(retryMatch[1]) + 1, 30) : 12;
-      if (onChunk) onChunk(`[rate limited, retrying in ${waitSec}s...]\n`);
-      await new Promise(r => setTimeout(r, waitSec * 1000));
-      res = undefined;
-    }
-
-    if (!res) {
-      throw new InvocationError(config.name, 'api', `Google API 429: ${lastError.substring(0, 200)}`);
-    }
-    if (!res.ok) {
-      const body = await res.text();
-      throw new InvocationError(config.name, 'api', `Google API ${res.status}: ${body}`);
-    }
-
-    // Stream SSE chunks in real time
-    const textParts: string[] = [];
-    let usageMetadata: { promptTokenCount?: number; candidatesTokenCount?: number } | undefined;
-
-    const reader = res!.body?.getReader();
-    if (!reader) {
-      throw new InvocationError(config.name, 'api', 'No response body');
-    }
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const chunk = JSON.parse(line.slice(6)) as {
-            response?: {
-              candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-              usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
-            };
-          };
-          const parts = chunk.response?.candidates?.[0]?.content?.parts;
-          if (parts) {
-            for (const p of parts) {
-              if (p.text) {
-                if (onChunk) onChunk(p.text);
-                textParts.push(p.text);
-              }
-            }
-          }
-          if (chunk.response?.usageMetadata) {
-            usageMetadata = chunk.response.usageMetadata;
-          }
-        } catch {
-          // skip malformed SSE lines
-        }
-      }
-    }
-
-    return {
-      response: textParts.join(''),
-      elapsed_ms: Date.now() - start,
-      invocation_mode: 'api',
-      http_status: res!.status,
-      token_usage: usageMetadata ? {
-        input_tokens: usageMetadata.promptTokenCount ?? 0,
-        output_tokens: usageMetadata.candidatesTokenCount ?? 0,
-      } : undefined,
-      timed_out: false,
-    };
-  }
-
-  /** Check Google Cloud Code Assist quota, return seconds to wait (0 = ready) */
-  private async checkGoogleQuota(
-    credential: ProviderCredential, model: string,
-  ): Promise<number> {
-    try {
-      const res = await fetch('https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${credential.access_token}`,
-          'Content-Type': 'application/json',
-        },
-        body: '{}',
-      });
-      if (!res.ok) return 0;
-
-      const data = await res.json() as {
-        buckets?: Array<{
-          tokenType?: string;
-          modelId?: string;
-          remainingFraction?: number;
-          resetTime?: string;
-        }>;
-      };
-
-      const bucket = data.buckets?.find(
-        b => b.tokenType === 'REQUESTS' && b.modelId === model,
+    // pi-ai returns stopReason='error' on API failures — must propagate
+    if (message.stopReason === 'error' || message.stopReason === 'aborted') {
+      throw new InvocationError(
+        config.name, 'api',
+        message.errorMessage ?? `API call failed (${message.stopReason})`,
       );
-
-      if (bucket && bucket.remainingFraction !== undefined && bucket.remainingFraction <= 0 && bucket.resetTime) {
-        const resetMs = new Date(bucket.resetTime).getTime() - Date.now();
-        return Math.max(0, Math.ceil(resetMs / 1000));
-      }
-
-      return 0;
-    } catch {
-      return 0;
     }
+
+    const response = extractText(message);
+    debug(`complete extractText: len=${response.length}`);
+
+    return {
+      response,
+      invocation_mode: 'api',
+      http_status: 200,
+      token_usage: {
+        input_tokens: message.usage.input,
+        output_tokens: message.usage.output,
+      },
+      timed_out: false,
+    };
   }
+}
+
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '0.0.0.0']);
+
+/** True if baseUrl points at a local interface — allows no-auth health checks for ollama / vLLM / docker-bound dev servers. */
+function isLocalBaseUrl(baseUrl: string): boolean {
+  try {
+    return LOCAL_HOSTS.has(new URL(baseUrl).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** Extract text from an AssistantMessage. Falls back to thinking content if no text found. */
+function extractText(message: { content: Array<{ type: string; text?: string; thinking?: string }> }): string {
+  // Prefer text content
+  const text = message.content
+    .filter(c => c.type === 'text' && c.text)
+    .map(c => c.text!)
+    .join('');
+  if (text) return text;
+
+  // Fallback: use thinking content if no text blocks
+  const thinking = message.content
+    .filter(c => c.type === 'thinking' && c.thinking)
+    .map(c => c.thinking!)
+    .join('');
+  return thinking;
 }

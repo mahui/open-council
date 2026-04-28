@@ -152,7 +152,9 @@ function parseRoleResponse(raw: string, models: ModelConfig[]): GeneratedRole[] 
   try {
     const jsonMatch = raw.match(/\[[\s\S]*\]/);
     if (!jsonMatch) return null;
-    const parsed = JSON.parse(jsonMatch[0]) as unknown[];
+    // Strip trailing commas before ] or } — LLMs frequently produce non-standard JSON
+    const sanitized = jsonMatch[0].replace(/,(\s*[}\]])/g, '$1');
+    const parsed = JSON.parse(sanitized) as unknown[];
     const roles: GeneratedRole[] = [];
     const modelNames = models.map(m => m.name);
 
