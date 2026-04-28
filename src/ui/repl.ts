@@ -15,7 +15,7 @@ import { LiveRenderer } from './live-renderer.js';
 import { SessionStore } from '../storage/session-store.js';
 import { PATHS } from '../config/paths.js';
 import { showSlashPicker, type SlashCommand } from './slash-picker.js';
-import { startInput } from './input.js';
+import { startInput, type InputController } from './input.js';
 import type { ModelConfig } from '../types/config.js';
 import type { DebateMode, RunOptions } from '../types/session.js';
 
@@ -46,11 +46,12 @@ interface ReplState {
   credentialManager: CredentialManager;
   adapter: AutoAdapter;
   sessionCount: number;
+  input?: InputController;
 }
 
 export async function startRepl(): Promise<void> {
   // Initialize
-  process.stderr.write(`\n${BOLD}🏛️  Local AI Council${RESET} ${DIM}v0.1.0${RESET}\n`);
+  process.stderr.write(`\n${BOLD}🏛️  Open Council${RESET} ${DIM}v0.1.0${RESET}\n`);
   process.stderr.write(`${DIM}Multi-model debate orchestration system${RESET}\n\n`);
 
   process.stderr.write(`${DIM}Scanning credentials...${RESET}`);
@@ -102,7 +103,7 @@ export async function startRepl(): Promise<void> {
   const promptStr = `${BOLD}council ❯${RESET} `;
 
   return new Promise<void>((resolve) => {
-    startInput({
+    state.input = startInput({
       prompt: promptStr,
 
       onSlash: async () => {
@@ -175,18 +176,25 @@ async function handleCommand(input: string, state: ReplState): Promise<void> {
       break;
 
     case 'setup': {
-      const { runSetup } = await import('../commands/setup.js');
-      await runSetup();
-      const loader = new ConfigLoader();
-      if (loader.isConfigured()) {
-        try {
-          const config = loader.loadCouncilConfig();
-          state.models = loader.loadAllModels();
-          state.chairman = config.general.default_chairman;
-          process.stderr.write(`  ${GREEN}✓${RESET} Configuration reloaded.\n`);
-        } catch (err) {
-          process.stderr.write(`  ${YELLOW}⚠ Config reload failed: ${err instanceof Error ? err.message : err}${RESET}\n`);
+      // Wizard's inquirer prompts must own stdin; release REPL's raw-mode handler
+      // and reattach after — otherwise stale Enter events break complex prompts (checkbox).
+      state.input?.suspend();
+      try {
+        const { runSetup } = await import('../commands/setup.js');
+        await runSetup();
+        const loader = new ConfigLoader();
+        if (loader.isConfigured()) {
+          try {
+            const config = loader.loadCouncilConfig();
+            state.models = loader.loadAllModels();
+            state.chairman = config.general.default_chairman;
+            process.stderr.write(`  ${GREEN}✓${RESET} Configuration reloaded.\n`);
+          } catch (err) {
+            process.stderr.write(`  ${YELLOW}⚠ Config reload failed: ${err instanceof Error ? err.message : err}${RESET}\n`);
+          }
         }
+      } finally {
+        state.input?.resume();
       }
       break;
     }

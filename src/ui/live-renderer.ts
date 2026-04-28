@@ -29,6 +29,40 @@ function stripAnsi(str: string): string {
   return str.replace(/\x1b\[[0-9;]*m/g, '');
 }
 
+/** Display width of a single code point at index i. CJK/emoji = 2, ASCII = 1. */
+function charWidth(str: string, i: number): number {
+  const code = str.charCodeAt(i);
+  if (code >= 0xD800 && code <= 0xDBFF) return 2; // high surrogate (emoji etc.)
+  if (
+    (code >= 0x1100 && code <= 0x115F) ||
+    (code >= 0x2E80 && code <= 0x303E) ||
+    (code >= 0x3040 && code <= 0x33BF) ||
+    (code >= 0x3400 && code <= 0x4DBF) ||
+    (code >= 0x4E00 && code <= 0xA4CF) ||
+    (code >= 0xAC00 && code <= 0xD7AF) ||
+    (code >= 0xF900 && code <= 0xFAFF) ||
+    (code >= 0xFE30 && code <= 0xFE4F) ||
+    (code >= 0xFF01 && code <= 0xFF60) ||
+    (code >= 0xFFE0 && code <= 0xFFE6)
+  ) return 2;
+  return 1;
+}
+
+/** Visible (printable) display width of an ANSI-bearing string. */
+function visibleWidth(str: string): number {
+  let w = 0;
+  let inEscape = false;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i]!;
+    if (ch === '\x1b') { inEscape = true; continue; }
+    if (inEscape) { if (ch === 'm') inEscape = false; continue; }
+    const cw = charWidth(str, i);
+    w += cw;
+    if (cw === 2 && str.charCodeAt(i) >= 0xD800 && str.charCodeAt(i) <= 0xDBFF) i++;
+  }
+  return w;
+}
+
 const ROLE_ICONS: Record<string, string> = {
   analyst: '🔍', engineer: '⚙️', innovator: '💡',
   critic: '🎯', pragmatist: '📐', chairman: '👑',
@@ -258,7 +292,7 @@ export class LiveRenderer implements Renderer {
         .filter(i => !i.timed_out && i.response_raw).length;
 
       // Move to bottom of screen
-      process.stderr.write(`\x1b[${this.rows};0H`);
+      process.stderr.write(`\x1b[${this.rows};1H`);
       process.stderr.write(
         `${CLEAR_LINE}${DIM}Total: ${(session.total_elapsed_ms / 1000).toFixed(1)}s | ` +
         `Mode: ${session.resolved_mode} | Agents: ${succeeded}/${agents}  ` +
@@ -421,7 +455,7 @@ export class LiveRenderer implements Renderer {
   }
 
   private renderTabBar(): void {
-    process.stderr.write('\x1b[1;0H'); // Move to row 1
+    process.stderr.write('\x1b[1;1H'); // Move to row 1
 
     const parts: string[] = [];
     for (let i = 0; i < this.tabs.length; i++) {
@@ -455,23 +489,25 @@ export class LiveRenderer implements Renderer {
 
   private getRenderedLines(tab: TabState): string[] {
     const raw = tab.buffer || '';
+    // Always render markdown (even while streaming) so wrap math sees the actual visible width.
     const rendered = tab.status === 'done' ? renderMarkdown(raw) : raw;
-    // Wrap long lines to terminal width
     const lines: string[] = [];
     for (const line of rendered.split('\n')) {
-      const visible = stripAnsi(line);
-      if (visible.length <= this.cols) {
+      if (visibleWidth(line) <= this.cols) {
         lines.push(line);
       } else {
-        // Soft-wrap: split by visible character width
         lines.push(...this.wrapLine(line, this.cols));
       }
     }
     return lines;
   }
 
+  /**
+   * Soft-wrap a single line to `width` display columns, preserving ANSI codes
+   * and treating CJK/emoji as 2 columns. Empty inputs yield [''] so callers
+   * still get a row to render.
+   */
   private wrapLine(line: string, width: number): string[] {
-    // Simple wrap that respects ANSI codes
     const result: string[] = [];
     let current = '';
     let visLen = 0;
@@ -490,13 +526,19 @@ export class LiveRenderer implements Renderer {
         continue;
       }
 
-      if (visLen >= width) {
+      const cw = charWidth(line, i);
+      if (visLen + cw > width) {
         result.push(current);
         current = '';
         visLen = 0;
       }
       current += ch;
-      visLen++;
+      // Surrogate pair: include the low surrogate as part of the same code point.
+      if (cw === 2 && line.charCodeAt(i) >= 0xD800 && line.charCodeAt(i) <= 0xDBFF) {
+        i++;
+        if (i < line.length) current += line[i];
+      }
+      visLen += cw;
     }
     if (current) result.push(current);
     return result.length > 0 ? result : [''];
@@ -521,7 +563,7 @@ export class LiveRenderer implements Renderer {
 
     // Move to content area start (row 3)
     for (let i = 0; i < contentRows; i++) {
-      process.stderr.write(`\x1b[${this.headerLines + 1 + i};0H${CLEAR_LINE}`);
+      process.stderr.write(`\x1b[${this.headerLines + 1 + i};1H${CLEAR_LINE}`);
       if (i < visibleLines.length) {
         process.stderr.write(visibleLines[i]!);
       }
@@ -532,16 +574,16 @@ export class LiveRenderer implements Renderer {
     const tab = this.tabs[this.activeTab];
 
     // Line 1: separator
-    process.stderr.write(`\x1b[${this.rows - 2};0H`);
+    process.stderr.write(`\x1b[${this.rows - 2};1H`);
     process.stderr.write(`${CLEAR_LINE}${DIM}${'─'.repeat(this.cols)}${RESET}`);
 
     // Line 2: activity log (process status, non-intrusive)
-    process.stderr.write(`\x1b[${this.rows - 1};0H`);
+    process.stderr.write(`\x1b[${this.rows - 1};1H`);
     const logText = this.activityLog.substring(0, this.cols - 2);
     process.stderr.write(`${CLEAR_LINE}${DIM} ${logText}${RESET}`);
 
     // Line 3: tab info + keybindings
-    process.stderr.write(`\x1b[${this.rows};0H`);
+    process.stderr.write(`\x1b[${this.rows};1H`);
 
     let status = '';
     if (tab) {

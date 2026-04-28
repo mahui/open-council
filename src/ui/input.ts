@@ -50,7 +50,13 @@ export interface InputOptions {
   onClose: () => void;
 }
 
-export function startInput(opts: InputOptions): { close: () => void } {
+export interface InputController {
+  close: () => void;
+  suspend: () => void;
+  resume: () => void;
+}
+
+export function startInput(opts: InputOptions): InputController {
   const { prompt, onSlash, onLine, onClose } = opts;
   let line = '';
   let cursor = 0; // character index in `line`
@@ -223,5 +229,24 @@ export function startInput(opts: InputOptions): { close: () => void } {
 
   showPrompt();
 
-  return { close: () => { cleanup(); onClose(); } };
+  return {
+    close: () => { cleanup(); onClose(); },
+    /** Release stdin so another consumer (e.g. inquirer) can use it. */
+    suspend: () => {
+      if (!active) return;
+      process.stdin.removeListener('keypress', onKeypress);
+      try { process.stdin.setRawMode(false); process.stdin.pause(); } catch { /* */ }
+    },
+    /** Reattach stdin handlers and re-render the prompt. */
+    resume: () => {
+      if (!active) return;
+      emitKeypressEvents(process.stdin);
+      try { process.stdin.setRawMode(true); process.stdin.resume(); } catch { /* */ }
+      process.stdin.setEncoding('utf-8');
+      process.stdin.on('keypress', onKeypress);
+      busy = false;
+      process.stderr.write('\n');
+      showPrompt();
+    },
+  };
 }
