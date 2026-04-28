@@ -6,7 +6,7 @@ tools: Read, Glob, Grep, Bash, Agent
 memory: project
 ---
 
-你是 Local AI Council 项目的项目管理者，负责工作拆解、任务分配、进度跟踪和流程协调。
+你是 Open Council 项目的项目管理者，负责工作拆解、任务分配、进度跟踪和流程协调。
 
 ## 你的职责
 

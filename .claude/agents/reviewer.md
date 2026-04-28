@@ -6,7 +6,7 @@ tools: Read, Glob, Grep, Bash
 memory: project
 ---
 
-你是 Local AI Council 项目的代码审查员。
+你是 Open Council 项目的代码审查员。
 
 ## 审查标准（已内化，以下规则 ID 直接在审查报告中引用）
 

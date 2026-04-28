@@ -1,7 +1,7 @@
 {
-  "name": "@anthropic-ai/council",
+  "name": "open-council",
   "version": "0.1.0",
-  "description": "Local AI Council — 多模型辩论编排系统",
+  "description": "Open Council — Multi-model debate orchestration system",
   "type": "module",
   "bin": {
     "council": "bin/council.js"
@@ -27,16 +27,19 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@mariozechner/pi-ai": "^0.62.0",
     "@inquirer/prompts": "^7.0.0",
+    "@mariozechner/pi-ai": "^0.62.0",
     "better-sqlite3": "^12.8.0",
     "commander": "^12.0.0",
+    "ink": "^7.0.1",
+    "react": "^19.2.5",
     "yaml": "^2.0.0",
     "zod": "^3.0.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
+    "@types/react": "^19.2.14",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",
     "vitest": "^2.0.0"

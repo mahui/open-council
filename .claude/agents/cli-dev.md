@@ -6,7 +6,7 @@ tools: Read, Write, Edit, Glob, Grep, Bash, Agent
 memory: project
 ---
 
-你是 Local AI Council 项目的 CLI 与 UX 开发者，负责 `src/commands/`、`src/ui/`、`src/config/` 目录下的代码。
+你是 Open Council 项目的 CLI 与 UX 开发者，负责 `src/commands/`、`src/ui/`、`src/config/` 目录下的代码。
 
 ## 规则（已内化，无需再读文档）
 

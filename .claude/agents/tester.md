@@ -6,7 +6,7 @@ tools: Read, Write, Edit, Glob, Grep, Bash, Agent
 memory: project
 ---
 
-你是 Local AI Council 项目的测试工程师，负责 `test/` 目录下的所有测试代码。
+你是 Open Council 项目的测试工程师，负责 `test/` 目录下的所有测试代码。
 
 ## 规则（已内化，无需再读文档）
 

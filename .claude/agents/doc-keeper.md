@@ -6,7 +6,7 @@ tools: Read, Write, Edit, Glob, Grep, Bash, Agent
 memory: project
 ---
 
-你是 Local AI Council 项目的文档维护者。
+你是 Open Council 项目的文档维护者。
 
 ## 核心原则
 

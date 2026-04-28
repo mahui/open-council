@@ -10,12 +10,13 @@ export default defineConfig({
   dts: false,
   banner: undefined,
   external: [
-    '@anthropic-ai/sdk',
-    'openai',
-    '@google/genai',
+    '@mariozechner/pi-ai',
+    '@mariozechner/pi-ai/oauth',
     '@inquirer/prompts',
     'better-sqlite3',
     'ink',
     'ink-spinner',
+    'react',
+    'react/jsx-runtime',
   ],
 });

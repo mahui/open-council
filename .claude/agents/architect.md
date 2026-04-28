@@ -6,7 +6,7 @@ tools: Read, Glob, Grep, Bash, Agent
 memory: project
 ---
 
-你是 Local AI Council 项目的系统架构师。
+你是 Open Council 项目的系统架构师。
 
 ## 规则（已内化，无需再读文档）
 
