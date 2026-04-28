@@ -23,6 +23,13 @@ const CLEAR_SCREEN = '\x1b[2J\x1b[H';
 const CLEAR_LINE = '\x1b[2K';
 const HIDE_CURSOR = '\x1b[?25l';
 const SHOW_CURSOR = '\x1b[?25h';
+// SGR (1006) extended mouse mode + 1000 button reporting — captures wheel events
+// as `\x1b[<BUTTON;COL;ROW{M|m}`. We only act on wheel buttons (64 up / 65 down)
+// and ignore clicks/drags so users can still focus the terminal normally.
+const ENABLE_MOUSE = '\x1b[?1000h\x1b[?1006h';
+const DISABLE_MOUSE = '\x1b[?1006l\x1b[?1000l';
+const SGR_MOUSE_RE = /\x1b\[<(\d+);(\d+);(\d+)[Mm]/;
+const WHEEL_STEP = 3;
 // cursor positioning uses absolute \x1b[row;colH only
 
 function stripAnsi(str: string): string {
@@ -85,6 +92,7 @@ export class LiveRenderer implements Renderer {
   private activeTab = 0;
   private phase = '';
   private keypressHandler: ((ch: string | undefined, key: any) => void) | null = null;
+  private mouseHandler: ((data: Buffer | string) => void) | null = null;
   private resizeHandler: (() => void) | null = null;
   private rows = process.stderr.rows || 40;
   private cols = process.stderr.columns || 80;
@@ -331,10 +339,51 @@ export class LiveRenderer implements Renderer {
 
   private startLiveMode(): void {
     process.stderr.write(HIDE_CURSOR);
+    process.stderr.write(ENABLE_MOUSE);
     process.stderr.write(CLEAR_SCREEN);
     this.listenResize();
     this.startListening();
+    this.startMouse();
     this.render();
+  }
+
+  /** Scroll the active tab by `delta` lines (positive = up toward older content). */
+  private scrollActive(delta: number): void {
+    const tab = this.tabs[this.activeTab];
+    if (!tab) return;
+    const contentRows = Math.max(1, this.rows - this.headerLines - this.footerLines);
+    const totalLines = this.getRenderedLines(tab).length;
+    const maxScroll = Math.max(0, totalLines - contentRows);
+    const next = Math.max(0, Math.min(maxScroll, tab.scrollUp + delta));
+    if (next === tab.scrollUp) return;
+    tab.scrollUp = next;
+    this.renderContent();
+    this.renderFooter();
+  }
+
+  /** Capture mouse-wheel events emitted by the terminal in SGR mode. */
+  private startMouse(): void {
+    if (this.mouseHandler) return;
+    this.mouseHandler = (data) => {
+      const s = typeof data === 'string' ? data : data.toString('utf8');
+      // A single buffer may bundle key presses + mouse reports; scan all matches.
+      let m: RegExpExecArray | null;
+      const re = new RegExp(SGR_MOUSE_RE.source, 'g');
+      while ((m = re.exec(s)) !== null) {
+        const button = parseInt(m[1]!, 10);
+        if (button === 64) this.scrollActive(WHEEL_STEP);   // wheel up → older content
+        else if (button === 65) this.scrollActive(-WHEEL_STEP); // wheel down → newer content
+      }
+    };
+    process.stdin.on('data', this.mouseHandler);
+  }
+
+  private stopMouse(): void {
+    if (this.mouseHandler) {
+      process.stdin.removeListener('data', this.mouseHandler);
+      this.mouseHandler = null;
+    }
+    process.stderr.write(DISABLE_MOUSE);
   }
 
   private resizeDebounce: NodeJS.Timeout | null = null;
@@ -446,6 +495,7 @@ export class LiveRenderer implements Renderer {
     }
     this.listening = false;
     this.stopResize();
+    this.stopMouse();
   }
 
   private rendering = false;
