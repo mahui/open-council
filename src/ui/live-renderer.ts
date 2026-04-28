@@ -364,6 +364,14 @@ export class LiveRenderer implements Renderer {
   /** Capture mouse-wheel events emitted by the terminal in SGR mode. */
   private startMouse(): void {
     if (this.mouseHandler) return;
+    // Make sure stdin is in a state where data events fire — when invoked
+    // from the REPL the input layer already set raw mode, but a direct
+    // `council "..."` invocation may not have, and a paused stream eats events.
+    try {
+      if (process.stdin.isTTY) process.stdin.setRawMode(true);
+      process.stdin.resume();
+    } catch { /* not a TTY — mouse won't work anyway */ }
+
     this.mouseHandler = (data) => {
       const s = typeof data === 'string' ? data : data.toString('utf8');
       // A single buffer may bundle key presses + mouse reports; scan all matches.
@@ -432,6 +440,22 @@ export class LiveRenderer implements Renderer {
     this.listening = true;
 
     this.keypressHandler = (_ch, key) => {
+      // SGR mouse sequences sometimes arrive bundled as keypress events
+      // (the readline parser tries to make sense of ESC[<...). Catch them here
+      // as a fallback in case the raw 'data' listener missed them.
+      const seq = (typeof _ch === 'string' && _ch.length > 1 ? _ch : key?.sequence) as string | undefined;
+      if (seq && seq.includes('\x1b[<')) {
+        const re = new RegExp(SGR_MOUSE_RE.source, 'g');
+        let m: RegExpExecArray | null;
+        let handled = false;
+        while ((m = re.exec(seq)) !== null) {
+          const button = parseInt(m[1]!, 10);
+          if (button === 64) { this.scrollActive(WHEEL_STEP); handled = true; }
+          else if (button === 65) { this.scrollActive(-WHEEL_STEP); handled = true; }
+        }
+        if (handled) return;
+      }
+
       if (!key) return;
       const tab = this.tabs[this.activeTab];
 
