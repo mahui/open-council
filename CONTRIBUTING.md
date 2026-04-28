@@ -1,4 +1,4 @@
-# Local AI Council — 开发规范
+# Open Council — 开发规范
 
 本文档是项目的强制性开发规范。所有代码提交（人工或 Agent）必须遵守。
 

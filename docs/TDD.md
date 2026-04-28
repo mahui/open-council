@@ -1,4 +1,4 @@
-# Local AI Council — 技术设计文档 (TDD)
+# Open Council — 技术设计文档 (TDD)
 
 **Technical Design Document v2.0**
 
@@ -10,7 +10,7 @@
 | 对应 PRD | docs/PRD.md v7.0 |
 | 主语言 | TypeScript (Node.js ≥ 20) |
 | 包管理 | pnpm |
-| 分发方式 | npm 全局包 (`npm install -g @anthropic-ai/council`) |
+| 分发方式 | npm 全局包 (`npm install -g open-council`) |
 
 ---
 
@@ -55,7 +55,7 @@
 
 ```bash
 # 主分发渠道：npm 全局安装
-npm install -g @anthropic-ai/council
+npm install -g open-council
 
 # 零安装试用
 npx council "Redis vs Memcached 怎么选?"
@@ -492,7 +492,32 @@ export class ApiAdapter implements InvocationAdapter {
     throw new CredentialNotFoundError(provider);
   }
 
+  /**
+   * 自定义 OpenAI 兼容端点分支（config.api_base_url 存在时进入）。
+   * 完全绕过 pi-ai 的模型注册表，直接构造一个 Model<'openai-completions'> 字面量：
+   * - 不继承任何注册模型的成本/上下文窗口假设
+   * - `compat` 字段留空，由 pi-ai 根据 baseUrl 自动判断协议变体
+   * - 用户可指向 ollama / vLLM / LM Studio / OneAPI / Azure OpenAI 等任意服务，无需 Council/pi-ai 维护注册表
+   *
+   * 凭证解析（resolveApiKey）三级优先级（与已注册 Provider 共用）：
+   *   ① config.api_key_env 指定的环境变量（不存在 → InvocationError）
+   *   ② config.api_credential_path 指向的密钥文件（整个文件 trim 后作为 key）
+   *   ③ CredentialManager.getApiKey(provider) 回退（失败时返回空串）
+   * 空 key 仅在 baseUrl 指向本地 host 时被允许（适配 ollama 默认无鉴权部署）。
+   *
+   * Provider 命名约定：`custom:<name>`，<name> 满足 [a-z0-9-]+。该字符串同时作为
+   * circuit-breaker 的 key — 同一自定义 provider 的多个模型共享熔断状态。
+   */
+  private buildCustomModel(config: ModelConfig): Model<'openai-completions'> { /* ... */ }
+
   async healthCheck(config: ModelConfig): Promise<HealthStatus> {
+    // 自定义端点分支：纯本地检查，不查 pi-ai registry。
+    // - api_key_env 设置：检查环境变量是否存在且非空
+    // - api_credential_path 设置：检查文件是否存在
+    // - 都未设置：仅当 baseUrl 在 LOCAL_HOSTS 集合内时判定为 healthy
+    //   LOCAL_HOSTS = { 'localhost', '127.0.0.1', '[::1]', '0.0.0.0' }
+    if (config.api_base_url) { /* see source for branch logic */ }
+
     try {
       const apiKey = await this.resolveApiKey(config.provider!);
       return {
@@ -606,6 +631,20 @@ Council **不再自行实现**凭证解析、Token 刷新、OAuth 流程。所�
 - 删除 `src/types/provider.ts` 中的 `ProviderCredential` 接口
 - 新增 `src/providers/pi-ai-bridge.ts`（模型发现 + 凭证委托）
 - `ApiAdapter` 简化为统一的 `complete()` / `stream()` 调用，不再 switch-case 各 Provider
+
+#### 3.4.1 自定义 Provider 凭证存储约定
+
+针对自定义 OpenAI 兼容端点（`config.api_base_url` 存在），Council 自行管理 raw API key 文件（pi-ai 不参与）：
+
+| 项 | 约定 |
+|----|------|
+| 存储路径 | `~/.council/credentials/custom-<name>.key` |
+| 文件 mode | `0o600`（chmodSync 显式设置，符合 SEC-03） |
+| 父目录 mode | `0o700`（首次写入时 mkdirSync recursive） |
+| 文件内容 | 单行 raw API key（读取时 trim 去尾随换行） |
+| `<name>` 规则 | `[a-z0-9-]+`，由 first-run wizard 通过 `sanitizeProviderName()` 强制 |
+| Provider 命名 | `provider: 'custom:<name>'`，作为 circuit-breaker key（同 name 下多模型共享熔断状态） |
+| 孤儿清理 | wizard 中途取消时，已写入但未持久化到 ModelConfig 的 key 文件由 wizard 主动 `unlinkSync` 删除 |
 
 ---
 
@@ -1379,7 +1418,7 @@ import { Command } from 'commander';
 
 const program = new Command()
   .name('council')
-  .description('Local AI Council — 多模型辩论编排系统')
+  .description('Open Council — 多模型辩论编排系统')
   .version('0.1.0');
 
 // 主命令：council "question"
@@ -1604,7 +1643,7 @@ export function Dashboard(props: Props) {
 
   return (
     <Box flexDirection="column" borderStyle="single" paddingX={1}>
-      <Text bold>Local AI Council - {mode.toUpperCase()} Mode</Text>
+      <Text bold>Open Council - {mode.toUpperCase()} Mode</Text>
       <Text dimColor>Question: "{question.slice(0, 60)}..."</Text>
 
       <Box marginY={1}>

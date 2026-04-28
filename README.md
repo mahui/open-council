@@ -1,4 +1,4 @@
-# Local AI Council
+# Open Council
 
 **本地多模型辩论编排系统** — 让多个 AI 模型围绕同一问题辩论、互评、达成共识，产出比单模型更可靠的答案。
 
@@ -54,7 +54,7 @@ $ council "Redis vs Memcached，电商场景日均 5000 万 PV 该怎么选？"
 ## 安装
 
 ```bash
-npm install -g @anthropic-ai/council
+npm install -g open-council
 ```
 
 前提条件：
@@ -66,8 +66,8 @@ npm install -g @anthropic-ai/council
 
 ```bash
 # 克隆仓库
-git clone https://github.com/mahui/mind-storm.git
-cd mind-storm
+git clone git@github.com:mahui/open-council.git
+cd open-council
 
 # 安装依赖
 pnpm install
@@ -115,6 +115,27 @@ export GEMINI_API_KEY="AI..."            # Google Gemini
 也可通过本地凭证文件自动发现（无需手动设置）：
 - `~/.codex/auth.json` — OpenAI Codex CLI 凭证
 - `~/.gemini/oauth_creds.json` — Google Gemini OAuth 凭证
+
+### 自定义 OpenAI 兼容端点
+
+除内置 Provider 外，可通过 `api_base_url` 接入任意 OpenAI Completions 协议兼容服务（ollama、vLLM、LM Studio、OneAPI、LiteLLM 网关、Azure OpenAI 代理等），无需在 pi-ai 中预注册。
+
+首次运行向导的 Step 6（可选）会引导添加。也可手动写入 `~/.council/config/models/custom-ollama.yaml`：
+
+```yaml
+name: custom:ollama:llama3.2
+invocation: api
+provider: custom:ollama          # 命名约定：custom:<a-z0-9-+>
+model: llama3.2
+api_base_url: http://localhost:11434/v1
+# 本地 host (localhost/127.0.0.1/[::1]/0.0.0.0) 允许无鉴权调用
+# 远程服务请二选一：
+#   api_key_env: MY_GATEWAY_KEY
+#   api_credential_path: ~/.council/credentials/custom-ollama.key   # mode 0o600
+streaming: true
+capabilities: [general, code]
+priority: 50
+```
 
 ### 构建产物
 

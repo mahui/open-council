@@ -1,4 +1,4 @@
-# Local AI Council
+# Open Council
 
 **基于本地 CLI 工具的多模型辩论编排系统**
 
@@ -18,7 +18,7 @@
 
 ### 1.1 背景与目标
 
-Local AI Council 是一个本地化的多 Agent 辩论编排系统。其本质是一个**本地化的集成学习（Ensemble Learning）系统**，利用已有订阅额度，通过编排多个 AI Agent 对同一问题进行并行回答、互评、共识评分和综合，以"群蜂智慧"解决单一视角可能存在的幻觉、偏见或深度不足的问题，产出比单次调用更可靠的答案。
+Open Council 是一个本地化的多 Agent 辩论编排系统。其本质是一个**本地化的集成学习（Ensemble Learning）系统**，利用已有订阅额度，通过编排多个 AI Agent 对同一问题进行并行回答、互评、共识评分和综合，以"群蜂智慧"解决单一视角可能存在的幻觉、偏见或深度不足的问题，产出比单次调用更可靠的答案。
 
 **双模调用架构**: 系统支持两种调用模式，可按模型独立配置：
 
@@ -928,7 +928,7 @@ Council 通过 pi-ai 的 `OAuthProviderInterface` 调用 `login()` 方法触发�
 
 ```
 ══════════════════════════════════════════════════════
-  Welcome to Local AI Council!
+  Welcome to Open Council!
   让我们花 2 分钟完成初始配置
 ══════════════════════════════════════════════════════
 
@@ -1024,6 +1024,20 @@ Step 6/6 — 选择默认辩论模式
 
   [↑↓ 选择, Enter 确认]
 
+Step 6 (可选) — 添加自定义 OpenAI 兼容端点
+──────────────────────────────────────────────────────
+  Add a custom OpenAI-compatible endpoint? (e.g. ollama, vLLM, LM Studio) [y/N]
+
+  > y
+  Provider name (lowercase, a-z 0-9 -):  ollama
+  Base URL (e.g. http://localhost:11434/v1):  http://localhost:11434/v1
+  Model identifier (e.g. llama3.2, gpt-4o):  llama3.2
+  API key (leave empty for no auth, e.g. local ollama):  ********
+
+  → 写入凭证 ~/.council/credentials/custom-ollama.key (mode 0o600)
+  → 连通性测试 custom:ollama:llama3.2 ... ✓
+  Add another custom endpoint? [y/N]  n
+
 ══════════════════════════════════════════════════════
   ✓ 配置完成! 已保存到 ~/.council/
 
@@ -1048,11 +1062,12 @@ Step 6/6 — 选择默认辩论模式
 ```
 
 **首次引导的设计原则**：
-- 最多 5 步，2 分钟内完成
+- 主流程 5 步，2 分钟内完成；Step 6（自定义端点）可选，默认跳过
 - 自动扫描工具 + 展示可选模型列表，推荐最佳组合
 - 同一工具可选多个模型变体（如 opus + sonnet 协作）
 - 跳过高级配置（超时、并发、路由规则等），全部使用默认值
 - 引导完成后立即可用，不强制要求进一步配置
+- Step 6 用于纳入第三方 OpenAI 兼容服务（ollama / vLLM / LM Studio / OneAPI / 自建 LiteLLM 网关 / Azure OpenAI 代理等），无需在 pi-ai 中预注册即可参与辩论。setup 中途取消时，已写入但未被持久化引用的孤儿凭证文件会被清理
 
 **失败恢复与中断处理**：
 
@@ -1350,9 +1365,11 @@ council models add --id codex-o4mini --binary codex --model o4-mini --args "--qu
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| api_credential_path | string | — | 凭证文件路径（默认按 provider 自动探测，见 4.2.2）。如需指定非默认路径可手动填写 |
-| api_base_url | string | — | 自定义 API 端点（用于代理、企业版、或 Azure OpenAI 等场景） |
-| api_key_env | string | — | 环境变量名（如 `ANTHROPIC_API_KEY`），优先级高于凭证文件。适用于用户持有独立 API Key 的场景 |
+| api_credential_path | string | — | 凭证文件路径（默认按 provider 自动探测，见 4.2.2）。如需指定非默认路径可手动填写。自定义端点场景下指向 `~/.council/credentials/custom-<name>.key`（mode 0o600） |
+| api_base_url | string | — | 自定义 API 端点。指定后绕过 pi-ai 模型注册表，按 OpenAI Completions 协议直连任意兼容服务（ollama / vLLM / LM Studio / OneAPI / Azure OpenAI 代理等） |
+| api_key_env | string | — | 环境变量名（如 `ANTHROPIC_API_KEY`、`OLLAMA_API_KEY`）。读取该环境变量作为 API Key |
+
+> **API Key 解析三级优先级**（自定义端点和已注册 Provider 共用）：① `api_key_env` 指定的环境变量 → ② `api_credential_path` 指向的凭证文件（整个文件内容 trim 后作为 key） → ③ `CredentialManager.getApiKey(provider)` 的 OAuth/默认路径回退。三者均为空时，仅当 `api_base_url` 指向本地 host（`localhost` / `127.0.0.1` / `[::1]` / `0.0.0.0`）时允许以空 key 调用（适配无鉴权的本地服务，如 ollama 默认部署）。
 | streaming | bool | — | 是否使用流式输出，默认 `true` |
 | temperature | float | — | 模型温度参数（0.0-2.0），未设置时使用模型默认值 |
 | max_tokens | int | — | 最大输出 token 数，未设置时使用模型默认值 |
@@ -1524,6 +1541,27 @@ enabled: true
 ```
 
 > **CLI vs API 同模型共存**: 同一个模型（如 claude-opus）可以同时注册 CLI 配置和 API 配置。设置 `invocation: auto` 时，系统优先尝试 API 模式（更低延迟），API 不可用时回退到 CLI。用户也可以为不同场景显式选择：API 模式用于常规辩论（快），CLI 模式用于需要 Codex 沙箱执行等特殊能力的场景。
+
+**custom-ollama-llama3.yaml**（自定义 OpenAI 兼容端点示例 — 本地 ollama）
+
+```yaml
+# 通过 council setup Step 6 自动生成
+name: custom:ollama:llama3.2
+invocation: api
+provider: custom:ollama          # 命名约定：custom:<sanitized-name>，name 满足 [a-z0-9-]+
+model: llama3.2
+api_base_url: http://localhost:11434/v1   # 本地 host：无鉴权也允许
+# api_credential_path: 未设置（无 key 场景）；如有 key 则指向 ~/.council/credentials/custom-ollama.key
+streaming: true
+timeout_seconds: 120
+capabilities: [general, code, analysis]
+priority: 50
+max_concurrent: 1
+resource_weight: 1
+enabled: true
+```
+
+> **自定义 Provider 命名规则**: `provider: 'custom:<name>'`，其中 `<name>` 满足 `[a-z0-9-]+`（wizard 自动 sanitize）。该命名同时作为 circuit-breaker 的 key — 同一自定义 provider 的多个模型共享熔断状态。配置文件名约定 `custom-<name>-<model>.yaml`。
 
 **gemini-pro.yaml**（首次扫描自动生成）
 
@@ -2008,7 +2046,7 @@ $ council "Redis vs Memcached 怎么选?"
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Local AI Council - Debate Mode                     │
+│  Open Council - Debate Mode                         │
 │  Question: "Redis vs Memcached 选型..."              │
 ├─────────────────────────────────────────────────────┤
 │                                                     │

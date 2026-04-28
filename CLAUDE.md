@@ -1,4 +1,4 @@
-# Local AI Council — 项目开发指南
+# Open Council — 项目开发指南
 
 ## 强制遵守的文档
 
@@ -172,7 +172,7 @@
 
 ## 项目概述
 
-Local AI Council 是一个基于 TypeScript/Node.js 的多 Agent 辩论编排系统，支持 CLI 和 API 双模调用。
+Open Council 是一个基于 TypeScript/Node.js 的多 Agent 辩论编排系统，支持 CLI 和 API 双模调用。
 
 - **开发规范**: `CONTRIBUTING.md` (强制)
 - **PRD**: `docs/PRD.md` (v6.3)
