@@ -50,18 +50,31 @@ export class ConcurrencyManager {
 
   /** Register automatic cleanup on process exit */
   registerCleanup(): void {
-    const cleanup = (): void => this.release();
+    // Signal handlers run cleanup then exit, which re-fires the 'exit' event and
+    // would invoke cleanup a second time. Guard with an idempotency flag so the
+    // slot release happens exactly once.
+    let cleaned = false;
+    const cleanup = (): void => {
+      if (cleaned) return;
+      cleaned = true;
+      this.release();
+    };
     process.on('exit', cleanup);
     process.on('SIGINT', () => { cleanup(); process.exit(130); });
     process.on('SIGTERM', () => { cleanup(); process.exit(143); });
   }
 }
 
-function isProcessAlive(pid: number): boolean {
+export function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (err) {
+    // EPERM means the process exists but we lack permission to signal it —
+    // that is still "alive". Only ESRCH (no such process) means dead.
+    if (err instanceof Error && (err as NodeJS.ErrnoException).code === 'EPERM') {
+      return true;
+    }
     return false;
   }
 }

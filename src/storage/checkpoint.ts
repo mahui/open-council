@@ -1,7 +1,11 @@
-import { readFileSync, writeFileSync, unlinkSync, readdirSync, statSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync, statSync, existsSync, mkdirSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { Session } from '../types/session.js';
 import { safePath } from '../providers/utils.js';
+
+/** Checkpoints are retained for recovery; only stale ones past this age are purged. */
+const CHECKPOINT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 interface CheckpointData extends Session {
   pid: number;
@@ -20,11 +24,21 @@ export class CheckpointManager {
       pid: process.pid,
       last_updated_at: new Date().toISOString(),
     };
-    writeFileSync(path, JSON.stringify(data, null, 2), { mode: 0o600 });
+    // Atomic write: write to a temp file in the same dir, then rename over the
+    // target. A crash mid-write leaves the temp file (later cleaned) untouched,
+    // never a truncated primary checkpoint.
+    const tmpPath = `${path}.${randomBytes(6).toString('hex')}.tmp`;
+    try {
+      writeFileSync(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+      renameSync(tmpPath, path);
+    } catch (err) {
+      try { unlinkSync(tmpPath); } catch { /* temp may not exist */ }
+      throw err;
+    }
   }
 
   restore(sessionId?: string): Session | null {
-    this.cleanOrphans();
+    this.cleanStale();
 
     if (sessionId) {
       return this.loadCheckpoint(this.getPath(sessionId));
@@ -55,11 +69,16 @@ export class CheckpointManager {
     try { unlinkSync(path); } catch { /* file may not exist */ }
   }
 
-  /** Clean checkpoints older than 24h or whose PID has exited */
-  private cleanOrphans(): void {
+  /**
+   * Remove checkpoints that are safe to discard: already completed, or older
+   * than the retention window. A dead originating PID is NOT a cleanup signal —
+   * a crashed run's checkpoint is precisely the recovery target, so PID liveness
+   * is intentionally decoupled from cleanup to avoid the self-destruct bug where
+   * restore() erased the checkpoint it was about to load.
+   */
+  private cleanStale(): void {
     if (!existsSync(this.checkpointDir)) return;
 
-    const maxAge = 24 * 60 * 60 * 1000;
     const files = readdirSync(this.checkpointDir).filter(f => f.endsWith('.ckpt.json'));
 
     for (const file of files) {
@@ -67,13 +86,13 @@ export class CheckpointManager {
       try {
         const data = JSON.parse(readFileSync(path, 'utf-8')) as CheckpointData;
         const age = Date.now() - new Date(data.last_updated_at).getTime();
-        const pidAlive = isProcessAlive(data.pid);
+        const isCompleted = data.status === 'completed';
 
-        if (age > maxAge || !pidAlive) {
+        if (isCompleted || age > CHECKPOINT_RETENTION_MS) {
           unlinkSync(path);
         }
       } catch {
-        // Parse failure — also clean up
+        // Parse failure (e.g. truncated/corrupt) — safe to discard.
         try { unlinkSync(path); } catch { /* ignore */ }
       }
     }
@@ -93,14 +112,5 @@ export class CheckpointManager {
 
   private getPath(sessionId: string): string {
     return safePath(this.checkpointDir, `${sessionId}.ckpt.json`);
-  }
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
   }
 }
