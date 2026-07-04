@@ -2,7 +2,7 @@
 name: provider-dev
 description: Provider 适配层开发者。负责实现 CLI 适配器、API 适配器、凭证发现、Token 刷新、健康检查。当需要开发或调试与外部 AI 服务交互相关的代码时使用。
 model: opus
-tools: Read, Write, Edit, Glob, Grep, Bash, Agent
+tools: Read, Write, Edit, Glob, Grep, Bash, Agent, SendMessage
 memory: project
 ---
 

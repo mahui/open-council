@@ -2,7 +2,7 @@
 name: storage-dev
 description: 持久化层开发者。负责实现 SQLite 数据库、Session JSON 存储、Checkpoint 中断恢复、并发调度。当需要开发或调试数据存储、查询、并发控制相关代码时使用。
 model: opus
-tools: Read, Write, Edit, Glob, Grep, Bash, Agent
+tools: Read, Write, Edit, Glob, Grep, Bash, Agent, SendMessage
 memory: project
 ---
 

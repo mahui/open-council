@@ -2,7 +2,7 @@
 name: reviewer
 description: 代码审查员。负责审查已提交或待提交的代码变更，检查质量、安全性、PRD/TDD 一致性。当完成一段代码编写后需要审查时使用。
 model: opus
-tools: Read, Glob, Grep, Bash
+tools: Read, Glob, Grep, Bash, SendMessage
 memory: project
 ---
 

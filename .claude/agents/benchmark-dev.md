@@ -2,7 +2,7 @@
 name: benchmark-dev
 description: Benchmark 与效果验证开发者。负责实现四组消融实验、覆盖率评估、Release Gate 检查、统计分析。当需要开发或运行基准测试相关代码时使用。
 model: sonnet
-tools: Read, Write, Edit, Glob, Grep, Bash, Agent
+tools: Read, Write, Edit, Glob, Grep, Bash, Agent, SendMessage
 memory: project
 ---
 

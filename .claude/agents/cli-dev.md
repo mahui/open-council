@@ -2,7 +2,7 @@
 name: cli-dev
 description: CLI 与 UX 开发者。负责实现 CLI 命令注册、Setup Wizard、TUI 仪表盘、渲染层。当需要开发或调试用户交互界面、命令行参数、配置向导时使用。
 model: opus
-tools: Read, Write, Edit, Glob, Grep, Bash, Agent
+tools: Read, Write, Edit, Glob, Grep, Bash, Agent, SendMessage
 memory: project
 ---
 

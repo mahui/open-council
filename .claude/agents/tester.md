@@ -2,7 +2,7 @@
 name: tester
 description: 测试工程师。负责编写和运行单元测试、适配器测试、存储测试、集成测试。当需要为已实现的代码编写测试、运行测试套件、或分析测试失败原因时使用。
 model: sonnet
-tools: Read, Write, Edit, Glob, Grep, Bash, Agent
+tools: Read, Write, Edit, Glob, Grep, Bash, Agent, SendMessage
 memory: project
 ---
 

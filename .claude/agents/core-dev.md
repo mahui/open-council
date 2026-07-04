@@ -2,7 +2,7 @@
 name: core-dev
 description: 核心编排引擎开发者。负责实现辩论流程状态机、路由引擎、共识计算、匿名化、Prompt 构建、评分解析。当需要开发或调试辩论流程逻辑时使用。
 model: opus
-tools: Read, Write, Edit, Glob, Grep, Bash, Agent
+tools: Read, Write, Edit, Glob, Grep, Bash, Agent, SendMessage
 memory: project
 ---
 

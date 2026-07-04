@@ -1,16 +1,23 @@
 # Open Council — 技术设计文档 (TDD)
 
-**Technical Design Document v2.0**
+**Technical Design Document v2.1**
 
 | 项目 | 内容 |
 |------|------|
 | 文档状态 | Draft |
-| 版本 | 2.0 |
-| 日期 | 2026-03-26 |
+| 版本 | 2.1 |
+| 日期 | 2026-07-04 |
 | 对应 PRD | docs/PRD.md v7.0 |
 | 主语言 | TypeScript (Node.js ≥ 20) |
 | 包管理 | pnpm |
 | 分发方式 | npm 全局包 (`npm install -g open-council`) |
+
+**修订记录**
+
+| 版本 | 日期 | 变更 |
+|------|------|------|
+| 2.1 | 2026-07-04 | 依设计笔记 consensus-review-dataflow 同步实现：`ConsensusResult` 增 `agreement_score`（判停用）；`calculateConsensus` filter 纳入 partial；`kendallsW` 均值秩填补 + N=2 回退；`InvocationResult` 增 `truncated`；补 `role_generator_model` 配置项与 `InvocationTimeoutError` 错误类型 |
+| 2.0 | 2026-03-26 | 迁移至 pi-ai 统一 LLM 层 |
 
 ---
 
@@ -206,7 +213,13 @@ export interface InvocationResult {
     output_tokens: number;
   };
   timed_out: boolean;
+  truncated?: boolean;                 // 回答因达 max_tokens/长度上限被截断（有实质内容，与 timed_out 正交）；缺省 undefined ≡ false
 }
+
+// 截断回答照常参与 review/consensus/synthesis，orchestrator 仅发 onDegradation 提示，不剔除、不重试。
+// 该字段随 Invocation.result 整体落盘到 Session JSON，无需新增 Invocation 顶层字段（见 PRD §3.4.3）。
+// 注：review 的解析结果 ParsedReview（scores/strengths/weaknesses/devil_advocate_notes/reviewed_agent_id）
+// 为运行期从 response_raw 重解析的派生结构，非落库 Invocation 字段。
 
 /** pi-ai 的 ThinkingLevel 类型 */
 export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
@@ -862,21 +875,27 @@ export class Anonymizer {
 // src/core/consensus.ts
 
 export interface ConsensusResult {
-  consensus_score: number;             // 0.0 - 1.0
+  /** 评审者一致性（0-1），与供应商多样性无关。★cross-examine 判停依据★ = rawAgreement × rho。 */
+  agreement_score: number;             // canonical，判停用
+  consensus_score: number;             // 0.0-1.0，= agreement_score × δ；对外展示/查询/DB 用
   dimension_scores: Record<string, { score: number; divergence: number }>;
   model_diversity_factor: number;      // δ
-  raw_agreement: number;               // 未经 diversity 修正的共识度
+  /** @deprecated agreement_score 的别名，读旧数据用；数值恒等于 agreement_score。 */
+  raw_agreement: number;
 }
+
+// 判停用 agreement_score（不含 δ，阈值 0.6），对外展示/相似辩论复用用 consensus_score
+// （含 δ 折减，保留 PRD §228 的低多样性可信度叙事）。两条语义分离。
 
 export function calculateConsensus(
   reviews: ParsedReview[],
   agents: Agent[],
 ): ConsensusResult {
-  // 1. 过滤有效评审（排除 PARSE_ERROR）
-  const valid = reviews.filter(r => r.status === 'valid');
+  // 1. 过滤有效评审（仅排除 PARSE_ERROR；partial 有有效 overall 分，纳入 —— 见 PRD §347）
+  const valid = reviews.filter(r => r.status === 'valid' || r.status === 'partial');
   const N = valid.length;
   if (N < 2) {
-    return { consensus_score: 0, dimension_scores: {}, model_diversity_factor: 0, raw_agreement: 0 };
+    return { agreement_score: 0, consensus_score: 0, dimension_scores: {}, model_diversity_factor: 0, raw_agreement: 0 };
   }
 
   // 2. z-score 归一化（消除评审者尺度差异）
@@ -887,8 +906,10 @@ export function calculateConsensus(
   const sigmas = Object.values(answerScores).map(scores => standardDeviation(scores));
   const sigmaAvg = mean(sigmas);
 
-  // 4. Kendall's W 排名一致性
-  const W = kendallsW(normalized);
+  // 4. Kendall's W 排名一致性（按 reviewed_agent_id 分组）。自评剔除下为平衡不完全区组：
+  //    每个回答恰好缺其作者 1 位评审者，对缺失项按该 rater 的均值秩 (n+1)/2 对称填补
+  //    （保守地轻微压低 W）。N=2 时回退全集 review（保留自评），不触发剔除。
+  const W = kendallsW(normalized, byReviewer);
 
   // 5. 小样本修正
   const rho = (N - 1) / N;
@@ -902,7 +923,8 @@ export function calculateConsensus(
 
   // 7. 综合共识度
   const rawAgreement = 0.5 * (1 - sigmaAvg / 4.5) + 0.5 * W;
-  const score = Math.max(0, Math.min(1, rawAgreement * rho * delta));
+  const agreementScore = Math.max(0, Math.min(1, rawAgreement * rho));  // 判停依据，不含 δ
+  const score = Math.max(0, Math.min(1, rawAgreement * rho * delta));   // consensus_score，含 δ 折减
 
   // 8. 分维度分歧分析
   const dimensions = ['accuracy', 'completeness', 'practicality', 'insight'];
@@ -917,10 +939,11 @@ export function calculateConsensus(
   }
 
   return {
+    agreement_score: agreementScore,
     consensus_score: score,
     dimension_scores: dimensionScores,
     model_diversity_factor: delta,
-    raw_agreement: rawAgreement * rho,
+    raw_agreement: agreementScore,   // 别名，恒等于 agreement_score
   };
 }
 
@@ -1262,6 +1285,7 @@ export const CouncilConfigSchema = z.object({
   general: z.object({
     default_mode: z.enum(['quick', 'compare', 'debate', 'auto']).default('auto'),
     default_chairman: z.string(),
+    role_generator_model: z.string().default(''),  // 设计专家角色面板所用模型（按名）；空 → 自动挑选均衡档模型
     min_agents: z.number().int().min(1).default(2),
     max_agents: z.number().int().min(1).default(5),
     allow_same_model_agents: z.boolean().default(true),
@@ -1791,6 +1815,17 @@ export class ModelUnavailableError extends CouncilError {
 export class InvocationError extends CouncilError {
   constructor(modelName: string, mode: 'cli' | 'api', reason: string) {
     super(`${mode.toUpperCase()} invocation of ${modelName} failed: ${reason}`, 'INVOCATION_FAILED');
+  }
+}
+
+// 调用超时（区别于 InvocationError）：单次调用未在时限内完成，触发局部降级而非中断整场辩论。
+export class InvocationTimeoutError extends CouncilError {
+  constructor(
+    public readonly modelName: string,
+    public readonly mode: 'cli' | 'api',
+    public readonly timeoutSeconds: number,
+  ) {
+    super(`${mode.toUpperCase()} invocation of ${modelName} timed out after ${timeoutSeconds}s (timeout)`, 'INVOCATION_TIMEOUT');
   }
 }
 

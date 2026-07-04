@@ -2,7 +2,7 @@
 name: architect
 description: 系统架构师。负责整体架构决策、模块边界设计、PRD/TDD 一致性审查。当需要做架构层面的设计决策、评审模块间依赖关系、或验证实现是否符合 PRD 时使用。
 model: opus
-tools: Read, Glob, Grep, Bash, Agent
+tools: Read, Glob, Grep, Bash, Agent, SendMessage
 memory: project
 ---
 

@@ -2,7 +2,7 @@
 name: doc-keeper
 description: 文档维护者。负责在代码变更后同步更新 PRD、TDD、CONTRIBUTING、README 等文档，确保文档与代码实现始终一致。当完成功能开发、接口变更、架构调整、或发现文档与代码不一致时使用。
 model: opus
-tools: Read, Write, Edit, Glob, Grep, Bash, Agent
+tools: Read, Write, Edit, Glob, Grep, Bash, Agent, SendMessage
 memory: project
 ---
 
