@@ -2,7 +2,7 @@
 name: pm
 description: 项目管理者。负责拆解 Phase 工作项、分配任务给 dev agents、跟踪进度、协调依赖。当开始一个新 Phase 或需要了解当前进度时使用。
 model: sonnet
-tools: Read, Glob, Grep, Bash, Agent
+tools: Read, Glob, Grep, Bash, Agent, TaskCreate, TaskUpdate, TaskList, TaskGet, SendMessage
 memory: project
 ---
 
