@@ -22,6 +22,26 @@ export class InvocationError extends CouncilError {
   }
 }
 
+/**
+ * Raised when an invocation exceeds its configured timeout (a hung/never-settling call).
+ * Distinct from InvocationError so callers can recognise a timeout specifically; the message
+ * contains the word "timeout" for substring-based detection. Orchestrator catch branches treat
+ * any thrown error as a per-agent failure (timed_out=true), so this participates in graceful
+ * degradation rather than hanging the whole debate.
+ */
+export class InvocationTimeoutError extends CouncilError {
+  constructor(
+    public readonly modelName: string,
+    public readonly mode: 'cli' | 'api',
+    public readonly timeoutSeconds: number,
+  ) {
+    super(
+      `${mode.toUpperCase()} invocation of ${modelName} timed out after ${timeoutSeconds}s (timeout)`,
+      'INVOCATION_TIMEOUT',
+    );
+  }
+}
+
 export class CredentialNotFoundError extends CouncilError {
   constructor(provider: string) {
     super(`No credentials found for ${provider}`, 'CREDENTIAL_NOT_FOUND');

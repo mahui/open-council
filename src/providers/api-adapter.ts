@@ -9,7 +9,7 @@ import type { Api, Model, KnownProvider } from '@mariozechner/pi-ai';
 import { getOAuthProvider } from '@mariozechner/pi-ai/oauth';
 import type { ModelConfig } from '../types/config.js';
 import type { InvocationAdapter, InvocationResult, HealthStatus, OnChunk } from '../types/provider.js';
-import { InvocationError } from '../types/errors.js';
+import { InvocationError, InvocationTimeoutError } from '../types/errors.js';
 import type { CredentialManager } from './credentials/discovery.js';
 import { throttle, recordSuccess, recordFailure, getProviderStatus } from './health.js';
 
@@ -29,8 +29,76 @@ const RELATED_PROVIDERS: Record<string, string[]> = {
 
 const DEBUG = !!process.env['COUNCIL_DEBUG'];
 
+/**
+ * Fallback timeout when config.timeout_seconds is absent. Kept high because reasoning
+ * models can legitimately take minutes; a too-low default would kill valid slow responses.
+ */
+const DEFAULT_TIMEOUT_SECONDS = 120;
+
 function debug(msg: string): void {
   if (DEBUG) process.stderr.write(`[api-adapter] ${msg}\n`);
+}
+
+/**
+ * A timeout guard combining a real AbortController (so pi-ai cancels the underlying HTTP
+ * request and frees sockets) with a rejecting promise (so our own invoke settles even if
+ * the underlying call ignores the signal — belt-and-suspenders against a truly hung call).
+ *
+ * - `signal` is passed to pi-ai's stream/complete options.
+ * - `expired` rejects with InvocationTimeoutError once the (idle) countdown elapses; race it
+ *   against the actual work so the loser can never hang us.
+ * - `reset()` restarts the countdown — call it on each streamed chunk to get an *idle* timeout
+ *   (only a genuinely stalled stream trips it, a slow-but-progressing one does not).
+ * - `dispose()` clears the timer; always call it in a finally block so no timer leaks.
+ * - `timedOut` lets the caller reclassify a pi-ai-originated AbortError as a timeout.
+ */
+interface TimeoutGuard {
+  readonly signal: AbortSignal;
+  readonly expired: Promise<never>;
+  readonly timedOut: boolean;
+  reset(): void;
+  dispose(): void;
+}
+
+function createTimeoutGuard(seconds: number, modelName: string): TimeoutGuard {
+  const controller = new AbortController();
+  const ms = seconds * 1000;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  let rejectExpired: (err: Error) => void = () => {};
+
+  const expired = new Promise<never>((_, reject) => {
+    rejectExpired = reject;
+  });
+  // Prevent an "unhandled rejection" if the guard is disposed before the timer fires:
+  // the promise is always raced (thus handled), but attach a no-op catch as a safety net.
+  expired.catch(() => {});
+
+  const arm = (): void => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      rejectExpired(new InvocationTimeoutError(modelName, 'api', seconds));
+    }, ms);
+  };
+  arm();
+
+  return {
+    signal: controller.signal,
+    expired,
+    get timedOut(): boolean {
+      return timedOut;
+    },
+    reset(): void {
+      if (timedOut) return;
+      if (timer) clearTimeout(timer);
+      arm();
+    },
+    dispose(): void {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
 }
 
 export class ApiAdapter implements InvocationAdapter {
@@ -71,7 +139,8 @@ export class ApiAdapter implements InvocationAdapter {
         debug(`error (customEndpoint=true): ${err instanceof Error ? err.message : String(err)}`);
         const is429 = err instanceof Error && (err.message.includes('429') || err.message.includes('rate'));
         recordFailure(provider, is429);
-        if (err instanceof InvocationError) throw err;
+        // Preserve recognisable error types (timeout / invocation) so callers can distinguish them.
+        if (err instanceof InvocationTimeoutError || err instanceof InvocationError) throw err;
         throw new InvocationError(
           config.name, 'api',
           err instanceof Error ? err.message : String(err),
@@ -112,7 +181,8 @@ export class ApiAdapter implements InvocationAdapter {
       debug(`error: ${err instanceof Error ? err.message : String(err)}`);
       const is429 = err instanceof Error && (err.message.includes('429') || err.message.includes('rate'));
       recordFailure(provider, is429);
-      if (err instanceof InvocationError) throw err;
+      // Preserve recognisable error types (timeout / invocation) so callers can distinguish them.
+      if (err instanceof InvocationTimeoutError || err instanceof InvocationError) throw err;
       throw new InvocationError(
         config.name, 'api',
         err instanceof Error ? err.message : String(err),
@@ -287,96 +357,143 @@ export class ApiAdapter implements InvocationAdapter {
     model: Model<Api>, prompt: string, apiKey: string,
     config: ModelConfig, onChunk: OnChunk,
   ): Promise<Omit<InvocationResult, 'elapsed_ms'>> {
+    const timeoutSeconds = config.timeout_seconds ?? DEFAULT_TIMEOUT_SECONDS;
+    const guard = createTimeoutGuard(timeoutSeconds, config.name);
     const textParts: string[] = [];
-    const eventStream = streamSimple(model, {
-      messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
-    }, {
-      apiKey,
-      maxTokens: config.max_tokens ?? 8192,
-      temperature: config.temperature,
-      reasoning: config.reasoning_effort,
-    });
 
-    let eventCount = 0;
-    const eventTypes = new Set<string>();
-    for await (const event of eventStream) {
-      eventCount++;
-      eventTypes.add(event.type);
-      if (event.type === 'text_delta') {
-        onChunk(event.delta);
-        textParts.push(event.delta);
+    try {
+      const eventStream = streamSimple(model, {
+        messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
+      }, {
+        apiKey,
+        signal: guard.signal,
+        maxTokens: config.max_tokens ?? 8192,
+        temperature: config.temperature,
+        reasoning: config.reasoning_effort,
+      });
+
+      // Consume the whole stream, then fetch its final result. Wrapped so it can be raced
+      // against the idle-timeout guard: an idle (stalled) stream trips `guard.expired`.
+      const consume = async (): Promise<Awaited<ReturnType<typeof eventStream.result>>> => {
+        let eventCount = 0;
+        const eventTypes = new Set<string>();
+        for await (const event of eventStream) {
+          guard.reset(); // activity observed — restart the idle countdown
+          eventCount++;
+          eventTypes.add(event.type);
+          if (event.type === 'text_delta') {
+            onChunk(event.delta);
+            textParts.push(event.delta);
+          }
+        }
+        debug(`stream events: count=${eventCount}, types=[${[...eventTypes].join(',')}], textParts=${textParts.length}`);
+        return eventStream.result();
+      };
+
+      const message = await Promise.race([consume(), guard.expired]);
+      debug(`stream result: stopReason=${message.stopReason}, contentBlocks=${message.content.length}, types=[${message.content.map(c => c.type).join(',')}]`);
+      if (message.errorMessage) debug(`stream errorMessage: ${message.errorMessage}`);
+
+      // If pi-ai surfaced the abort itself (returned instead of threw), treat our timeout as timeout.
+      if (message.stopReason === 'aborted' && guard.timedOut) {
+        throw new InvocationTimeoutError(config.name, 'api', timeoutSeconds);
       }
+
+      // pi-ai returns stopReason='error' on API failures — must propagate
+      if (message.stopReason === 'error' || message.stopReason === 'aborted') {
+        throw new InvocationError(
+          config.name, 'api',
+          message.errorMessage ?? `API call failed (${message.stopReason})`,
+        );
+      }
+
+      // Fallback: if streaming collected nothing, extract from final message
+      let response = textParts.join('');
+      if (!response) {
+        response = extractText(message);
+        debug(`stream fallback extractText: len=${response.length}`);
+      }
+
+      return {
+        response,
+        invocation_mode: 'api',
+        http_status: 200,
+        token_usage: {
+          input_tokens: message.usage.input,
+          output_tokens: message.usage.output,
+        },
+        timed_out: false,
+      };
+    } catch (err) {
+      // pi-ai may throw its own AbortError when we abort; reclassify as a timeout.
+      if (guard.timedOut && !(err instanceof InvocationTimeoutError)) {
+        throw new InvocationTimeoutError(config.name, 'api', timeoutSeconds);
+      }
+      throw err;
+    } finally {
+      guard.dispose();
     }
-    debug(`stream events: count=${eventCount}, types=[${[...eventTypes].join(',')}], textParts=${textParts.length}`);
-
-    const message = await eventStream.result();
-    debug(`stream result: stopReason=${message.stopReason}, contentBlocks=${message.content.length}, types=[${message.content.map(c => c.type).join(',')}]`);
-    if (message.errorMessage) debug(`stream errorMessage: ${message.errorMessage}`);
-
-    // pi-ai returns stopReason='error' on API failures — must propagate
-    if (message.stopReason === 'error' || message.stopReason === 'aborted') {
-      throw new InvocationError(
-        config.name, 'api',
-        message.errorMessage ?? `API call failed (${message.stopReason})`,
-      );
-    }
-
-    // Fallback: if streaming collected nothing, extract from final message
-    let response = textParts.join('');
-    if (!response) {
-      response = extractText(message);
-      debug(`stream fallback extractText: len=${response.length}`);
-    }
-
-    return {
-      response,
-      invocation_mode: 'api',
-      http_status: 200,
-      token_usage: {
-        input_tokens: message.usage.input,
-        output_tokens: message.usage.output,
-      },
-      timed_out: false,
-    };
   }
 
   private async invokeComplete(
     model: Model<Api>, prompt: string, apiKey: string,
     config: ModelConfig,
   ): Promise<Omit<InvocationResult, 'elapsed_ms'>> {
-    debug(`complete: calling completeSimple...`);
-    const message = await completeSimple(model, {
-      messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
-    }, {
-      apiKey,
-      maxTokens: config.max_tokens ?? 8192,
-      temperature: config.temperature,
-      reasoning: config.reasoning_effort,
-    });
-    debug(`complete result: stopReason=${message.stopReason}, contentBlocks=${message.content.length}, types=[${message.content.map(c => c.type).join(',')}]`);
-    if (message.errorMessage) debug(`complete errorMessage: ${message.errorMessage}`);
+    const timeoutSeconds = config.timeout_seconds ?? DEFAULT_TIMEOUT_SECONDS;
+    const guard = createTimeoutGuard(timeoutSeconds, config.name);
 
-    // pi-ai returns stopReason='error' on API failures — must propagate
-    if (message.stopReason === 'error' || message.stopReason === 'aborted') {
-      throw new InvocationError(
-        config.name, 'api',
-        message.errorMessage ?? `API call failed (${message.stopReason})`,
-      );
+    try {
+      debug(`complete: calling completeSimple...`);
+      const message = await Promise.race([
+        completeSimple(model, {
+          messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
+        }, {
+          apiKey,
+          signal: guard.signal,
+          maxTokens: config.max_tokens ?? 8192,
+          temperature: config.temperature,
+          reasoning: config.reasoning_effort,
+        }),
+        guard.expired,
+      ]);
+      debug(`complete result: stopReason=${message.stopReason}, contentBlocks=${message.content.length}, types=[${message.content.map(c => c.type).join(',')}]`);
+      if (message.errorMessage) debug(`complete errorMessage: ${message.errorMessage}`);
+
+      // If pi-ai surfaced the abort itself (returned instead of threw), treat our timeout as timeout.
+      if (message.stopReason === 'aborted' && guard.timedOut) {
+        throw new InvocationTimeoutError(config.name, 'api', timeoutSeconds);
+      }
+
+      // pi-ai returns stopReason='error' on API failures — must propagate
+      if (message.stopReason === 'error' || message.stopReason === 'aborted') {
+        throw new InvocationError(
+          config.name, 'api',
+          message.errorMessage ?? `API call failed (${message.stopReason})`,
+        );
+      }
+
+      const response = extractText(message);
+      debug(`complete extractText: len=${response.length}`);
+
+      return {
+        response,
+        invocation_mode: 'api',
+        http_status: 200,
+        token_usage: {
+          input_tokens: message.usage.input,
+          output_tokens: message.usage.output,
+        },
+        timed_out: false,
+      };
+    } catch (err) {
+      // pi-ai may throw its own AbortError when we abort; reclassify as a timeout.
+      if (guard.timedOut && !(err instanceof InvocationTimeoutError)) {
+        throw new InvocationTimeoutError(config.name, 'api', timeoutSeconds);
+      }
+      throw err;
+    } finally {
+      guard.dispose();
     }
-
-    const response = extractText(message);
-    debug(`complete extractText: len=${response.length}`);
-
-    return {
-      response,
-      invocation_mode: 'api',
-      http_status: 200,
-      token_usage: {
-        input_tokens: message.usage.input,
-        output_tokens: message.usage.output,
-      },
-      timed_out: false,
-    };
   }
 }
 
