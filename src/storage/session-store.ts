@@ -1,5 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import type Database from 'better-sqlite3';
 import { initDatabase, closeDatabase } from './database.js';
 import { PATHS } from '../config/paths.js';
