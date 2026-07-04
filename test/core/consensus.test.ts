@@ -274,5 +274,14 @@ describe('getProviderFamily', () => {
     expect(getProviderFamily({ binary: 'claude' } as ModelConfig)).toBe('anthropic');
     expect(getProviderFamily({ binary: 'codex' } as ModelConfig)).toBe('openai');
     expect(getProviderFamily({ binary: 'gemini' } as ModelConfig)).toBe('google');
+    expect(getProviderFamily({ binary: 'ollama-server' } as ModelConfig)).toBe('ollama');
+  });
+
+  it('should fall back to the raw binary string when it matches no known family', () => {
+    expect(getProviderFamily({ binary: 'some-custom-cli' } as ModelConfig)).toBe('some-custom-cli');
+  });
+
+  it('should fall back to an empty string when neither provider nor binary is set', () => {
+    expect(getProviderFamily({} as ModelConfig)).toBe('');
   });
 });

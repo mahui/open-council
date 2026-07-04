@@ -71,6 +71,20 @@ describe('buildBroadcastPrompt', () => {
     expect(prompt).toContain('## 立场');
     expect(prompt).toContain('Respond entirely in 中文');
   });
+
+  it('injects historical context as background when provided', () => {
+    const prompt = buildBroadcastPrompt(
+      'What is Redis?',
+      'analyst',
+      '',
+      undefined,
+      'A prior debate concluded Redis is best for caching.',
+    );
+    expect(prompt).toContain('Background: related past discussions');
+    expect(prompt).toContain('A prior debate concluded Redis is best for caching.');
+    expect(prompt).toContain('End of background');
+    expect(prompt).toContain('fresh analysis for the current question');
+  });
 });
 
 describe('buildSynthesisPrompt', () => {
@@ -109,6 +123,26 @@ describe('buildSynthesisPrompt', () => {
     expect(prompt).toContain('6.2/10');
     expect(prompt).toContain('Ignores cost');
     expect(prompt).toContain('3 reviewer');
+  });
+
+  it('includes devil-advocate risk notes when present in a review summary', () => {
+    const responses = [
+      {
+        role: 'analyst',
+        modelName: 'claude',
+        response: 'Analysis A',
+        reviewSummary: summary({
+          avg_overall: 5.5,
+          weaknesses: [],
+          devil_advocate_notes: ['Assumes infinite runway', 'No rollback plan'],
+          reviewer_count: 1,
+        }),
+      },
+    ];
+    const prompt = buildSynthesisPrompt('Q', responses);
+    expect(prompt).toContain('Risks flagged');
+    expect(prompt).toContain('Assumes infinite runway');
+    expect(prompt).toContain('No rollback plan');
   });
 
   it('follows Chinese language for the synthesis instruction', () => {

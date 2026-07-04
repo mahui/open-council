@@ -128,4 +128,16 @@ describe('parseReviewResponse', () => {
     expect(result.reviews[0]!.status).toBe('partial');
     expect(result.reviews[0]!.scores.overall).toBe(7);
   });
+
+  it('should fall through to regex/failed parsing when the "reviews" block matches but is invalid JSON', () => {
+    // Contains "reviews" and is bracket-balanced enough to match the JSON-block
+    // regex, but the unquoted token makes it invalid JSON — JSON.parse throws
+    // and tryJsonParse must catch it and return null rather than propagating.
+    const raw = '{"reviews": [{"label": "A" invalid_token}]}';
+
+    const result = parseReviewResponse(raw, ['A']);
+    // No "overall:" text present either, so the regex fallback also finds nothing.
+    expect(result.parseMethod).toBe('failed');
+    expect(result.reviews[0]!.status).toBe('parse_error');
+  });
 });
