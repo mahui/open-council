@@ -199,7 +199,7 @@ function kendallsW(
 
     // Accumulate rank sums per item
     for (let idx = 0; idx < labels.length; idx++) {
-      rankSums[idx] += ranks.get(labels[idx]!) ?? 0;
+      rankSums[idx] = (rankSums[idx] ?? 0) + (ranks.get(labels[idx]!) ?? 0);
     }
   }
 

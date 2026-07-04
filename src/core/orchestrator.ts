@@ -85,12 +85,13 @@ export class Orchestrator {
 
   /** Multi-round debate: broadcast → review → consensus → [cross-examine loop] → synthesis */
   private async runDebateLoop(session: Session): Promise<void> {
-    // Round 0: Initial broadcast
-    await this.runPhases(['route', 'broadcast', 'review', 'consensus'], session);
-    if (session.status === 'failed') return;
+    // Round 0: Initial broadcast. runPhases returns true when a fatal failure
+    // aborted the sequence (session.status left as 'failed').
+    if (await this.runPhases(['route', 'broadcast', 'review', 'consensus'], session)) return;
 
     // Iterative rounds: cross-examine if consensus is low
     let round = 0;
+    let fatal = false;
     while (round < MAX_DEBATE_ROUNDS - 1) {
       const consensus = session.consensus;
       if (!consensus || consensus.consensus_score >= CONSENSUS_THRESHOLD) break;
@@ -102,9 +103,10 @@ export class Orchestrator {
         impact: `Round ${round + 1}: initiating cross-examination`,
       });
 
-      // Cross-examine: agents see each other's responses and divergence points, then revise
+      // Cross-examine: agents see each other's responses and divergence points, then revise.
+      // Guard via isFailed so a future fatal cross-examine failure aborts the loop.
       await this.executeCrossExamine(session, round);
-      if (session.status === 'failed') break;
+      if (this.isFailed(session)) { fatal = true; break; }
 
       // Re-review the new responses
       session.status = 'reviewing';
@@ -112,8 +114,7 @@ export class Orchestrator {
       try {
         await this.executeReview(session);
       } catch (err) {
-        this.handlePhaseError('review', session, err);
-        if (session.status === 'failed') break;
+        if (this.handlePhaseError('review', session, err)) { fatal = true; break; }
       }
 
       // Re-calculate consensus
@@ -121,28 +122,27 @@ export class Orchestrator {
       try {
         this.executeConsensus(session);
       } catch (err) {
-        this.handlePhaseError('consensus', session, err);
+        if (this.handlePhaseError('consensus', session, err)) { fatal = true; break; }
       }
     }
+
+    if (fatal || this.isFailed(session)) return;
 
     // Pre-Synthesis Compression (if needed)
-    if (session.status !== 'failed') {
-      this.executePreSynthesisCompression(session);
-    }
+    this.executePreSynthesisCompression(session);
 
     // Final: synthesis
-    if (session.status !== 'failed') {
-      session.status = 'synthesizing';
-      this.renderer.onPhaseStart('synthesis', 0, 1);
-      try {
-        await this.executeSynthesis(session);
-      } catch (err) {
-        this.handlePhaseError('synthesis', session, err);
-      }
+    session.status = 'synthesizing';
+    this.renderer.onPhaseStart('synthesis', 0, 1);
+    try {
+      await this.executeSynthesis(session);
+    } catch (err) {
+      this.handlePhaseError('synthesis', session, err);
     }
   }
 
-  private async runPhases(phases: DebatePhase[], session: Session): Promise<void> {
+  /** Runs a phase sequence. Returns true if a fatal failure aborted the run. */
+  private async runPhases(phases: DebatePhase[], session: Session): Promise<boolean> {
     for (let i = 0; i < phases.length; i++) {
       const phase = phases[i]!;
       session.status = this.phaseToStatus(phase);
@@ -150,10 +150,10 @@ export class Orchestrator {
       try {
         await this.executePhase(phase, session);
       } catch (err) {
-        this.handlePhaseError(phase, session, err);
-        if (session.status === 'failed') break;
+        if (this.handlePhaseError(phase, session, err)) return true;
       }
     }
+    return false;
   }
 
   private createSession(question: string, options: RunOptions): Session {
@@ -697,13 +697,25 @@ export class Orchestrator {
     session.stages.push(stage);
   }
 
-  private handlePhaseError(phase: DebatePhase, session: Session, err: unknown): void {
+  /** True when the session has been fatally marked as failed. */
+  private isFailed(session: Session): boolean {
+    return session.status === 'failed';
+  }
+
+  /**
+   * Handle a phase execution error. Returns true when the failure is fatal
+   * (session marked 'failed' and the debate must abort), false when the phase
+   * degraded or was skipped and the run can continue.
+   */
+  private handlePhaseError(phase: DebatePhase, session: Session, err: unknown): boolean {
     const reason = err instanceof Error ? err.message : String(err);
     const event: DegradationEvent = {
       phase,
       reason,
       impact: '',
     };
+
+    let fatal = false;
 
     switch (phase) {
       case 'broadcast': {
@@ -717,6 +729,7 @@ export class Orchestrator {
         } else {
           session.status = 'failed';
           event.impact = 'All agents failed';
+          fatal = true;
         }
         break;
       }
@@ -738,6 +751,7 @@ export class Orchestrator {
     session.degradation_events = session.degradation_events ?? [];
     session.degradation_events.push(event);
     this.renderer.onDegradation(event);
+    return fatal;
   }
 
   private groupByModel(agents: Agent[]): Agent[][] {
