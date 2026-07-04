@@ -3,12 +3,43 @@ import type { ModelConfig } from '../types/config.js';
 import type { InvocationAdapter, InvocationResult, HealthStatus, OnChunk } from '../types/provider.js';
 import { InvocationError } from '../types/errors.js';
 
+const DEBUG = !!process.env['COUNCIL_DEBUG'];
+
+/**
+ * Grace period between SIGTERM and SIGKILL. On timeout we first ask the child to exit
+ * cleanly (SIGTERM); if it ignores the signal (some CLIs trap it) we escalate to an
+ * unconditional SIGKILL so a hung binary can never keep the debate waiting forever.
+ */
+const SIGKILL_GRACE_MS = 5_000;
+
+function debug(msg: string): void {
+  if (DEBUG) process.stderr.write(`[cli-adapter] ${msg}\n`);
+}
+
+/**
+ * Result of parsing/cleaning raw CLI stdout. `failed` is set when the tool reported a
+ * structured error (e.g. codex JSONL `error` events) even though it may have exited 0 —
+ * such output must not be forwarded to the orchestrator as a valid utterance.
+ */
+interface ParsedOutput {
+  text: string;
+  failed: boolean;
+}
+
 export class CliAdapter implements InvocationAdapter {
+  /**
+   * @param sigkillGraceMs Delay between SIGTERM and the escalated SIGKILL on timeout.
+   *   Defaults to {@link SIGKILL_GRACE_MS}; overridable so tests can exercise the escalation
+   *   path without a multi-second wait.
+   */
+  constructor(private readonly sigkillGraceMs: number = SIGKILL_GRACE_MS) {}
+
   async invoke(config: ModelConfig, prompt: string, _onChunk?: OnChunk): Promise<InvocationResult> {
     if (!config.binary) {
       throw new InvocationError(config.name, 'cli', 'No binary configured');
     }
 
+    const binary = config.binary;
     const args = [...(config.args ?? []), ...(config.model_args ?? [])];
 
     // For arg input mode, append prompt as last argument
@@ -18,26 +49,74 @@ export class CliAdapter implements InvocationAdapter {
 
     const start = Date.now();
 
-    return new Promise((resolve, reject) => {
-      const child = spawn(config.binary!, args, {
+    return new Promise<InvocationResult>((resolve, reject) => {
+      const child = spawn(binary, args, {
         env: { ...process.env, ...config.env },
-        timeout: config.timeout_seconds * 1000,
+        // NOTE: intentionally NO `timeout` option here. spawn's built-in timeout kills the
+        // process and still emits `close` with our timedOut flag unset, silently mislabelling
+        // a timeout as a clean completion. We own the single timeout mechanism below.
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
       let stdout = '';
       let stderr = '';
       let timedOut = false;
+      let settled = false;
+
+      // Single timeout mechanism: SIGTERM on deadline, escalate to SIGKILL after a grace
+      // period, and clear both timers whenever the process settles.
+      let killTimer: NodeJS.Timeout | undefined;
+      const timeoutTimer: NodeJS.Timeout = setTimeout(() => {
+        timedOut = true;
+        debug(`${binary} exceeded ${config.timeout_seconds}s — sending SIGTERM`);
+        child.kill('SIGTERM');
+        killTimer = setTimeout(() => {
+          debug(`${binary} ignored SIGTERM — escalating to SIGKILL`);
+          child.kill('SIGKILL');
+        }, this.sigkillGraceMs);
+        if (typeof killTimer.unref === 'function') killTimer.unref();
+      }, config.timeout_seconds * 1000);
+      if (typeof timeoutTimer.unref === 'function') timeoutTimer.unref();
+
+      const clearTimers = (): void => {
+        clearTimeout(timeoutTimer);
+        if (killTimer) clearTimeout(killTimer);
+      };
+
+      const finishResolve = (result: InvocationResult): void => {
+        if (settled) return;
+        settled = true;
+        clearTimers();
+        resolve(result);
+      };
+
+      const finishReject = (err: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimers();
+        reject(err);
+      };
 
       child.stdout.on('data', (chunk: Buffer) => {
         const text = chunk.toString();
         stdout += text;
-        if (_onChunk && config.binary !== 'codex') {
+        if (_onChunk && binary !== 'codex') {
           // Stream stdout chunks directly for non-JSON CLI tools (e.g. claude -p)
           _onChunk(text);
         }
       });
       child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+
+      // Guard stdin against EPIPE: if the child exits (or never reads stdin) before we finish
+      // writing, the write raises an async 'error' that would otherwise crash the whole process.
+      // Swallow EPIPE specifically; log anything else (ASYNC-04: never a silent empty catch).
+      child.stdin.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EPIPE') {
+          debug(`${binary} stdin EPIPE (child closed input early) — ignored`);
+        } else {
+          debug(`${binary} stdin error: ${err.message}`);
+        }
+      });
 
       // input_mode handling
       if (config.input_mode === 'stdin') {
@@ -47,25 +126,53 @@ export class CliAdapter implements InvocationAdapter {
 
       child.on('close', (code) => {
         const elapsed = Date.now() - start;
-        resolve({
-          response: this.cleanOutput(stdout, config.binary),
+
+        // Timeout takes precedence: report as a timed-out invocation regardless of exit code.
+        if (timedOut) {
+          finishResolve({
+            response: '',
+            elapsed_ms: elapsed,
+            invocation_mode: 'cli',
+            exit_code: code ?? undefined,
+            stderr: stderr || undefined,
+            timed_out: true,
+          });
+          return;
+        }
+
+        // Non-zero exit → failure. Reject so the orchestrator's catch discards this agent
+        // (its `!timed_out && response_raw` filter would otherwise treat garbage as valid).
+        if (code !== 0) {
+          const firstLine = stderr.split('\n').find((l) => l.trim().length > 0)?.trim();
+          finishReject(new InvocationError(
+            config.name,
+            'cli',
+            `exited with code ${code ?? 'null'}${firstLine ? `: ${firstLine}` : ''}`,
+          ));
+          return;
+        }
+
+        const parsed = this.cleanOutput(stdout, binary);
+
+        // Tool reported a structured error (e.g. codex error event) despite exit 0.
+        if (parsed.failed) {
+          finishReject(new InvocationError(config.name, 'cli', parsed.text));
+          return;
+        }
+
+        finishResolve({
+          response: parsed.text,
           elapsed_ms: elapsed,
           invocation_mode: 'cli',
-          exit_code: code ?? 1,
+          exit_code: code ?? 0,
           stderr: stderr || undefined,
-          timed_out: timedOut,
+          timed_out: false,
         });
       });
 
       child.on('error', (err) => {
-        reject(new InvocationError(config.name, 'cli', err.message));
+        finishReject(new InvocationError(config.name, 'cli', err.message));
       });
-
-      // Handle timeout
-      setTimeout(() => {
-        timedOut = true;
-        child.kill('SIGTERM');
-      }, config.timeout_seconds * 1000);
     });
   }
 
@@ -86,8 +193,8 @@ export class CliAdapter implements InvocationAdapter {
     }
   }
 
-  private cleanOutput(raw: string, binary?: string): string {
-    let cleaned = raw
+  private cleanOutput(raw: string, binary?: string): ParsedOutput {
+    const cleaned = raw
       .replace(/\x1b\[[0-9;]*m/g, '')  // ANSI escape codes
       .replace(/\r/g, '')               // carriage returns
       .trim();
@@ -117,17 +224,17 @@ export class CliAdapter implements InvocationAdapter {
           }
         } catch { /* skip non-JSON lines */ }
       }
-      if (texts.length > 0) return texts.join('\n');
-      if (errorMsg) return `[Error] ${errorMsg}`;
+      if (texts.length > 0) return { text: texts.join('\n'), failed: false };
+      if (errorMsg) return { text: errorMsg, failed: true };
     }
 
-    return cleaned;
+    return { text: cleaned, failed: false };
   }
 
   private checkBinaryExists(binary: string): Promise<boolean> {
     return new Promise((resolve) => {
       const child = spawn('which', [binary], { stdio: 'pipe' });
-      child.on('close', (code) => resolve(code === 0));
+      child.on('close', (code: number | null) => resolve(code === 0));
       child.on('error', () => resolve(false));
     });
   }
