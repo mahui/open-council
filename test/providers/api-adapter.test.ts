@@ -56,7 +56,7 @@ import { InvocationError, InvocationTimeoutError } from '../../src/types/errors.
 import type { ModelConfig } from '../../src/types/config.js';
 import type { CredentialManager } from '../../src/providers/credentials/discovery.js';
 import { existsSync, readFileSync } from 'node:fs';
-import { completeSimple, streamSimple } from '@mariozechner/pi-ai';
+import { completeSimple, streamSimple, getModel, getModels } from '@mariozechner/pi-ai';
 import { recordFailure, recordSuccess } from '../../src/providers/health.js';
 
 // --------------------------------------------------------------------------
@@ -801,5 +801,163 @@ describe('ApiAdapter.invoke — reasoning-tiered max_tokens default', () => {
   it('explicit max_tokens always overrides the tiered default', async () => {
     await adapter.invoke(tierConfig({ reasoning_effort: 'high', max_tokens: 2048 }), 'prompt');
     expect(lastMaxTokens()).toBe(2048);
+  });
+});
+
+// --------------------------------------------------------------------------
+// Fuzzy model resolution — prefix-aware, boundary-respecting. A query must not
+// grab a *variant* when a more precise base id exists (e.g. gpt-5 ≠ gpt-5-mini),
+// and a boundary-less substring (gpt-4 vs gpt-4o) must not match at all.
+// Exercised through the pi-ai registry path (no api_base_url), so resolveModel runs.
+// --------------------------------------------------------------------------
+
+describe('ApiAdapter.invoke — fuzzy model resolution (boundary-aware)', () => {
+  let credManager: CredentialManager;
+  let adapter: ApiAdapter;
+
+  function registryConfig(overrides: Partial<ModelConfig> = {}): ModelConfig {
+    return makeConfig({
+      name: 'openai:gpt-5',
+      provider: 'openai',
+      model: 'gpt-5',
+      api_base_url: undefined,
+      api_key_env: undefined,
+      ...overrides,
+    });
+  }
+
+  /** Model returned by which completeSimple was invoked — reveals what resolveModel picked. */
+  function resolvedModelId(): string {
+    const callArgs = vi.mocked(completeSimple).mock.calls[0];
+    const model = callArgs![0] as { id: string };
+    return model.id;
+  }
+
+  function fakeModels(ids: string[]): Array<{ id: string; name: string; provider: string }> {
+    return ids.map((id) => ({ id, name: id, provider: 'openai' }));
+  }
+
+  beforeEach(() => {
+    vi.mocked(completeSimple).mockReset();
+    vi.mocked(getModel).mockReset();
+    vi.mocked(getModels).mockReset();
+    vi.mocked(completeSimple).mockResolvedValue({
+      stopReason: 'stop',
+      content: [{ type: 'text', text: 'ok' }],
+      usage: { input: 1, output: 1 },
+      errorMessage: undefined,
+    } as never);
+    // No exact registry hit — force the fuzzy path.
+    vi.mocked(getModel).mockImplementation(() => { throw new Error('not found'); });
+    credManager = makeFakeCredentialManager({
+      getPiaiProvider: vi.fn().mockReturnValue('openai'),
+      getApiKey: vi.fn().mockResolvedValue('sk-test'),
+      getDirectSource: vi.fn().mockReturnValue('env'),
+      getOAuthCredentials: vi.fn().mockReturnValue(undefined),
+    });
+    adapter = new ApiAdapter(credManager);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('gpt-5 prefers the base gpt-5 over gpt-5-mini variant (shortest boundary match)', async () => {
+    vi.mocked(getModels).mockReturnValue(fakeModels(['gpt-5-mini', 'gpt-5', 'gpt-5-nano']) as never);
+
+    await adapter.invoke(registryConfig(), 'prompt');
+
+    expect(resolvedModelId()).toBe('gpt-5');
+  });
+
+  it('gpt-5 still matches gpt-5-mini when it is the only boundary candidate', async () => {
+    vi.mocked(getModels).mockReturnValue(fakeModels(['gpt-5-mini']) as never);
+
+    await adapter.invoke(registryConfig(), 'prompt');
+
+    expect(resolvedModelId()).toBe('gpt-5-mini');
+  });
+
+  it('gpt-4 does NOT match gpt-4o (no separator boundary) → throws not found', async () => {
+    vi.mocked(getModels).mockReturnValue(fakeModels(['gpt-4o', 'gpt-4o-mini']) as never);
+
+    await expect(
+      adapter.invoke(registryConfig({ name: 'openai:gpt-4', model: 'gpt-4' }), 'prompt'),
+    ).rejects.toThrow(InvocationError);
+  });
+
+  it('reverse prefix: query gpt-5-mini matches a shorter registered base gpt-5', async () => {
+    vi.mocked(getModels).mockReturnValue(fakeModels(['gpt-5']) as never);
+
+    await adapter.invoke(registryConfig({ name: 'openai:gpt-5-mini', model: 'gpt-5-mini' }), 'prompt');
+
+    expect(resolvedModelId()).toBe('gpt-5');
+  });
+});
+
+// --------------------------------------------------------------------------
+// Usage null-safety — a provider that omits `usage` on a successful response must
+// not turn the call into a failure. token_usage falls back to 0 instead of throwing.
+// --------------------------------------------------------------------------
+
+describe('ApiAdapter.invoke — missing usage is tolerated', () => {
+  let credManager: CredentialManager;
+  let adapter: ApiAdapter;
+
+  function usageConfig(overrides: Partial<ModelConfig> = {}): ModelConfig {
+    return makeConfig({
+      api_base_url: 'https://api.example.com/v1',
+      api_key_env: 'CUSTOM_API_KEY',
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    vi.mocked(completeSimple).mockReset();
+    vi.mocked(streamSimple).mockReset();
+    credManager = makeFakeCredentialManager();
+    adapter = new ApiAdapter(credManager);
+    process.env['CUSTOM_API_KEY'] = 'sk-test';
+  });
+
+  afterEach(() => {
+    delete process.env['CUSTOM_API_KEY'];
+    vi.restoreAllMocks();
+  });
+
+  it('complete: usage undefined → success with token_usage 0/0, not a failure', async () => {
+    vi.mocked(completeSimple).mockResolvedValue({
+      stopReason: 'stop',
+      content: [{ type: 'text', text: 'answer' }],
+      usage: undefined,
+      errorMessage: undefined,
+    } as never);
+
+    const result = await adapter.invoke(usageConfig(), 'prompt');
+
+    expect(result.response).toBe('answer');
+    expect(result.token_usage).toEqual({ input_tokens: 0, output_tokens: 0 });
+    expect(vi.mocked(recordSuccess)).toHaveBeenCalled();
+  });
+
+  it('streaming: usage undefined → success with token_usage 0/0', async () => {
+    const stream = {
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'text_delta', delta: 'streamed' };
+      },
+      result: (): Promise<unknown> => Promise.resolve({
+        stopReason: 'stop',
+        content: [{ type: 'text', text: 'streamed' }],
+        usage: undefined,
+        errorMessage: undefined,
+      }),
+    };
+    vi.mocked(streamSimple).mockReturnValue(stream as never);
+
+    const chunks: string[] = [];
+    const result = await adapter.invoke(usageConfig({ streaming: true }), 'prompt', (c) => chunks.push(c));
+
+    expect(result.response).toBe('streamed');
+    expect(result.token_usage).toEqual({ input_tokens: 0, output_tokens: 0 });
   });
 });

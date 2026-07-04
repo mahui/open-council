@@ -429,17 +429,31 @@ export class ApiAdapter implements InvocationAdapter {
       } catch { /* not found in this provider */ }
     }
 
-    // 2. Fuzzy match (model ID contains or is contained)
+    // 2. Fuzzy match — prefix-aware and boundary-respecting. A plain substring test lets a
+    //    query like `gpt-5` grab `gpt-5-mini`; here a candidate only matches when one id is a
+    //    boundary-terminated prefix of the other (next char is '-'/'.'/a version-digit boundary).
+    //    Among all matches we keep the *shortest* id — the most precise base model — with the
+    //    provider preference order (already sorted by credential strength) breaking ties.
+    let best: { provider: string; model: Model<Api> } | undefined;
     for (const p of sorted) {
       try {
         const models = getModels(p as KnownProvider);
-        const match = models.find(m =>
-          m.id === modelId ||
-          m.id.includes(modelId) ||
-          modelId.includes(m.id),
-        );
-        if (match) return this.applyOAuthModifications(p, match as Model<Api>);
+        for (const m of models) {
+          const matches =
+            m.id === modelId ||
+            isPrefixAtBoundary(m.id, modelId) ||
+            isPrefixAtBoundary(modelId, m.id);
+          if (!matches) continue;
+          // Strict `<` so, on equal length, the earlier (more credentialed) provider wins.
+          if (!best || m.id.length < best.model.id.length) {
+            best = { provider: p, model: m as Model<Api> };
+          }
+        }
       } catch { /* provider not found */ }
+    }
+    if (best) {
+      debug(`fuzzy matched ${modelId} → ${best.model.id} (provider=${best.provider})`);
+      return this.applyOAuthModifications(best.provider, best.model);
     }
 
     throw new InvocationError(modelId, 'api', `Model '${modelId}' not found in providers [${sorted.join(', ')}]`);
@@ -522,9 +536,11 @@ export class ApiAdapter implements InvocationAdapter {
         response,
         invocation_mode: 'api',
         http_status: 200,
+        // Guard usage: some providers omit it entirely on a successful response. Missing usage
+        // must not turn a good call into a failure, so fall back to 0 rather than reading undefined.
         token_usage: {
-          input_tokens: message.usage.input,
-          output_tokens: message.usage.output,
+          input_tokens: message.usage?.input ?? 0,
+          output_tokens: message.usage?.output ?? 0,
         },
         timed_out: false,
         // pi-ai StopReason `length` means the model hit the max_tokens ceiling: content is
@@ -586,9 +602,11 @@ export class ApiAdapter implements InvocationAdapter {
         response,
         invocation_mode: 'api',
         http_status: 200,
+        // Guard usage: some providers omit it entirely on a successful response. Missing usage
+        // must not turn a good call into a failure, so fall back to 0 rather than reading undefined.
         token_usage: {
-          input_tokens: message.usage.input,
-          output_tokens: message.usage.output,
+          input_tokens: message.usage?.input ?? 0,
+          output_tokens: message.usage?.output ?? 0,
         },
         timed_out: false,
         // pi-ai StopReason `length` means the model hit the max_tokens ceiling: content is
@@ -605,6 +623,26 @@ export class ApiAdapter implements InvocationAdapter {
       guard.dispose();
     }
   }
+}
+
+/**
+ * True when `prefix` is a boundary-terminated prefix of `longer`, i.e. `longer` continues
+ * `prefix` with a variant/version separator rather than mid-token. This keeps fuzzy matching
+ * from treating `gpt-5` and `gpt-5-mini` (or `gpt-4` and `gpt-4o`) as the same model.
+ *
+ * A boundary is: the next char is '-' or '.', OR a letter→digit transition (e.g. `gpt` → `gpt4`),
+ * which marks an implicit version bump. `longer` must be strictly longer than `prefix`.
+ */
+function isPrefixAtBoundary(longer: string, prefix: string): boolean {
+  if (prefix.length === 0 || longer.length <= prefix.length) return false;
+  if (!longer.startsWith(prefix)) return false;
+  const next = longer.charAt(prefix.length);
+  if (next === '-' || next === '.') return true;
+  const prevChar = prefix.charAt(prefix.length - 1);
+  const prevIsDigit = prevChar >= '0' && prevChar <= '9';
+  const nextIsDigit = next >= '0' && next <= '9';
+  // A letter→digit transition is a version boundary; a digit→digit run is the same number.
+  return nextIsDigit && !prevIsDigit;
 }
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '0.0.0.0']);

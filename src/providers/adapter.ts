@@ -5,10 +5,57 @@ import type { ApiAdapter } from './api-adapter.js';
 import type { CliAdapter } from './cli-adapter.js';
 import { hasBinary } from './utils.js';
 
-/** Maps provider to CLI binary + args for fallback */
-const CLI_FALLBACKS: Record<string, { binary: string; args: (model: string) => string[] }> = {
+const DEBUG = !!process.env['COUNCIL_DEBUG'];
+
+function debug(msg: string): void {
+  if (DEBUG) process.stderr.write(`[auto-adapter] ${msg}\n`);
+}
+
+/**
+ * Result of mapping generation params to a binary's CLI flags: `args` are the flags we are
+ * confident the binary accepts; `skipped` names params we deliberately dropped because no
+ * safe flag mapping exists. Dropping is intentional — a wrong flag makes the CLI error out
+ * and defeats the whole point of the fallback.
+ */
+interface MappedParams {
+  args: string[];
+  skipped: string[];
+}
+
+interface CliFallback {
+  binary: string;
+  args: (model: string) => string[];
+  /**
+   * Map reasoning_effort / temperature / max_tokens onto the binary's supported flags.
+   * Conservative by design: only emit a flag when the binary is known to accept it; otherwise
+   * record the param in `skipped` so it can be logged rather than guessed at.
+   */
+  mapParams?: (config: ModelConfig) => MappedParams;
+}
+
+/** Maps provider to CLI binary + args (and optional generation-param mapping) for fallback */
+const CLI_FALLBACKS: Record<string, CliFallback> = {
+  // claude (Claude Code CLI) exposes no flags for temperature / max_tokens / reasoning effort,
+  // so we map none and let mapCliParams log that they were skipped.
   anthropic: { binary: 'claude', args: (m) => ['-p', '--model', m] },
-  openai:    { binary: 'codex',  args: (m) => ['exec', '-m', m, '-c', 'approval_policy="never"', '--json'] },
+  openai:    {
+    binary: 'codex',
+    args: (m) => ['exec', '-m', m, '-c', 'approval_policy="never"', '--json'],
+    // codex accepts dotted config overrides via `-c key=value` (same mechanism already used for
+    // approval_policy). `model_reasoning_effort` is a documented codex config key, so mapping it
+    // is safe. There is no confidently-known codex CLI key for per-request temperature or max
+    // output tokens, so those are skipped rather than risk an unknown-key error.
+    mapParams: (config): MappedParams => {
+      const args: string[] = [];
+      const skipped: string[] = [];
+      if (config.reasoning_effort !== undefined) {
+        args.push('-c', `model_reasoning_effort="${config.reasoning_effort}"`);
+      }
+      if (config.temperature !== undefined) skipped.push('temperature');
+      if (config.max_tokens !== undefined) skipped.push('max_tokens');
+      return { args, skipped };
+    },
+  },
   google:    { binary: 'gemini', args: (_m) => ['-p'] },
 };
 
@@ -80,12 +127,16 @@ export class AutoAdapter implements InvocationAdapter {
     const fallback = config.provider ? CLI_FALLBACKS[config.provider] : undefined;
     if (!fallback || !hasBinary(fallback.binary)) return null;
 
+    // Map reasoning_effort / temperature / max_tokens to whatever flags this binary supports.
+    // Extra flags go before the prompt (input_mode 'arg' appends the prompt as the final arg).
+    const paramArgs = this.mapCliParams(fallback, config);
+
     // Build a CLI config from the API config
     const cliConfig: ModelConfig = {
       ...config,
       invocation: 'cli',
       binary: fallback.binary,
-      args: fallback.args(config.model ?? config.name),
+      args: [...fallback.args(config.model ?? config.name), ...paramArgs],
       input_mode: 'arg',
     };
 
@@ -94,5 +145,39 @@ export class AutoAdapter implements InvocationAdapter {
     } catch {
       return null; // CLI also failed
     }
+  }
+
+  /**
+   * Resolve the generation-param flags for a CLI fallback, logging anything that could not be
+   * mapped. Conservative: when a binary has no mapping (or a param has no safe flag), we omit it
+   * and record why in debug output rather than guessing a flag that might make the CLI error out.
+   */
+  private mapCliParams(fallback: CliFallback, config: ModelConfig): string[] {
+    const hasParams =
+      config.reasoning_effort !== undefined ||
+      config.temperature !== undefined ||
+      config.max_tokens !== undefined;
+
+    if (!fallback.mapParams) {
+      if (hasParams) {
+        debug(
+          `CLI fallback ${fallback.binary}: no known flag mapping for generation params — ` +
+          `skipping reasoning_effort/temperature/max_tokens`,
+        );
+      }
+      return [];
+    }
+
+    const { args, skipped } = fallback.mapParams(config);
+    if (args.length > 0) {
+      debug(`CLI fallback ${fallback.binary}: mapped params → ${args.join(' ')}`);
+    }
+    if (skipped.length > 0) {
+      debug(
+        `CLI fallback ${fallback.binary}: skipped unsupported params [${skipped.join(', ')}] ` +
+        `(no confident flag mapping — omitted to avoid CLI error)`,
+      );
+    }
+    return args;
   }
 }
