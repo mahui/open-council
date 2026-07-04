@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, statSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CheckpointManager } from '../../src/storage/checkpoint.js';
@@ -19,6 +19,11 @@ function makeSession(id: string): Session {
     stages: [],
     created_at: new Date().toISOString(),
   };
+}
+
+function writeDeadCheckpoint(id: string, pid: number, lastUpdatedAt: string): void {
+  const ckpt = { ...makeSession(id), pid, last_updated_at: lastUpdatedAt };
+  writeFileSync(join(testDir, `${id}.ckpt.json`), JSON.stringify(ckpt, null, 2), { mode: 0o600 });
 }
 
 beforeEach(() => {
@@ -55,17 +60,17 @@ describe('CheckpointManager', () => {
     expect(mgr.restore('to-remove')).toBeNull();
   });
 
-  it('should find most recent checkpoint when no ID specified', () => {
+  it('should find most recent crashed checkpoint when no ID specified', () => {
+    // Scan-based restore only targets crash leftovers, so the checkpoints must
+    // carry a dead PID (a live PID belongs to a running instance and is skipped).
+    const deadPid = 2147483647;
+    writeDeadCheckpoint('old-session', deadPid, new Date(Date.now() - 1000).toISOString());
+    writeDeadCheckpoint('new-session', deadPid, new Date().toISOString());
+
     const mgr = new CheckpointManager(testDir);
-    mgr.save(makeSession('old-session'));
-
-    // Small delay to ensure different mtime
-    const newer = makeSession('new-session');
-    mgr.save(newer);
-
     const restored = mgr.restore();
     expect(restored).not.toBeNull();
-    // Should get one of the saved sessions
+    // Most recent by mtime wins; both are valid dead-PID candidates.
     expect(['old-session', 'new-session']).toContain(restored!.session_id);
   });
 
@@ -119,9 +124,6 @@ describe('CheckpointManager', () => {
     const restored = mgr.restore('atomic-session');
     expect(restored?.session_id).toBe('atomic-session');
     expect(restored?.status).toBe('broadcasting');
-
-    // Scan-based restore must not be confused by the .tmp file either.
-    expect(mgr.restore()?.session_id).toBe('atomic-session');
   });
 
   it('should write checkpoints with 0o600 permissions', () => {
@@ -142,5 +144,55 @@ describe('CheckpointManager', () => {
     // Sanity: the committed file is valid JSON.
     const raw = readFileSync(join(testDir, 'clean-session.ckpt.json'), 'utf-8');
     expect(() => JSON.parse(raw)).not.toThrow();
+  });
+
+  it('should not select a checkpoint whose process is still alive on scan restore', () => {
+    // process.pid is guaranteed alive — it models another running instance.
+    const live = { ...makeSession('live-session'), pid: process.pid,
+      last_updated_at: new Date().toISOString() };
+    writeFileSync(join(testDir, 'live-session.ckpt.json'), JSON.stringify(live, null, 2), { mode: 0o600 });
+
+    const mgr = new CheckpointManager(testDir);
+    // Scan-based restore must skip the live instance rather than hijack it.
+    expect(mgr.restore()).toBeNull();
+  });
+
+  it('should still restore a live-PID checkpoint when its ID is given explicitly', () => {
+    const live = { ...makeSession('live-explicit'), pid: process.pid,
+      last_updated_at: new Date().toISOString() };
+    writeFileSync(join(testDir, 'live-explicit.ckpt.json'), JSON.stringify(live, null, 2), { mode: 0o600 });
+
+    const mgr = new CheckpointManager(testDir);
+    // Explicit request is honoured (the caller opted in) even for a live PID.
+    expect(mgr.restore('live-explicit')?.session_id).toBe('live-explicit');
+  });
+
+  it('should prefer a dead-PID checkpoint over a newer live-PID one on scan restore', () => {
+    // Newer, but alive → must be skipped in favour of the older crashed one.
+    const live = { ...makeSession('live-newer'), pid: process.pid,
+      last_updated_at: new Date().toISOString() };
+    writeFileSync(join(testDir, 'live-newer.ckpt.json'), JSON.stringify(live, null, 2), { mode: 0o600 });
+    writeDeadCheckpoint('crashed-older', 2147483647, new Date(Date.now() - 5000).toISOString());
+
+    const mgr = new CheckpointManager(testDir);
+    expect(mgr.restore()?.session_id).toBe('crashed-older');
+  });
+
+  it('should purge orphan temp files older than one hour but keep fresh ones', () => {
+    const oldTmp = join(testDir, 'crashed.ckpt.json.deadbeef.tmp');
+    const freshTmp = join(testDir, 'inflight.ckpt.json.cafef00d.tmp');
+    writeFileSync(oldTmp, '{ "session_id": "crashed');
+    writeFileSync(freshTmp, '{ "session_id": "inflight');
+
+    // Backdate the orphan temp file past the one-hour window.
+    const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+    utimesSync(oldTmp, new Date(twoHoursAgo), new Date(twoHoursAgo));
+
+    const mgr = new CheckpointManager(testDir);
+    mgr.restore(); // triggers cleanStale
+
+    const tmps = readdirSync(testDir).filter(f => f.endsWith('.tmp'));
+    expect(tmps).toContain('inflight.ckpt.json.cafef00d.tmp');
+    expect(tmps).not.toContain('crashed.ckpt.json.deadbeef.tmp');
   });
 });

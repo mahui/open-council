@@ -3,9 +3,13 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { Session } from '../types/session.js';
 import { safePath } from '../providers/utils.js';
+import { isProcessAlive } from './concurrency.js';
 
 /** Checkpoints are retained for recovery; only stale ones past this age are purged. */
 const CHECKPOINT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Orphan temp files (crash between write and rename) past this age are purged. */
+const TMP_ORPHAN_MS = 60 * 60 * 1000;
 
 interface CheckpointData extends Session {
   pid: number;
@@ -41,7 +45,17 @@ export class CheckpointManager {
     this.cleanStale();
 
     if (sessionId) {
-      return this.loadCheckpoint(this.getPath(sessionId));
+      const data = this.loadCheckpointData(this.getPath(sessionId));
+      if (!data) return null;
+      // Explicit request: honour it even if the originating process is still
+      // alive, but warn — the caller may be double-opening a live session.
+      if (isProcessAlive(data.pid)) {
+        process.stderr.write(
+          `[checkpoint] warning: session ${data.session_id} may still be running ` +
+          `(pid ${data.pid} is alive); recovering it could collide with a live instance.\n`,
+        );
+      }
+      return this.stripCheckpointFields(data);
     }
 
     // Find most recent valid checkpoint
@@ -57,8 +71,13 @@ export class CheckpointManager {
       .sort((a, b) => b.mtime - a.mtime);
 
     for (const file of files) {
-      const session = this.loadCheckpoint(file.path);
-      if (session) return session;
+      const data = this.loadCheckpointData(file.path);
+      if (!data) continue;
+      // Scan-based recovery only targets crash leftovers. A checkpoint whose
+      // originating PID is still alive belongs to another running instance —
+      // skip it rather than hijack a live session.
+      if (isProcessAlive(data.pid)) continue;
+      return this.stripCheckpointFields(data);
     }
 
     return null;
@@ -79,10 +98,24 @@ export class CheckpointManager {
   private cleanStale(): void {
     if (!existsSync(this.checkpointDir)) return;
 
-    const files = readdirSync(this.checkpointDir).filter(f => f.endsWith('.ckpt.json'));
+    const entries = readdirSync(this.checkpointDir);
 
-    for (const file of files) {
+    for (const file of entries) {
       const path = join(this.checkpointDir, file);
+
+      // Orphan temp files: a crash between writeFileSync and renameSync leaves a
+      // `*.tmp` behind. Purge ones older than the orphan window; a fresh temp
+      // belongs to an in-flight save on another instance and must be preserved.
+      if (file.endsWith('.tmp')) {
+        try {
+          const age = Date.now() - statSync(path).mtimeMs;
+          if (age > TMP_ORPHAN_MS) unlinkSync(path);
+        } catch { /* concurrent rename/unlink raced us — nothing to do */ }
+        continue;
+      }
+
+      if (!file.endsWith('.ckpt.json')) continue;
+
       try {
         const data = JSON.parse(readFileSync(path, 'utf-8')) as CheckpointData;
         const age = Date.now() - new Date(data.last_updated_at).getTime();
@@ -98,16 +131,19 @@ export class CheckpointManager {
     }
   }
 
-  private loadCheckpoint(path: string): Session | null {
+  private loadCheckpointData(path: string): CheckpointData | null {
     if (!existsSync(path)) return null;
     try {
-      const data = JSON.parse(readFileSync(path, 'utf-8')) as CheckpointData;
-      // Strip checkpoint-specific fields
-      const { pid: _pid, last_updated_at: _ts, ...session } = data;
-      return session;
+      return JSON.parse(readFileSync(path, 'utf-8')) as CheckpointData;
     } catch {
       return null;
     }
+  }
+
+  private stripCheckpointFields(data: CheckpointData): Session {
+    // Strip checkpoint-specific fields
+    const { pid: _pid, last_updated_at: _ts, ...session } = data;
+    return session;
   }
 
   private getPath(sessionId: string): string {
