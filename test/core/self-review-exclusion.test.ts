@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { Orchestrator } from '../../src/core/orchestrator.js';
 import type { InvocationAdapter, InvocationResult, HealthStatus } from '../../src/types/provider.js';
 import type { ModelConfig } from '../../src/types/config.js';
-import type { Renderer } from '../../src/ui/renderer.js';
+import type { Renderer } from '../../src/types/renderer.js';
 import type { Stage } from '../../src/types/session.js';
 
 /**

@@ -6,7 +6,7 @@
 import { createInterface } from 'node:readline';
 import type { Session } from '../types/session.js';
 import type { Orchestrator } from '../core/orchestrator.js';
-import type { Renderer } from './renderer.js';
+import type { Renderer } from '../types/renderer.js';
 
 export async function enterFollowUpMode(
   session: Session,

@@ -3,7 +3,7 @@ import { Orchestrator } from '../../src/core/orchestrator.js';
 import { rateModelCapability } from '../../src/core/role-generator.js';
 import type { InvocationAdapter, InvocationResult, HealthStatus } from '../../src/types/provider.js';
 import type { ModelConfig } from '../../src/types/config.js';
-import type { Renderer } from '../../src/ui/renderer.js';
+import type { Renderer } from '../../src/types/renderer.js';
 
 // ---------------------------------------------------------------------------
 // Test helpers

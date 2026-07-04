@@ -7,7 +7,7 @@
 import type { BenchmarkQuestion, BenchmarkResult, BenchmarkReport } from '../../types/benchmark.js';
 import type { Session, Agent, DebatePhase, DegradationEvent, ConsensusResult } from '../../types/session.js';
 import type { InvocationResult } from '../../types/provider.js';
-import type { Renderer } from '../../ui/renderer.js';
+import type { Renderer } from '../../types/renderer.js';
 import {
   RELEASE_GATES,
   avgCoverageForCategory,

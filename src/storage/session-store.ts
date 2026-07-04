@@ -3,7 +3,7 @@ import type Database from 'better-sqlite3';
 import { initDatabase, closeDatabase } from './database.js';
 import { PATHS } from '../config/paths.js';
 import type { Session } from '../types/session.js';
-import { safePath } from '../providers/utils.js';
+import { safePath } from '../shared/paths.js';
 
 export interface SessionFilter {
   status?: string;

@@ -92,7 +92,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
   },
 ];
 
-import { hasBinary } from '../providers/utils.js';
+import { hasBinary } from '../shared/env.js';
 
 /** Discover models from environment variables, OAuth credentials, and CLI tools (Phase 0 fallback). */
 export function discoverModelsFromEnv(credentialManager?: { hasCredential(provider: string): boolean }): ModelConfig[] {

@@ -5,7 +5,7 @@ import { ModelConfigSchema, CouncilConfigSchema } from './schema.js';
 import type { CouncilConfig, ModelConfig, RoleSet } from '../types/config.js';
 import { ConfigNotFoundError, RoleSetNotFoundError } from '../types/errors.js';
 import { PATHS } from './paths.js';
-import { safePath } from '../providers/utils.js';
+import { safePath } from '../shared/paths.js';
 
 export class ConfigLoader {
   constructor(private configDir: string = PATHS.config) {}

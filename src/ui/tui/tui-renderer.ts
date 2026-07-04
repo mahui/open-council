@@ -7,7 +7,7 @@ import React from 'react';
 import { render } from 'ink';
 import type { Agent, DebatePhase, DegradationEvent, ConsensusResult, Session } from '../../types/session.js';
 import type { InvocationResult } from '../../types/provider.js';
-import type { Renderer } from '../renderer.js';
+import type { Renderer } from '../../types/renderer.js';
 import { renderMarkdown } from '../markdown.js';
 import { Dashboard } from './Dashboard.js';
 import type { TuiState, AgentState } from './Dashboard.js';

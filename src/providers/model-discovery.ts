@@ -6,7 +6,7 @@ import { getModels } from '@mariozechner/pi-ai';
 import type { Api, KnownProvider, Model } from '@mariozechner/pi-ai';
 import { getOAuthProvider } from '@mariozechner/pi-ai/oauth';
 import type { CredentialManager } from './credentials/discovery.js';
-import { hasBinary } from './utils.js';
+import { hasBinary } from '../shared/env.js';
 
 export interface DiscoveredModel {
   id: string;

@@ -28,7 +28,7 @@ import type {
 } from '../types/session.js';
 import type { ModelConfig } from '../types/config.js';
 import type { InvocationAdapter, InvocationResult } from '../types/provider.js';
-import type { Renderer } from '../ui/renderer.js';
+import type { Renderer } from '../types/renderer.js';
 import { buildBroadcastPrompt, buildSynthesisPrompt, buildReviewPrompt, buildDevilAdvocateReviewPrompt, buildCrossExaminePrompt, extractDivergencePoints } from './prompt-builder.js';
 import { Anonymizer, type AnonymizedResponse } from './anonymizer.js';
 import { parseReviewResponse, type ParsedReview } from './score-parser.js';

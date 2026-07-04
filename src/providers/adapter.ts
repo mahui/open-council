@@ -3,7 +3,7 @@ import type { InvocationAdapter, InvocationResult, HealthStatus, OnChunk } from 
 import { ModelUnavailableError } from '../types/errors.js';
 import type { ApiAdapter } from './api-adapter.js';
 import type { CliAdapter } from './cli-adapter.js';
-import { hasBinary } from './utils.js';
+import { hasBinary } from '../shared/env.js';
 
 const DEBUG = !!process.env['COUNCIL_DEBUG'];
 

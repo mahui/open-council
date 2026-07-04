@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock hasBinary so the CLI-fallback path can be exercised without a real binary on PATH.
-vi.mock('../../src/providers/utils.js', () => ({
+vi.mock('../../src/shared/env.js', () => ({
   hasBinary: vi.fn(() => true),
 }));
 
@@ -10,7 +10,7 @@ import type { InvocationResult, HealthStatus } from '../../src/types/provider.js
 import type { ModelConfig } from '../../src/types/config.js';
 import type { ApiAdapter } from '../../src/providers/api-adapter.js';
 import type { CliAdapter } from '../../src/providers/cli-adapter.js';
-import { hasBinary } from '../../src/providers/utils.js';
+import { hasBinary } from '../../src/shared/env.js';
 
 function makeConfig(overrides: Partial<ModelConfig> = {}): ModelConfig {
   return {

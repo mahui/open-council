@@ -6,7 +6,7 @@
 
 import type { Agent, DebatePhase, DegradationEvent, ConsensusResult, Session } from '../types/session.js';
 import type { InvocationResult } from '../types/provider.js';
-import type { Renderer } from './renderer.js';
+import type { Renderer } from '../types/renderer.js';
 import { renderMarkdown } from './markdown.js';
 
 const BOLD = '\x1b[1m';

@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync, statS
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { Session } from '../types/session.js';
-import { safePath } from '../providers/utils.js';
+import { safePath } from '../shared/paths.js';
 import { isProcessAlive } from './concurrency.js';
 
 /** Checkpoints are retained for recovery; only stale ones past this age are purged. */

@@ -5,7 +5,7 @@
  */
 
 import { PlainRenderer } from './plain-renderer.js';
-import type { Renderer } from './renderer.js';
+import type { Renderer } from '../types/renderer.js';
 
 export interface RendererFactoryOptions {
   question: string;
@@ -24,7 +24,7 @@ export async function createRenderer(options: RendererFactoryOptions): Promise<R
 
   if (useTui) {
     try {
-      const { TuiRenderer } = await import('./tui/TuiRenderer.js');
+      const { TuiRenderer } = await import('./tui/tui-renderer.js');
       return new TuiRenderer(options.question, options.mode ?? 'auto');
     } catch {
       // ink/react not installed or failed to load — fall back to PlainRenderer

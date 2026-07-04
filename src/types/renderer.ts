@@ -1,9 +1,12 @@
 /**
  * Renderer interface — ui ↔ core bridge (ARCH-05).
+ *
+ * Lives in types/ (neutral home) so neither side of the bridge (core, ui)
+ * has to reach across a layer boundary to reference it.
  */
 
-import type { Agent, DebatePhase, DegradationEvent, ConsensusResult, Session } from '../types/session.js';
-import type { InvocationResult } from '../types/provider.js';
+import type { Agent, DebatePhase, DegradationEvent, ConsensusResult, Session } from './session.js';
+import type { InvocationResult } from './provider.js';
 
 export interface Renderer {
   onPhaseStart(phase: DebatePhase, index: number, total: number): void;
