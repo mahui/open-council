@@ -137,6 +137,10 @@ function parseErrorJson(raw: string, trapCount: number): ErrorResult[] {
 /**
  * Ask the judge model whether each expected point is covered in the response.
  * On parse failure, returns score=0 and empty details (graceful degradation).
+ *
+ * @param onWarn Optional callback invoked with a human-readable warning message
+ *   when invocation or parsing fails. Core stays I/O-free (ARCH-01); callers
+ *   (e.g. the benchmark CLI) can pass a callback that writes to stderr.
  */
 export async function evaluateCoverage(
   question: string,
@@ -144,6 +148,7 @@ export async function evaluateCoverage(
   expectedPoints: string[],
   adapter: InvocationAdapter,
   judgeModel: ModelConfig,
+  onWarn?: (msg: string) => void,
 ): Promise<CoverageEvaluation> {
   if (expectedPoints.length === 0) {
     return { score: 0, details: [] };
@@ -157,7 +162,7 @@ export async function evaluateCoverage(
     raw = result.response;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`[evaluator] coverage invoke failed: ${msg}\n`);
+    onWarn?.(`[evaluator] coverage invoke failed: ${msg}`);
     return { score: 0, details: [] };
   }
 
@@ -166,7 +171,7 @@ export async function evaluateCoverage(
     details = parseCoverageJson(raw, expectedPoints.length);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`[evaluator] coverage parse failed: ${msg}\n`);
+    onWarn?.(`[evaluator] coverage parse failed: ${msg}`);
     return { score: 0, details: [] };
   }
 
@@ -185,6 +190,10 @@ export async function evaluateCoverage(
 /**
  * Ask the judge model whether each known trap was triggered in the response.
  * On parse failure, returns errorRate=0 and empty details (graceful degradation).
+ *
+ * @param onWarn Optional callback invoked with a human-readable warning message
+ *   when invocation or parsing fails. Core stays I/O-free (ARCH-01); callers
+ *   (e.g. the benchmark CLI) can pass a callback that writes to stderr.
  */
 export async function evaluateErrors(
   question: string,
@@ -192,6 +201,7 @@ export async function evaluateErrors(
   knownTraps: Array<{ type: string; description: string }>,
   adapter: InvocationAdapter,
   judgeModel: ModelConfig,
+  onWarn?: (msg: string) => void,
 ): Promise<ErrorEvaluation> {
   if (knownTraps.length === 0) {
     return { errorRate: 0, errorScore: 1.0, details: [] };
@@ -205,7 +215,7 @@ export async function evaluateErrors(
     raw = result.response;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`[evaluator] error-rate invoke failed: ${msg}\n`);
+    onWarn?.(`[evaluator] error-rate invoke failed: ${msg}`);
     return { errorRate: 0, errorScore: 1.0, details: [] };
   }
 
@@ -214,7 +224,7 @@ export async function evaluateErrors(
     details = parseErrorJson(raw, knownTraps.length);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`[evaluator] error-rate parse failed: ${msg}\n`);
+    onWarn?.(`[evaluator] error-rate parse failed: ${msg}`);
     return { errorRate: 0, errorScore: 1.0, details: [] };
   }
 

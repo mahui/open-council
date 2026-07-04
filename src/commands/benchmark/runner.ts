@@ -85,9 +85,10 @@ async function runGroup(
     if (!response) {
       failed = true;
     } else {
+      const onWarn = (msg: string): void => { process.stderr.write(`${msg}\n`); };
       const [covResult, errResult] = await Promise.all([
-        evaluateCoverage(q.question, response, q.expected_points, adapter, bestModel),
-        evaluateErrors(q.question, response, q.known_traps, adapter, bestModel),
+        evaluateCoverage(q.question, response, q.expected_points, adapter, bestModel, onWarn),
+        evaluateErrors(q.question, response, q.known_traps, adapter, bestModel, onWarn),
       ]);
       coverageScore = covResult.score;
       errorScore = errResult.errorScore;
