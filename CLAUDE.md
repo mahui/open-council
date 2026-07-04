@@ -6,11 +6,24 @@
 
 1. **`CONTRIBUTING.md`** — 开发规范。所有规则以 ID 编号（ARCH-01、SEC-03 等），**规则已内嵌到各 agent 定义中，无需每次任务重复阅读**。
 2. **`docs/PRD.md`** (v7.0) — 产品需求文档。功能设计的权威来源。
-3. **`docs/TDD.md`** (v2.0) — 技术设计文档。架构、接口、数据结构的权威来源。
+3. **`docs/TDD.md`** (v2.1) — 技术设计文档。架构、接口、数据结构的权威来源。
 
 **文档查阅策略**：agent 的关键设计约束和规则已内嵌在各自的 `.claude/agents/*.md` 定义中。开发时**不需要全量阅读 PRD/TDD**，仅在对具体细节有疑问时用 Grep 定向搜索对应章节。
 
 **文档优先级**：当文档间出现冲突时，CONTRIBUTING.md（规范） > TDD（技术设计） > PRD（产品需求）。发现冲突时应主动提出并解决，而非静默选择一方。
+
+### 文档职责矩阵
+
+每份文档只有一个"家"。信息应写在其权威文档里，其他文档只**引用不复制**（避免版本号/需求正文多处漂移）。
+
+| 文档 | 承载内容 | 何时更新 |
+|------|---------|---------|
+| `README.md` | 用户视角：项目是什么、如何安装与运行、CLI 用法 | 面向用户的能力/命令/安装方式变化时 |
+| `docs/PRD.md` | 产品需求真相源：功能设计、数据模型、配置 Schema、辩论流程 | 需求或功能设计变更时 |
+| `docs/TDD.md` | 技术设计真相源：架构、接口签名、数据结构、依赖 | 接口/架构/数据结构/依赖变更时 |
+| `CONTRIBUTING.md` | 规范真相源：ARCH/SEC/TS 等编号规则、Git/测试/日志约定 | 开发规范变更时 |
+| `CLAUDE.md` | AI 协作流程 + 项目速查指针；**只引用不复制**版本号/需求正文 | 协作流程、Phase 状态、文档指针变化时 |
+| `docs/design-notes/` | 已定稿的跨模块实施设计决策、数据流、trade-off，按日期演进 | 一项跨模块设计定稿后新增一篇（见该目录 README） |
 
 ## 开发流程
 
@@ -175,8 +188,8 @@
 Open Council 是一个基于 TypeScript/Node.js 的多 Agent 辩论编排系统，支持 CLI 和 API 双模调用。
 
 - **开发规范**: `CONTRIBUTING.md` (强制)
-- **PRD**: `docs/PRD.md` (v6.3)
-- **技术设计**: `docs/TDD.md` (v1.0)
+- **PRD**: `docs/PRD.md` (v7.0)
+- **技术设计**: `docs/TDD.md` (v2.1)
 - **角色模板**: `defaults/roles/*.yaml`
 - **基准测试集**: `defaults/benchmark.yaml`
 
@@ -218,7 +231,14 @@ test/            测试（对应 src/ 结构）
 
 ## 当前开发阶段
 
-Phase 0（最小可运行原型），目标：
-1. 端到端跑通 council "question" → 多模型并行回答 → Chairman 综合 → stdout 输出
-2. 优先 API 模式（读取本地凭证），CLI 模式作为 fallback
-3. 不含配置系统、持久化、TUI（Phase 纪律，见 CONTRIBUTING.md §1.3）
+**Phase 5 全功能已实现**，当前处于质量强化与信息架构治理阶段。
+
+已落地的核心能力：
+1. 端到端 council 辩论：多模型并行回答 → 多轮辩论（路由/广播/评审回灌/共识判停）→ Chairman 综合 → 输出
+2. API 模式 + CLI 模式双通道调用（含凭证发现、Token 刷新、健康检查/熔断）
+3. 配置系统（YAML + zod 校验）、SQLite/JSON 持久化、Checkpoint 中断恢复
+4. TUI 仪表盘（ink）、Setup Wizard、benchmark 消融实验框架
+
+当前工作重心：结构/质量收敛（依赖图修正、测试镜像补齐、文档信息架构治理），不新增 Phase 级功能。
+
+> Phase 纪律仍然有效（见 CONTRIBUTING.md §1.3）：功能已进入 Phase 5，勿因此回退早期阶段的约束判断。

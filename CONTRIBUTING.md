@@ -27,6 +27,8 @@ commands/  →  core/  →  (无外部依赖)
 | ARCH-04 | `src/types/` 是纯类型定义，不包含任何运行时代码（函数、类、常量） | 保持零副作用 |
 | ARCH-05 | 所有模块间交互通过 `src/types/` 中定义的接口进行，不直接依赖具体实现类 | 依赖倒置 |
 
+> **ARCH-04 显式豁免**：`src/types/errors.ts` 的 Error 子类是既定豁免。错误类型是跨层契约，Error 子类必须携带运行时构造函数才能被 `throw`/`instanceof`，无法退化为纯类型。同理，由 zod schema 推导类型时 schema 本身的运行时定义也属允许的例外。除此之外 `src/types/` 保持零运行时代码。
+
 ### 1.2 关键接口契约
 
 以下接口是模块间的硬契约，修改需经 `@architect` 审查：
