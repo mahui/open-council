@@ -206,6 +206,47 @@ describe('calculateConsensus', () => {
     const result = calculateConsensus(reviews, agents);
     expect(result.agreement_score).toBeGreaterThanOrEqual(0.6);
   });
+
+  it('imputes the mean rank for the item each rater is missing (self-review exclusion)', () => {
+    // 3 answers x/y/z; under self-review exclusion each rater is missing exactly
+    // its OWN answer. All raters that DO see a pair agree on the global ordering
+    // x > y > z. Kendall's W must stay finite in [0,1] and — because the missing
+    // item is imputed at the mean rank rather than ranked last — must be lower
+    // than the fully-observed case (conservative, never inflates concordance).
+    const agents = [
+      makeAgent('ans-x', 'anthropic'),
+      makeAgent('ans-y', 'google'),
+      makeAgent('ans-z', 'openai'),
+    ];
+
+    // Self-exclusion: rater = author; each reviews the other two.
+    const excluded: ParsedReview[] = [
+      { ...makeReview('L1', 8), reviewer_agent_id: 'ans-x', reviewed_agent_id: 'ans-y' },
+      { ...makeReview('L2', 5), reviewer_agent_id: 'ans-x', reviewed_agent_id: 'ans-z' },
+      { ...makeReview('L1', 9), reviewer_agent_id: 'ans-y', reviewed_agent_id: 'ans-x' },
+      { ...makeReview('L2', 5), reviewer_agent_id: 'ans-y', reviewed_agent_id: 'ans-z' },
+      { ...makeReview('L1', 9), reviewer_agent_id: 'ans-z', reviewed_agent_id: 'ans-x' },
+      { ...makeReview('L2', 8), reviewer_agent_id: 'ans-z', reviewed_agent_id: 'ans-y' },
+    ];
+
+    // Fully-observed counterpart: every rater ranks all three answers.
+    const full: ParsedReview[] = [];
+    for (const reviewer of ['ans-x', 'ans-y', 'ans-z']) {
+      full.push({ ...makeReview('L1', 9), reviewer_agent_id: reviewer, reviewed_agent_id: 'ans-x' });
+      full.push({ ...makeReview('L2', 8), reviewer_agent_id: reviewer, reviewed_agent_id: 'ans-y' });
+      full.push({ ...makeReview('L3', 5), reviewer_agent_id: reviewer, reviewed_agent_id: 'ans-z' });
+    }
+
+    const excludedResult = calculateConsensus(excluded, agents);
+    const fullResult = calculateConsensus(full, agents);
+
+    // Finite, in-range, and still detects the concordance (positive).
+    expect(Number.isFinite(excludedResult.agreement_score)).toBe(true);
+    expect(excludedResult.agreement_score).toBeGreaterThan(0);
+    expect(excludedResult.agreement_score).toBeLessThanOrEqual(1);
+    // Conservative: imputation never rates concordance above complete data.
+    expect(excludedResult.agreement_score).toBeLessThan(fullResult.agreement_score);
+  });
 });
 
 describe('mean', () => {

@@ -193,6 +193,14 @@ function kendallsW(
   // rank 1 = highest score, ties get average rank
   const rankSums = new Array<number>(n).fill(0);
 
+  // Mean rank used to impute items a rater did not score. Under self-review
+  // exclusion each rater is missing exactly its own answer; imputing the grand
+  // mean rank (n+1)/2 is symmetric across items (each item imputed once) and
+  // conservative — it mildly deflates W rather than inflating false consensus.
+  // (Filling a raw score of 0 instead would push the missing item to the worst
+  // rank, biasing the rank sums asymmetrically.)
+  const meanRank = (n + 1) / 2;
+
   for (const [, raterReviews] of byReviewer) {
     // Build score array for this rater's items
     const scoresByItem = new Map<string, number>();
@@ -200,9 +208,10 @@ function kendallsW(
       scoresByItem.set(answerKey(review), review.scores.overall);
     }
 
-    // Sort by score descending to compute ranks
-    const sorted = items
-      .map(item => ({ item, score: scoresByItem.get(item) ?? 0 }))
+    // Rank only the items this rater actually scored (sort by score descending).
+    const observed = items.filter(item => scoresByItem.has(item));
+    const sorted = observed
+      .map(item => ({ item, score: scoresByItem.get(item)! }))
       .sort((a, b) => b.score - a.score);
 
     // Assign ranks with tie averaging
@@ -218,9 +227,9 @@ function kendallsW(
       i = j;
     }
 
-    // Accumulate rank sums per item
+    // Accumulate rank sums per item; unscored items get the mean rank.
     for (let idx = 0; idx < items.length; idx++) {
-      rankSums[idx] = (rankSums[idx] ?? 0) + (ranks.get(items[idx]!) ?? 0);
+      rankSums[idx] = (rankSums[idx] ?? 0) + (ranks.get(items[idx]!) ?? meanRank);
     }
   }
 

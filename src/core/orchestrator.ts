@@ -30,7 +30,7 @@ import type { ModelConfig } from '../types/config.js';
 import type { InvocationAdapter, InvocationResult } from '../types/provider.js';
 import type { Renderer } from '../ui/renderer.js';
 import { buildBroadcastPrompt, buildSynthesisPrompt, buildReviewPrompt, buildDevilAdvocateReviewPrompt, buildCrossExaminePrompt, extractDivergencePoints } from './prompt-builder.js';
-import { Anonymizer } from './anonymizer.js';
+import { Anonymizer, type AnonymizedResponse } from './anonymizer.js';
 import { parseReviewResponse, type ParsedReview } from './score-parser.js';
 import { calculateConsensus } from './consensus.js';
 import { buildReviewSummaries, type AnswerReviewSummary } from './review-aggregator.js';
@@ -500,7 +500,6 @@ export class Orchestrator {
 
   private async executeReview(session: Session): Promise<void> {
     const stage = this.createStage('review');
-    const anonymizer = new Anonymizer();
     const language = detectLanguage(session.question);
 
     // Get the LATEST response stage (broadcast or cross_examine for multi-round debates)
@@ -521,18 +520,56 @@ export class Orchestrator {
       return;
     }
 
-    // Anonymize responses (shuffles order to eliminate position bias)
-    const agentResponses = validInvocations.map((inv, i) => ({
-      agentIndex: i,
-      content: inv.response_raw,
-    }));
-    const anonymized = anonymizer.anonymize(agentResponses);
+    // Self-review exclusion (work item #3): with N ≥ 3 valid answers, each
+    // reviewer evaluates an anonymized subset that omits its own answer. With
+    // N = 2 that would leave only 1 answer per reviewer (σ / rank undefined), so
+    // we fall back to the full-set path (keeps self-review) — see design note.
+    const excludeSelf = validInvocations.length >= 3;
 
-    // P0-2 fix: persist the shuffle-aware label→agent_id mapping on the stage.
-    // anonymizer.deanonymize() uses original_agent_index (set during shuffle) to
-    // correctly resolve which label maps to which agent — regardless of shuffle order.
-    const labelMap = anonymizer.deanonymize(anonymized, validInvocations);
-    stage.label_map = Object.fromEntries(labelMap);
+    // Full-set anonymization: used by the N = 2 path, and as a fallback subset
+    // for any reviewer that produced no valid answer of its own.
+    const fullAnonymizer = new Anonymizer();
+    const fullAnonymized = fullAnonymizer.anonymize(
+      validInvocations.map((inv, i) => ({ agentIndex: i, content: inv.response_raw })),
+    );
+
+    if (!excludeSelf) {
+      // P0-2 fix: persist the shuffle-aware label→agent_id mapping on the stage.
+      // anonymizer.deanonymize() uses original_agent_index (set during shuffle) to
+      // correctly resolve which label maps to which agent — regardless of shuffle order.
+      stage.label_map = Object.fromEntries(fullAnonymizer.deanonymize(fullAnonymized, validInvocations));
+    }
+
+    // Under self-exclusion, each reviewer gets its own label→reviewed-agent map.
+    const reviewerLabelMaps: Record<string, Record<string, string>> = {};
+
+    /**
+     * Build the anonymized answer set a given reviewer should see. Under
+     * self-exclusion the reviewer's own answer is removed and a fresh
+     * Anonymizer shuffles/labels the remaining (N-1) answers, recording the
+     * per-reviewer label map. Reviewers without an own answer, or the N = 2
+     * path, receive the shared full set.
+     */
+    const anonymizedFor = (agent: Agent): AnonymizedResponse[] => {
+      if (!excludeSelf) return fullAnonymized;
+      const subset = validInvocations.filter(inv => inv.agent_id !== agent.agent_id);
+      if (subset.length === validInvocations.length) {
+        // Reviewer has no own answer to drop (its broadcast failed). It reviews
+        // the full set; record the full-set map under its id so downstream
+        // resolution still goes through the per-reviewer path (no shared
+        // label_map exists under exclusion).
+        reviewerLabelMaps[agent.agent_id] = Object.fromEntries(
+          fullAnonymizer.deanonymize(fullAnonymized, validInvocations),
+        );
+        return fullAnonymized;
+      }
+      const anonymizer = new Anonymizer();
+      const anon = anonymizer.anonymize(
+        subset.map((inv, i) => ({ agentIndex: i, content: inv.response_raw })),
+      );
+      reviewerLabelMaps[agent.agent_id] = Object.fromEntries(anonymizer.deanonymize(anon, subset));
+      return anon;
+    };
 
     // Each agent reviews all responses — output goes to the __review__ tab
     const reviewAgent: Agent = {
@@ -546,9 +583,6 @@ export class Orchestrator {
     };
     this.renderer.onAgentStart(reviewAgent);
 
-    // Pre-build standard prompt (shared by all non-DA agents)
-    const basePrompt = buildReviewPrompt(session.question, anonymized, language);
-
     // P0-3 fix: parallel review — same model → serial, different models → parallel
     // (mirrors executeBroadcast pattern)
     const groups = this.groupByModel(session.agents);
@@ -556,11 +590,12 @@ export class Orchestrator {
       groups.map(async (group) => {
         const results: Invocation[] = [];
         for (const agent of group) {
+          const anonymized = anonymizedFor(agent);
           // P0-1 fix: devil's advocate gets an augmented prompt that requires
           // critical auditing (risk hunting, edge cases, assumption challenging)
           const prompt = agent.is_devil_advocate
             ? buildDevilAdvocateReviewPrompt(session.question, anonymized, language)
-            : basePrompt;
+            : buildReviewPrompt(session.question, anonymized, language);
 
           this.renderer.onAgentProgress(reviewAgent, `\n--- ${agent.role} [${agent.config.name}] reviewing... ---\n`);
           try {
@@ -590,6 +625,10 @@ export class Orchestrator {
       invocation_mode: 'api',
       timed_out: false,
     });
+
+    if (Object.keys(reviewerLabelMaps).length > 0) {
+      stage.reviewer_label_maps = reviewerLabelMaps;
+    }
 
     stage.invocations = allInvocations;
     stage.status = allInvocations.length > 0 ? 'completed' : 'failed';
@@ -725,20 +764,39 @@ export class Orchestrator {
    * reviewed agent ids resolved. Shared parse chain for consensus, compression,
    * and review-summary construction (avoids duplicating the label→agentId logic).
    *
-   * @param labelToAgentId Optional explicit label map; when omitted the stage's
-   *                       own shuffle-aware `label_map` is used.
+   * Under self-review exclusion the stage carries per-reviewer label maps: each
+   * review invocation is parsed against that reviewer's own (N-1) label set and
+   * resolved via its own map. Otherwise the shared full-set path is used.
+   *
+   * @param expectedLabels Full-set label set (ignored for per-reviewer path,
+   *                        which derives labels from each reviewer's own map).
+   * @param labelToAgentId  Optional explicit full-set label map; when omitted the
+   *                        stage's own shuffle-aware `label_map` is used.
    */
   private parseReviewStage(
     reviewStage: Stage,
     expectedLabels: string[],
     labelToAgentId?: ReadonlyMap<string, string>,
   ): ParsedReview[] {
-    const resolve = (label: string): string | undefined =>
-      labelToAgentId ? labelToAgentId.get(label) : reviewStage.label_map?.[label];
+    const perReviewer = reviewStage.reviewer_label_maps;
 
     return reviewStage.invocations
       .filter(inv => inv.response_raw)
       .flatMap(inv => {
+        const reviewerMap = perReviewer?.[inv.agent_id];
+        if (reviewerMap) {
+          // Per-reviewer path: labels and reviewed-id mapping are local to this reviewer.
+          const labels = Object.keys(reviewerMap);
+          const result = parseReviewResponse(inv.response_raw, labels);
+          return result.reviews.map(r => ({
+            ...r,
+            reviewer_agent_id: inv.agent_id,
+            reviewed_agent_id: reviewerMap[r.label],
+          }));
+        }
+        // Full-set path (N = 2, legacy stages, or reviewers with no own answer).
+        const resolve = (label: string): string | undefined =>
+          labelToAgentId ? labelToAgentId.get(label) : reviewStage.label_map?.[label];
         const result = parseReviewResponse(inv.response_raw, expectedLabels);
         return result.reviews.map(r => ({
           ...r,

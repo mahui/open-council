@@ -35,18 +35,19 @@ function createMockAdapter(): InvocationAdapter {
       }
 
       // Peer-review prompt → return a JSON review scoring the anonymized answers.
-      // High agreement (identical scores across reviewers) so the debate reaches
-      // its stop criterion after the first round.
-      if (prompt.includes('peer reviewer')) {
+      // Score by descending label so reviewers broadly agree. Under self-review
+      // exclusion each reviewer sees only the labels present in ITS prompt
+      // (N-1), so parse the labels rather than hard-coding A/B/C.
+      if (prompt.includes('evaluating anonymous responses')) {
         reviewCount++;
+        const labels = [...prompt.matchAll(/--- Response (\w+) ---/g)].map(m => m[1]!);
         return {
           ...base,
           response: JSON.stringify({
-            reviews: [
-              { label: 'A', scores: { accuracy: 9, completeness: 9, practicality: 9, insight: 9, overall: 9 }, strengths: 'Strong', weaknesses: 'Minor', ranking: 1 },
-              { label: 'B', scores: { accuracy: 8, completeness: 8, practicality: 8, insight: 8, overall: 8 }, strengths: 'Solid', weaknesses: 'Minor', ranking: 2 },
-              { label: 'C', scores: { accuracy: 7, completeness: 7, practicality: 7, insight: 7, overall: 7 }, strengths: 'Adequate', weaknesses: 'Some', ranking: 3 },
-            ],
+            reviews: labels.map((label, i) => {
+              const overall = 9 - i;
+              return { label, scores: { accuracy: overall, completeness: overall, practicality: overall, insight: overall, overall }, strengths: 'Strong', weaknesses: 'Minor', ranking: i + 1 };
+            }),
           }),
         } satisfies InvocationResult;
       }
@@ -219,22 +220,22 @@ describe('Full Debate Flow Integration', () => {
 
         // Peer-review prompt → strongly divergent rankings across reviewers so
         // agreement_score stays below the stop threshold and cross-examine runs.
-        if (prompt.includes('peer reviewer')) {
-          const variants = [
-            [{ a: 9 }, { a: 5 }, { a: 1 }],
-            [{ a: 1 }, { a: 5 }, { a: 9 }],
-            [{ a: 5 }, { a: 9 }, { a: 1 }],
-          ];
-          const v = variants[reviewCount % variants.length]!;
+        // Labels are parsed from the prompt (self-review exclusion gives each
+        // reviewer an N-1 subset), and a per-reviewer rotation scrambles the
+        // score order to keep concordance low.
+        if (prompt.includes('evaluating anonymous responses')) {
+          const labels = [...prompt.matchAll(/--- Response (\w+) ---/g)].map(m => m[1]!);
+          const scorePool = [9, 1, 5, 8, 2];
+          const offset = reviewCount % labels.length || 0;
+          const weaknessMarkers = ['WEAKNESS_MARKER ignores scaling limits', 'WEAKNESS_MARKER no cost analysis', 'WEAKNESS_MARKER weak evidence'];
           reviewCount++;
           return {
             ...base,
             response: JSON.stringify({
-              reviews: [
-                { label: 'A', scores: { accuracy: v[0]!.a, completeness: v[0]!.a, practicality: v[0]!.a, insight: v[0]!.a, overall: v[0]!.a }, strengths: 'ok', weaknesses: 'WEAKNESS_MARKER ignores scaling limits', ranking: 1 },
-                { label: 'B', scores: { accuracy: v[1]!.a, completeness: v[1]!.a, practicality: v[1]!.a, insight: v[1]!.a, overall: v[1]!.a }, strengths: 'ok', weaknesses: 'WEAKNESS_MARKER no cost analysis', ranking: 2 },
-                { label: 'C', scores: { accuracy: v[2]!.a, completeness: v[2]!.a, practicality: v[2]!.a, insight: v[2]!.a, overall: v[2]!.a }, strengths: 'ok', weaknesses: 'WEAKNESS_MARKER weak evidence', ranking: 3 },
-              ],
+              reviews: labels.map((label, i) => {
+                const a = scorePool[(i + offset) % scorePool.length]!;
+                return { label, scores: { accuracy: a, completeness: a, practicality: a, insight: a, overall: a }, strengths: 'ok', weaknesses: weaknessMarkers[i % weaknessMarkers.length]!, ranking: i + 1 };
+              }),
             }),
           } satisfies InvocationResult;
         }

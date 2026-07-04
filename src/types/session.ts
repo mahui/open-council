@@ -62,6 +62,13 @@ export interface Stage {
   completed_at?: string;
   /** Anonymized label → agent_id mapping, set by the review stage to preserve shuffle order. */
   label_map?: Record<string, string>;
+  /**
+   * Per-reviewer anonymized mapping: reviewerAgentId → (local label → reviewed agent_id).
+   * Set by the review stage under self-review exclusion (N ≥ 3), where each
+   * reviewer sees a distinct anonymized subset (its own answer removed), so a
+   * single `label_map` no longer suffices. Absent for the N = 2 full-set path.
+   */
+  reviewer_label_maps?: Record<string, Record<string, string>>;
 }
 
 export interface DegradationEvent {
