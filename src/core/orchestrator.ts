@@ -35,7 +35,7 @@ import { parseReviewResponse, type ParsedReview } from './score-parser.js';
 import { calculateConsensus } from './consensus.js';
 import { buildReviewSummaries, type AnswerReviewSummary } from './review-aggregator.js';
 import { detectLanguage } from './language.js';
-import { generateRoles, resolveModel } from './role-generator.js';
+import { generateRoles, resolveModel, defaultRoles, rateModelCapability } from './role-generator.js';
 import { resolveMode } from './router.js';
 import { buildCompressionPlan, applyFallbackCompression, type ScoredResponse, aggregateReviewScores } from './compression.js';
 
@@ -61,6 +61,8 @@ export class Orchestrator {
     private availableModels: ModelConfig[],
     private defaultChairman?: string,
     private maxAgents: number = 5,
+    /** Optional explicit model for role-panel design (config: role_generator_model). */
+    private roleGenModel?: ModelConfig,
   ) {}
 
   async run(question: string, options: RunOptions): Promise<Session> {
@@ -225,9 +227,12 @@ export class Orchestrator {
     const stage = this.createStage('route');
 
     const models = this.availableModels.filter(m => m.enabled);
+    // Chairman: honor an explicit config default when it resolves; otherwise
+    // pick the strongest model by capability tier (ties → higher config
+    // priority / earlier in the list).
     const chairmanModel = this.defaultChairman
-      ? models.find(m => m.name === this.defaultChairman) ?? models[0]
-      : models[0];
+      ? models.find(m => m.name === this.defaultChairman) ?? this.selectStrongestModel(models)
+      : this.selectStrongestModel(models);
 
     // Compute an agent-count interval per mode; the LLM picks the size that
     // fits the question's complexity (no longer driven solely by model count).
@@ -241,12 +246,19 @@ export class Orchestrator {
     } else {
       range = { min: 3, max: Math.max(upperBound, 3) };
     }
-    const roles = await generateRoles(
-      session.question,
-      range,
-      this.adapter,
-      models,
-    );
+
+    // Quick mode is a single-agent path: no productive-disagreement panel to
+    // design, so skip the role-generation LLM call entirely and use the
+    // built-in default role (keeps the GeneratedRole[] shape consistent).
+    const roles = session.resolved_mode === 'quick'
+      ? defaultRoles(range.min, models)
+      : await generateRoles(
+          session.question,
+          range,
+          this.adapter,
+          models,
+          this.roleGenModel,
+        );
 
     session.agents = roles.map(role => {
       const model = resolveModel(role, models);
@@ -872,12 +884,9 @@ export class Orchestrator {
       }
       case 'synthesis': {
         event.impact = 'Synthesis failed, outputting best individual response';
-        const broadcastStage = session.stages.find(s => s.phase === 'broadcast');
-        const best = broadcastStage?.invocations
-          .filter(i => !i.timed_out && i.response_raw)
-          .sort((a, b) => a.result.elapsed_ms - b.result.elapsed_ms)[0];
+        const best = this.pickBestFallbackResponse(session);
         if (best) {
-          session.synthesis = best.response_raw;
+          session.synthesis = best;
         }
         break;
       }
@@ -889,6 +898,61 @@ export class Orchestrator {
     session.degradation_events.push(event);
     this.renderer.onDegradation(event);
     return fatal;
+  }
+
+  /**
+   * Select the strongest available model by capability tier (see
+   * rateModelCapability). On a tie, prefer the higher config priority (lower
+   * `priority` number), then the earlier position in the list.
+   */
+  private selectStrongestModel(models: ModelConfig[]): ModelConfig | undefined {
+    if (models.length === 0) return undefined;
+    return models.reduce((best, m) => {
+      const bestTier = rateModelCapability(best);
+      const mTier = rateModelCapability(m);
+      if (mTier > bestTier) return m;
+      if (mTier === bestTier && m.priority < best.priority) return m;
+      return best;
+    });
+  }
+
+  /**
+   * Pick the best fallback response when synthesis fails. Prefers the answer
+   * with the highest aggregate peer-review score from the latest review stage;
+   * falls back to the fastest successful response when no review data exists.
+   */
+  private pickBestFallbackResponse(session: Session): string | undefined {
+    const responseStages = session.stages.filter(
+      s => (s.phase === 'broadcast' || s.phase === 'cross_examine') && s.status === 'completed',
+    );
+    const latestStage = responseStages[responseStages.length - 1];
+    const valid = (latestStage?.invocations ?? []).filter(i => !i.timed_out && i.response_raw);
+    if (valid.length === 0) return undefined;
+
+    // Prefer the highest aggregate review score from the latest review stage.
+    const reviewStages = session.stages.filter(s => s.phase === 'review' && s.status === 'completed');
+    const reviewStage = reviewStages[reviewStages.length - 1];
+    if (reviewStage) {
+      const expectedLabels = valid.map((_, i) => String.fromCharCode(65 + i));
+      const reviews = this.parseReviewStage(reviewStage, expectedLabels);
+      const scores = aggregateReviewScores(reviews);
+      if (scores.size > 0) {
+        let bestInv: Invocation | undefined;
+        let bestScore = -Infinity;
+        for (const inv of valid) {
+          const score = scores.get(inv.agent_id);
+          if (score !== undefined && score > bestScore) {
+            bestScore = score;
+            bestInv = inv;
+          }
+        }
+        if (bestInv) return bestInv.response_raw;
+      }
+    }
+
+    // Fallback: fastest successful response (original heuristic).
+    const fastest = [...valid].sort((a, b) => a.result.elapsed_ms - b.result.elapsed_ms)[0];
+    return fastest?.response_raw;
   }
 
   private groupByModel(agents: Agent[]): Agent[][] {

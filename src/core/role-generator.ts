@@ -17,6 +17,26 @@ export interface GeneratedRole {
   assigned_model: string;
 }
 
+/**
+ * Coarse capability tier inferred from a model's id/name.
+ * 3 = strong reasoning, 2 = balanced (also the default for unrecognized ids),
+ * 1 = fast/lightweight. Reusable across chairman selection (strongest wins),
+ * role-panel designer selection (prefer balanced), and model descriptions.
+ */
+export function rateModelCapability(m: ModelConfig): number {
+  const id = m.model ?? m.name;
+  if (/opus|pro|5\.[3-9]|o[34]/i.test(id)) return 3;
+  if (/sonnet|flash|gpt-[45]/i.test(id)) return 2;
+  if (/haiku|mini|lite|spark/i.test(id)) return 1;
+  return 2;
+}
+
+const CAPABILITY_TRAIT: Record<number, string> = {
+  3: 'strong reasoning',
+  2: 'balanced',
+  1: 'fast, concise',
+};
+
 function buildModelDescription(m: ModelConfig): string {
   const traits: string[] = [];
   const id = m.model ?? m.name;
@@ -27,10 +47,10 @@ function buildModelDescription(m: ModelConfig): string {
   // Invocation
   traits.push(m.invocation === 'cli' ? 'CLI mode' : 'API mode');
 
-  // Infer capabilities from model name
-  if (/opus|pro|5\.[3-9]|o[34]/i.test(id)) traits.push('strong reasoning');
-  if (/sonnet|flash|gpt-[45]/i.test(id)) traits.push('balanced');
-  if (/haiku|mini|lite|spark/i.test(id)) traits.push('fast, concise');
+  // Infer capability tier from model name (shared heuristic)
+  traits.push(CAPABILITY_TRAIT[rateModelCapability(m)]!);
+
+  // Infer additional capabilities from model name
   if (/codex/i.test(id)) traits.push('code-specialized');
   if (/gemini/i.test(id)) traits.push('multimodal, broad knowledge');
   if (/claude/i.test(id)) traits.push('careful analysis, nuanced');
@@ -95,17 +115,20 @@ IMPORTANT: Return ONLY the JSON array. The "assigned_model" field MUST match one
  * Generate roles and assign models in one AI call.
  * @param range Acceptable count interval; the LLM picks the size that fits the question.
  *              Pass `{min:N, max:N}` for legacy fixed-count behavior.
+ * @param roleGenModel Optional explicit model to design the panel. When omitted a
+ *              balanced-tier model is preferred (falling back to the fastest).
  */
 export async function generateRoles(
   question: string,
   range: AgentCountRange,
   adapter: InvocationAdapter,
   models: ModelConfig[],
+  roleGenModel?: ModelConfig,
 ): Promise<GeneratedRole[]> {
   const min = Math.max(1, range.min);
   const max = Math.max(min, range.max);
 
-  const genModel = pickFastestModel(models);
+  const genModel = roleGenModel ?? pickRoleGenModel(models);
   if (!genModel) return defaultRoles(min, models);
 
   const language = detectLanguage(question);
@@ -150,6 +173,20 @@ export function resolveModel(role: GeneratedRole, models: ModelConfig[]): ModelC
 
   // Fallback: round-robin
   return models[0]!;
+}
+
+/**
+ * Choose the model that designs the expert panel. Prefers a balanced-tier model
+ * (capable enough to reason about the panel, cheaper/faster than top-tier),
+ * breaking ties by config priority; falls back to the fastest model otherwise.
+ */
+function pickRoleGenModel(models: ModelConfig[]): ModelConfig | null {
+  if (models.length === 0) return null;
+  const balanced = models.filter(m => rateModelCapability(m) === 2);
+  if (balanced.length > 0) {
+    return [...balanced].sort((a, b) => a.priority - b.priority)[0]!;
+  }
+  return pickFastestModel(models);
 }
 
 function pickFastestModel(models: ModelConfig[]): ModelConfig | null {
@@ -204,7 +241,7 @@ function parseRoleResponse(raw: string, models: ModelConfig[]): GeneratedRole[] 
   }
 }
 
-function defaultRoles(count: number, models: ModelConfig[]): GeneratedRole[] {
+export function defaultRoles(count: number, models: ModelConfig[]): GeneratedRole[] {
   const defaults: GeneratedRole[] = [
     { name: '分析师', icon: '🔍', description: '注重严谨性和全面性的分析师',
       system_prompt: '你是一位注重严谨性和全面性的分析师。对任何论断先追问依据，系统性考虑边界情况和风险。结论先行，用数据和案例支撑观点。',

@@ -41,7 +41,7 @@ export async function runCouncil(question: string | undefined, options: CouncilO
 
   // Discover credentials + resolve models from config or env
   const credentialManager = await discoverCredentials();
-  const { models, chairman: configChairman, tuiMode } = resolveModels(credentialManager, { loadGeneralConfig: true });
+  const { models, chairman: configChairman, roleGenModel, tuiMode } = resolveModels(credentialManager, { loadGeneralConfig: true });
   const chairman = options.chairman ?? configChairman;
 
   if (models.length === 0) {
@@ -57,7 +57,7 @@ export async function runCouncil(question: string | undefined, options: CouncilO
 
   const adapter = buildAdapter(credentialManager);
   const renderer = await createRenderer({ question, mode: options.mode, json: options.json, tuiMode });
-  const orchestrator = new Orchestrator(adapter, renderer, models, chairman);
+  const orchestrator = new Orchestrator(adapter, renderer, models, chairman, undefined, roleGenModel);
 
   const parentSynthesis = options.follow ? await loadParentSynthesis(store, options.follow) : undefined;
 

@@ -54,6 +54,7 @@ export interface CouncilConfig {
   general: {
     default_mode: 'quick' | 'compare' | 'debate' | 'auto';
     default_chairman: string;
+    role_generator_model?: string;
     min_agents: number;
     max_agents: number;
     allow_same_model_agents: boolean;

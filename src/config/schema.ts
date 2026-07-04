@@ -50,6 +50,9 @@ export const CouncilConfigSchema = z.object({
   general: z.object({
     default_mode: z.enum(['quick', 'compare', 'debate', 'auto']).default('auto'),
     default_chairman: z.string().default(''),
+    // Model (by name) used to design the expert role panel. Empty → auto-pick a
+    // balanced-tier model.
+    role_generator_model: z.string().default(''),
     min_agents: z.number().int().min(1).default(2),
     max_agents: z.number().int().min(1).default(5),
     allow_same_model_agents: z.boolean().default(true),

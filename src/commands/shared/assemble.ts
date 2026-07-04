@@ -16,6 +16,8 @@ export interface ResolvedModels {
   models: ModelConfig[];
   /** Default chairman from council.yaml (only when loadGeneralConfig is set). */
   chairman?: string;
+  /** Role-panel designer model from council.yaml (only when loadGeneralConfig is set). */
+  roleGenModel?: ModelConfig;
   /** TUI mode from council.yaml, defaults to 'auto'. */
   tuiMode: 'auto' | 'always' | 'never';
 }
@@ -55,6 +57,7 @@ export function resolveModels(
   const loader = new ConfigLoader();
   let models: ModelConfig[];
   let chairman: string | undefined;
+  let roleGenModel: ModelConfig | undefined;
   let tuiMode: 'auto' | 'always' | 'never' = 'auto';
 
   if (loader.isConfigured()) {
@@ -63,6 +66,10 @@ export function resolveModels(
         const config = loader.loadCouncilConfig();
         models = loader.loadAllModels();
         chairman = config.general.default_chairman;
+        const roleGenName = config.general.role_generator_model;
+        if (roleGenName) {
+          roleGenModel = models.find(m => m.name === roleGenName);
+        }
         tuiMode = config.output.tui_mode;
       } catch (err) {
         process.stderr.write(
@@ -81,5 +88,5 @@ export function resolveModels(
     models = discoverModelsFromEnv(credentialManager);
   }
 
-  return { models, chairman, tuiMode };
+  return { models, chairman, roleGenModel, tuiMode };
 }
