@@ -10,12 +10,8 @@ const BOLD = '\x1b[1m';
 const DIM = '\x1b[2m';
 const RESET = '\x1b[0m';
 const CYAN = '\x1b[36m';
-const GREEN = '\x1b[32m';
 const YELLOW = '\x1b[33m';
-const RED = '\x1b[31m';
-const MAGENTA = '\x1b[35m';
 const BG_CYAN = '\x1b[46m\x1b[30m';
-const BG_DIM = '\x1b[48;5;238m\x1b[37m';
 const CLEAR = '\x1b[2J\x1b[H';
 
 const ROLE_ICONS: Record<string, string> = {
@@ -263,9 +259,6 @@ function renderUniqueInsights(
   summaries: Array<{ name: string; icon: string; points: string[] }>,
 ): void {
   if (summaries.length < 2) return;
-
-  // Find points that appear in only one agent's response
-  const allPoints = summaries.flatMap(s => s.points.map(p => ({ agent: s.name, icon: s.icon, point: p })));
 
   process.stderr.write(`${BOLD}Unique Perspectives${RESET}\n\n`);
 

@@ -3,7 +3,6 @@
  * Shows a filterable, arrow-navigable menu when user types /.
  */
 
-const BOLD = '\x1b[1m';
 const DIM = '\x1b[2m';
 const RESET = '\x1b[0m';
 const CYAN = '\x1b[36m';

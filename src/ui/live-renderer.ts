@@ -32,10 +32,6 @@ const SGR_MOUSE_RE = /\x1b\[<(\d+);(\d+);(\d+)[Mm]/;
 const WHEEL_STEP = 3;
 // cursor positioning uses absolute \x1b[row;colH only
 
-function stripAnsi(str: string): string {
-  return str.replace(/\x1b\[[0-9;]*m/g, '');
-}
-
 /** Display width of a single code point at index i. CJK/emoji = 2, ASCII = 1. */
 function charWidth(str: string, i: number): number {
   const code = str.charCodeAt(i);
@@ -69,11 +65,6 @@ function visibleWidth(str: string): number {
   }
   return w;
 }
-
-const ROLE_ICONS: Record<string, string> = {
-  analyst: '🔍', engineer: '⚙️', innovator: '💡',
-  critic: '🎯', pragmatist: '📐', chairman: '👑',
-};
 
 interface TabState {
   id: string;

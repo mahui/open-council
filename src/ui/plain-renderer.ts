@@ -14,15 +14,6 @@ const PHASE_LABELS: Record<string, string> = {
   synthesis: 'Chairman Synthesizing',
 };
 
-const ROLE_ICONS: Record<string, string> = {
-  analyst: '🔍',
-  engineer: '⚙️',
-  innovator: '💡',
-  critic: '🎯',
-  pragmatist: '📐',
-  chairman: '👑',
-};
-
 const DIM = '\x1b[2m';
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
@@ -59,7 +50,7 @@ export class PlainRenderer implements Renderer {
     process.stderr.write(`  ${DIM}${agent.role} [${agent.config.name}] thinking...${RESET}\n`);
   }
 
-  onAgentProgress(agent: Agent, chunk: string): void {
+  onAgentProgress(_agent: Agent, chunk: string): void {
     if (this.inSynthesis) {
       // Buffer synthesis for markdown rendering at completion
       this.synthBuffer += chunk;
@@ -71,7 +62,6 @@ export class PlainRenderer implements Renderer {
   onAgentComplete(agent: Agent, result: InvocationResult): void {
     const time = (result.elapsed_ms / 1000).toFixed(1);
     const mode = result.invocation_mode === 'api' ? 'API' : 'CLI';
-    const icon = ROLE_ICONS[agent.role] ?? '🤖';
 
     if (this.inSynthesis) {
       // Synthesis complete — render buffered markdown
