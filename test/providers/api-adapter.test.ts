@@ -57,6 +57,7 @@ import type { ModelConfig } from '../../src/types/config.js';
 import type { CredentialManager } from '../../src/providers/credentials/discovery.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { completeSimple, streamSimple } from '@mariozechner/pi-ai';
+import { recordFailure, recordSuccess } from '../../src/providers/health.js';
 
 // --------------------------------------------------------------------------
 // Helpers
@@ -513,5 +514,126 @@ describe('ApiAdapter.invoke — timeout guard', () => {
     const err = await captured;
     expect(err).toBeInstanceOf(InvocationTimeoutError);
     expect((err as Error).message).toContain('120s');
+  });
+});
+
+// --------------------------------------------------------------------------
+// Retry + error classification — a transient failure is retried with backoff,
+// a permanent failure is not, and only exhausted/permanent failures are reported
+// to the circuit breaker. Uses an injected `sleep` so no test actually waits and
+// the backoff rhythm can be asserted exactly.
+// --------------------------------------------------------------------------
+
+describe('ApiAdapter.invoke — retry + error classification', () => {
+  let credManager: CredentialManager;
+  let sleepDelays: number[];
+  let adapter: ApiAdapter;
+
+  const successMessage = {
+    stopReason: 'stop',
+    content: [{ type: 'text', text: 'ok' }],
+    usage: { input: 3, output: 4 },
+    errorMessage: undefined,
+  };
+
+  function errorMessage(text: string): unknown {
+    // Shape pi-ai returns on an API failure: stopReason 'error' + errorMessage. invokeComplete
+    // turns this into an InvocationError whose message embeds `text`, which classifyError reads.
+    return { stopReason: 'error', content: [], usage: { input: 0, output: 0 }, errorMessage: text };
+  }
+
+  function retryConfig(overrides: Partial<ModelConfig> = {}): ModelConfig {
+    return makeConfig({
+      api_base_url: 'https://api.example.com/v1',
+      api_key_env: 'CUSTOM_API_KEY',
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    vi.mocked(completeSimple).mockReset();
+    vi.mocked(recordFailure).mockReset();
+    vi.mocked(recordSuccess).mockReset();
+    sleepDelays = [];
+    credManager = makeFakeCredentialManager();
+    // Inject a synchronous sleep that records the requested delay instead of waiting.
+    adapter = new ApiAdapter(credManager, {
+      sleep: async (ms: number) => { sleepDelays.push(ms); },
+    });
+    process.env['CUSTOM_API_KEY'] = 'sk-test';
+  });
+
+  afterEach(() => {
+    delete process.env['CUSTOM_API_KEY'];
+    vi.restoreAllMocks();
+  });
+
+  it('503 then success → retried once, resolves, no failure recorded', async () => {
+    vi.mocked(completeSimple)
+      .mockResolvedValueOnce(errorMessage('503 service unavailable') as never)
+      .mockResolvedValueOnce(successMessage as never);
+
+    const result = await adapter.invoke(retryConfig(), 'prompt');
+
+    expect(result.response).toBe('ok');
+    expect(vi.mocked(completeSimple)).toHaveBeenCalledTimes(2);
+    expect(sleepDelays).toHaveLength(1);
+    // First backoff ~1s (base 1000 + up to 25% jitter).
+    expect(sleepDelays[0]).toBeGreaterThanOrEqual(1000);
+    expect(sleepDelays[0]).toBeLessThan(1250);
+    // A retry that ultimately succeeded must not touch the circuit breaker.
+    expect(vi.mocked(recordFailure)).not.toHaveBeenCalled();
+    expect(vi.mocked(recordSuccess)).toHaveBeenCalledTimes(1);
+  });
+
+  it('403 forbidden → not retried, fails immediately, recorded as permanent', async () => {
+    vi.mocked(completeSimple).mockResolvedValue(errorMessage('403 forbidden') as never);
+
+    await expect(adapter.invoke(retryConfig(), 'prompt')).rejects.toThrow(InvocationError);
+
+    expect(vi.mocked(completeSimple)).toHaveBeenCalledTimes(1);
+    expect(sleepDelays).toHaveLength(0);
+    expect(vi.mocked(recordFailure)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(recordFailure)).toHaveBeenCalledWith('custom:myservice', 'permanent', false);
+  });
+
+  it('retry rhythm: two 503s then success → backoff ~1s then ~4s (exponential)', async () => {
+    vi.mocked(completeSimple)
+      .mockResolvedValueOnce(errorMessage('503 unavailable') as never)
+      .mockResolvedValueOnce(errorMessage('503 unavailable') as never)
+      .mockResolvedValueOnce(successMessage as never);
+
+    const result = await adapter.invoke(retryConfig(), 'prompt');
+
+    expect(result.response).toBe('ok');
+    expect(vi.mocked(completeSimple)).toHaveBeenCalledTimes(3);
+    expect(sleepDelays).toHaveLength(2);
+    // Exponential base-4 backoff with jitter: ~1s then ~4s.
+    expect(sleepDelays[0]).toBeGreaterThanOrEqual(1000);
+    expect(sleepDelays[0]).toBeLessThan(1250);
+    expect(sleepDelays[1]).toBeGreaterThanOrEqual(4000);
+    expect(sleepDelays[1]).toBeLessThan(5000);
+    expect(vi.mocked(recordFailure)).not.toHaveBeenCalled();
+  });
+
+  it('persistent 503 → retries exhausted (2), then recorded as retryable failure', async () => {
+    vi.mocked(completeSimple).mockResolvedValue(errorMessage('503 unavailable') as never);
+
+    await expect(adapter.invoke(retryConfig(), 'prompt')).rejects.toThrow(InvocationError);
+
+    // Initial attempt + 2 retries = 3 calls.
+    expect(vi.mocked(completeSimple)).toHaveBeenCalledTimes(3);
+    expect(sleepDelays).toHaveLength(2);
+    expect(vi.mocked(recordFailure)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(recordFailure)).toHaveBeenCalledWith('custom:myservice', 'retryable', false);
+  });
+
+  it('429 rate limit → retried, and on exhaustion recorded with rateLimited=true', async () => {
+    vi.mocked(completeSimple).mockResolvedValue(errorMessage('429 rate limit exceeded') as never);
+
+    await expect(adapter.invoke(retryConfig(), 'prompt')).rejects.toThrow(InvocationError);
+
+    expect(vi.mocked(completeSimple)).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(recordFailure)).toHaveBeenCalledWith('custom:myservice', 'retryable', true);
   });
 });

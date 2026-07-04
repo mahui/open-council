@@ -27,6 +27,16 @@ export interface HealthStatus {
 
 export type OnChunk = (chunk: string) => void;
 
+/**
+ * Classification of an API invocation failure, used to decide retry behaviour and
+ * how the failure feeds the circuit breaker.
+ * - `retryable`: transient (429, 5xx, provider overloaded, network reset) — worth an
+ *   exponential-backoff retry before giving up.
+ * - `permanent`: caller-side (401/403 auth, 400/404/422 bad request) — retrying cannot help.
+ * - `timeout`: the call exceeded its deadline; already burned a lot of wall-clock, so not retried.
+ */
+export type ApiErrorClass = 'retryable' | 'permanent' | 'timeout';
+
 export interface InvocationAdapter {
   invoke(config: ModelConfig, prompt: string, onChunk?: OnChunk): Promise<InvocationResult>;
   healthCheck(config: ModelConfig): Promise<HealthStatus>;

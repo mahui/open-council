@@ -1,5 +1,6 @@
 import { initDatabase, closeDatabase } from '../storage/database.js';
 import { PATHS } from '../config/paths.js';
+import type { ApiErrorClass } from '../types/provider.js';
 
 interface ProviderHealthRow {
   provider: string;
@@ -147,15 +148,38 @@ export function recordSuccess(provider: string): void {
   saveState(provider, state);
 }
 
-/** Record failed call. Opens circuit after threshold, increases throttle for 429. */
-export function recordFailure(provider: string, is429: boolean): void {
+/**
+ * Record a failed call against the circuit breaker.
+ *
+ * The `errorClass` reflects the *final* outcome as decided by the adapter:
+ *  - `retryable` failures are only reported here after the adapter's in-line retries were
+ *    exhausted, so a single transient blip that a retry absorbs never reaches the breaker
+ *    (retries are consumed at the adapter layer, not accumulated as consecutive failures).
+ *  - `timeout` and `permanent` (auth/param) failures are reported immediately.
+ * All three count toward the consecutive-failure threshold: after CIRCUIT_BREAKER_THRESHOLD
+ * genuine failures in a row we open the circuit and fall back to CLI. `CIRCUIT_BREAKER_THRESHOLD`
+ * (3) is now measured in fully-retried invocations, which keeps it conservative but meaningful.
+ *
+ * `rateLimited` (a subset of `retryable`) additionally widens the adaptive throttle so we back
+ * off the provider even while the circuit stays closed.
+ */
+export function recordFailure(
+  provider: string,
+  errorClass: ApiErrorClass,
+  rateLimited = false,
+): void {
   const state = getState(provider);
   state.consecutiveFailures++;
   state.lastFailureTime = Date.now();
   state.lastRequestTime = Date.now();
 
-  if (is429) {
+  if (rateLimited) {
     state.throttleMs = Math.min(MAX_THROTTLE_MS, Math.floor(state.throttleMs * 1.5));
+    state.status = 'degraded';
+  } else if (errorClass === 'retryable' || errorClass === 'timeout') {
+    // Transient provider instability (5xx / network / hung) — mark degraded so the provider
+    // is visibly flaky before the circuit fully opens. Permanent (auth/param) failures are
+    // misconfiguration, not instability, so they still count but don't flag "degraded".
     state.status = 'degraded';
   }
 

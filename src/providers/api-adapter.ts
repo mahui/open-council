@@ -12,6 +12,7 @@ import type { InvocationAdapter, InvocationResult, HealthStatus, OnChunk } from 
 import { InvocationError, InvocationTimeoutError } from '../types/errors.js';
 import type { CredentialManager } from './credentials/discovery.js';
 import { throttle, recordSuccess, recordFailure, getProviderStatus } from './health.js';
+import { classifyError, isRateLimit } from './error-classifier.js';
 
 /**
  * Map from provider names (legacy or pi-ai) to all related pi-ai providers.
@@ -34,6 +35,27 @@ const DEBUG = !!process.env['COUNCIL_DEBUG'];
  * models can legitimately take minutes; a too-low default would kill valid slow responses.
  */
 const DEFAULT_TIMEOUT_SECONDS = 120;
+
+/**
+ * Retry policy for transient (retryable) API failures. Two retries with exponential backoff
+ * (base 1s, factor 4 → ~1s then ~4s, plus jitter) balances riding out a brief 429/503 blip
+ * against not stalling a debate for too long before falling back to CLI. Timeout and permanent
+ * failures are never retried.
+ */
+const DEFAULT_MAX_RETRIES = 2;
+const DEFAULT_RETRY_BASE_MS = 1000;
+const RETRY_BACKOFF_FACTOR = 4;
+const RETRY_JITTER_FRACTION = 0.25;
+
+/**
+ * Injectable knobs — production uses the defaults; tests inject a synchronous/fake `sleep`
+ * (or override the retry counts/timing) so backoff can be asserted without real waiting.
+ */
+export interface ApiAdapterOptions {
+  sleep?: (ms: number) => Promise<void>;
+  maxRetries?: number;
+  retryBaseMs?: number;
+}
 
 function debug(msg: string): void {
   if (DEBUG) process.stderr.write(`[api-adapter] ${msg}\n`);
@@ -102,7 +124,15 @@ function createTimeoutGuard(seconds: number, modelName: string): TimeoutGuard {
 }
 
 export class ApiAdapter implements InvocationAdapter {
-  constructor(private credentialManager: CredentialManager) {}
+  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly maxRetries: number;
+  private readonly retryBaseMs: number;
+
+  constructor(private credentialManager: CredentialManager, options: ApiAdapterOptions = {}) {
+    this.sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.retryBaseMs = options.retryBaseMs ?? DEFAULT_RETRY_BASE_MS;
+  }
 
   async invoke(config: ModelConfig, prompt: string, onChunk?: OnChunk): Promise<InvocationResult> {
     const provider = config.provider!;
@@ -117,46 +147,18 @@ export class ApiAdapter implements InvocationAdapter {
     // Isolated from the OAuth/env path so existing call paths remain untouched.
     if (config.api_base_url) {
       debug(`invoke: provider=${provider}, model=${config.model}, streaming=${!!onChunk}, customEndpoint=true`);
-      await throttle(provider);
-      const start = Date.now();
-      try {
+      return this.executeWithHealth(provider, config, prompt, onChunk, async () => {
         const model = this.buildCustomModel(config);
         const apiKey = await this.resolveApiKey(config);
         debug(`custom model built: id=${model.id}, baseUrl=${model.baseUrl}, apiKeyLen=${apiKey.length}, customEndpoint=true`);
-
-        const result = onChunk
-          ? await this.invokeStreaming(model, prompt, apiKey, config, onChunk)
-          : await this.invokeComplete(model, prompt, apiKey, config);
-
-        debug(`result: responseLen=${result.response.length}, tokens=${JSON.stringify(result.token_usage)}, customEndpoint=true`);
-
-        recordSuccess(provider);
-        return {
-          ...result,
-          elapsed_ms: Date.now() - start,
-        };
-      } catch (err) {
-        debug(`error (customEndpoint=true): ${err instanceof Error ? err.message : String(err)}`);
-        const is429 = err instanceof Error && (err.message.includes('429') || err.message.includes('rate'));
-        recordFailure(provider, is429);
-        // Preserve recognisable error types (timeout / invocation) so callers can distinguish them.
-        if (err instanceof InvocationTimeoutError || err instanceof InvocationError) throw err;
-        throw new InvocationError(
-          config.name, 'api',
-          err instanceof Error ? err.message : String(err),
-        );
-      }
+        return { model, apiKey };
+      });
     }
 
     const piaiProvider = this.credentialManager.getPiaiProvider(provider);
     debug(`invoke: provider=${provider}, piaiProvider=${piaiProvider}, model=${config.model}, streaming=${!!onChunk}`);
 
-    // Adaptive throttle
-    await throttle(provider);
-
-    const start = Date.now();
-
-    try {
+    return this.executeWithHealth(provider, config, prompt, onChunk, async () => {
       const model = this.resolveModel(piaiProvider, config.model ?? config.name);
       debug(`resolved model: id=${model.id}, provider=${model.provider}, api=${model.api}, baseUrl=${model.baseUrl}`);
 
@@ -165,22 +167,52 @@ export class ApiAdapter implements InvocationAdapter {
       const apiKey = await this.credentialManager.getApiKey(model.provider)
         .catch(() => this.credentialManager.getApiKey(provider));
       debug(`apiKey prefix: ${apiKey.substring(0, 12)}...`);
+      return { model, apiKey };
+    });
+  }
 
-      const result = onChunk
-        ? await this.invokeStreaming(model, prompt, apiKey, config, onChunk)
-        : await this.invokeComplete(model, prompt, apiKey, config);
+  /**
+   * Shared invocation tail: throttle → build model/key → invoke (with retry) → record health.
+   * `build` resolves the model + apiKey lazily so both the custom-endpoint and pi-ai-registry
+   * paths reuse identical retry, classification, and circuit-breaker bookkeeping.
+   *
+   * On failure the error is classified once (after retries are exhausted) and reported to the
+   * circuit breaker with its category, so a single transient blip absorbed by a retry never
+   * accumulates as a consecutive failure. Recognisable error types are re-thrown intact so the
+   * AutoAdapter can distinguish timeout / invocation failures on its way to CLI fallback.
+   */
+  private async executeWithHealth(
+    provider: string,
+    config: ModelConfig,
+    prompt: string,
+    onChunk: OnChunk | undefined,
+    build: () => Promise<{ model: Model<Api>; apiKey: string }>,
+  ): Promise<InvocationResult> {
+    await throttle(provider);
+    const start = Date.now();
+    try {
+      const { model, apiKey } = await build();
 
+      // Track streamed emission so a mid-stream failure is not retried (would double-emit chunks).
+      let emitted = 0;
+      const wrappedChunk: OnChunk | undefined = onChunk
+        ? (c): void => { emitted++; onChunk(c); }
+        : undefined;
+
+      const result = await this.withRetry(
+        () => wrappedChunk
+          ? this.invokeStreaming(model, prompt, apiKey, config, wrappedChunk)
+          : this.invokeComplete(model, prompt, apiKey, config),
+        () => emitted === 0,
+      );
       debug(`result: responseLen=${result.response.length}, tokens=${JSON.stringify(result.token_usage)}`);
 
       recordSuccess(provider);
-      return {
-        ...result,
-        elapsed_ms: Date.now() - start,
-      };
+      return { ...result, elapsed_ms: Date.now() - start };
     } catch (err) {
-      debug(`error: ${err instanceof Error ? err.message : String(err)}`);
-      const is429 = err instanceof Error && (err.message.includes('429') || err.message.includes('rate'));
-      recordFailure(provider, is429);
+      const cls = classifyError(err);
+      debug(`error (class=${cls}): ${err instanceof Error ? err.message : String(err)}`);
+      recordFailure(provider, cls, isRateLimit(err));
       // Preserve recognisable error types (timeout / invocation) so callers can distinguish them.
       if (err instanceof InvocationTimeoutError || err instanceof InvocationError) throw err;
       throw new InvocationError(
@@ -188,6 +220,38 @@ export class ApiAdapter implements InvocationAdapter {
         err instanceof Error ? err.message : String(err),
       );
     }
+  }
+
+  /**
+   * Run `op`, retrying only `retryable` failures with exponential backoff + jitter, up to
+   * `maxRetries` times. `timeout` (already burned the deadline) and `permanent` (auth/param)
+   * failures throw immediately. `canRetry` lets the caller veto a retry that would be unsafe
+   * (e.g. streaming that already emitted chunks). The final failure is re-thrown for the caller
+   * to classify and report to the circuit breaker exactly once.
+   */
+  private async withRetry<T>(op: () => Promise<T>, canRetry: () => boolean): Promise<T> {
+    let attempt = 0;
+    for (;;) {
+      try {
+        return await op();
+      } catch (err) {
+        const cls = classifyError(err);
+        if (cls !== 'retryable' || attempt >= this.maxRetries || !canRetry()) {
+          throw err;
+        }
+        const delay = this.backoffDelay(attempt);
+        debug(`retryable failure (attempt ${attempt + 1}/${this.maxRetries}), backing off ${delay}ms: ${err instanceof Error ? err.message : String(err)}`);
+        attempt++;
+        await this.sleep(delay);
+      }
+    }
+  }
+
+  /** Exponential backoff with jitter: base·factor^attempt plus up to RETRY_JITTER_FRACTION extra. */
+  private backoffDelay(attempt: number): number {
+    const base = this.retryBaseMs * Math.pow(RETRY_BACKOFF_FACTOR, attempt);
+    const jitter = Math.floor(Math.random() * base * RETRY_JITTER_FRACTION);
+    return base + jitter;
   }
 
   async healthCheck(config: ModelConfig): Promise<HealthStatus> {
