@@ -71,9 +71,20 @@ export interface DegradationEvent {
 }
 
 export interface ConsensusResult {
+  /**
+   * Reviewer-to-reviewer agreement (0-1), independent of provider diversity.
+   * ★ Stop criterion for the cross-examine loop ★ = rawAgreement × rho.
+   */
+  agreement_score: number;
+  /**
+   * Diversity-discounted external consensus score = agreement_score ×
+   * model_diversity_factor. Used for display / query / DB. Semantics unchanged.
+   */
   consensus_score: number;
   dimension_scores: Record<string, { score: number; divergence: number }>;
+  /** Model diversity credibility factor δ (0-1), an independent reliability qualifier. */
   model_diversity_factor: number;
+  /** @deprecated Alias of `agreement_score`, retained for reading old data. Always equals `agreement_score`. */
   raw_agreement: number;
 }
 

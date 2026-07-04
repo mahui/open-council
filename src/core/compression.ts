@@ -160,13 +160,15 @@ export function needsCompression(
  */
 export function aggregateReviewScores(
   reviews: readonly ParsedReview[],
-  labelToAgentId: ReadonlyMap<string, string>,
+  labelToAgentId?: ReadonlyMap<string, string>,
 ): Map<string, number> {
   const scoreSums = new Map<string, { total: number; count: number }>();
 
   for (const review of reviews) {
     if (review.status === 'parse_error') continue;
-    const agentId = labelToAgentId.get(review.label);
+    // Prefer the resolved global id backfilled by the orchestrator; fall back
+    // to the (optional) label map for legacy / full-set paths.
+    const agentId = review.reviewed_agent_id ?? labelToAgentId?.get(review.label);
     if (!agentId) continue;
 
     const entry = scoreSums.get(agentId) ?? { total: 0, count: 0 };

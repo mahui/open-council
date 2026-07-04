@@ -109,6 +109,103 @@ describe('calculateConsensus', () => {
     const result = calculateConsensus(reviews, agents);
     expect(result.consensus_score).toBe(0); // Only 1 valid review
   });
+
+  it('should not count filler (parse_error) reviews toward consensus', () => {
+    // Three reviewers score answers A and B; a filler answer C (parse_error)
+    // must be ignored entirely. Three raters → no small-sample rho penalty.
+    const reviews: ParsedReview[] = [];
+    for (const reviewer of ['r1', 'r2', 'r3']) {
+      reviews.push({ ...makeReview('A', 9), reviewer_agent_id: reviewer });
+      reviews.push({ ...makeReview('B', 6), reviewer_agent_id: reviewer });
+      reviews.push({ ...makeReview('C', 5, 'valid'), status: 'parse_error', reviewer_agent_id: reviewer });
+    }
+    const agents = [
+      makeAgent('claude', 'anthropic'),
+      makeAgent('gemini', 'google'),
+      makeAgent('gpt', 'openai'),
+    ];
+
+    const result = calculateConsensus(reviews, agents);
+    // C's filler must not appear as a ranked answer; the reviewers agree
+    // perfectly on A vs B → high agreement.
+    expect(result.agreement_score).toBeGreaterThanOrEqual(0.6);
+  });
+
+  it('should expose agreement_score = raw_agreement and consensus_score = agreement × delta', () => {
+    const reviews = [
+      makeReview('A', 9),
+      makeReview('A', 9),
+      makeReview('B', 6),
+      makeReview('B', 6),
+    ];
+    const agents = [makeAgent('claude', 'anthropic'), makeAgent('gemini', 'google')];
+
+    const result = calculateConsensus(reviews, agents);
+    expect(result.agreement_score).toBe(result.raw_agreement);
+    expect(result.consensus_score).toBeCloseTo(
+      result.agreement_score * result.model_diversity_factor,
+      10,
+    );
+  });
+
+  it('single-provider high-agreement panel reaches the 0.6 stop on agreement_score while consensus_score is delta-discounted', () => {
+    // 3 same-provider agents, 3 reviewers, strong concordance on the ranking.
+    const reviews: ParsedReview[] = [];
+    for (const reviewer of ['r1', 'r2', 'r3']) {
+      reviews.push({ ...makeReview('A', 9), reviewer_agent_id: reviewer });
+      reviews.push({ ...makeReview('B', 6), reviewer_agent_id: reviewer });
+      reviews.push({ ...makeReview('C', 3), reviewer_agent_id: reviewer });
+    }
+    const agents = [
+      makeAgent('claude-a', 'anthropic'),
+      makeAgent('claude-b', 'anthropic'),
+      makeAgent('claude-c', 'anthropic'),
+    ];
+
+    const result = calculateConsensus(reviews, agents);
+    // Stop criterion crosses the threshold despite a single provider …
+    expect(result.agreement_score).toBeGreaterThanOrEqual(0.6);
+    // … but the displayed consensus_score is folded down by delta (D=1 → ×0.7).
+    expect(result.model_diversity_factor).toBeCloseTo((1 / 3) * 0.7, 10);
+    expect(result.consensus_score).toBeLessThan(result.agreement_score);
+    expect(result.consensus_score).toBeLessThan(0.6);
+  });
+
+  it('groups answers by reviewed_agent_id when present (label collisions across reviewers)', () => {
+    // Per-reviewer anonymization: label "A" means a DIFFERENT answer to each
+    // reviewer. Grouping by reviewed_agent_id must keep answers separate;
+    // grouping by label would wrongly merge them.
+    const reviews: ParsedReview[] = [];
+    for (const reviewer of ['r1', 'r2', 'r3']) {
+      reviews.push({ ...makeReview('A', 9), reviewer_agent_id: reviewer, reviewed_agent_id: 'ans-x' });
+      reviews.push({ ...makeReview('B', 3), reviewer_agent_id: reviewer, reviewed_agent_id: 'ans-y' });
+    }
+    const agents = [
+      makeAgent('claude', 'anthropic'),
+      makeAgent('gemini', 'google'),
+      makeAgent('gpt', 'openai'),
+    ];
+
+    const byId = calculateConsensus(reviews, agents);
+    // All reviewers agree ans-x ≫ ans-y → high agreement.
+    expect(byId.agreement_score).toBeGreaterThanOrEqual(0.6);
+  });
+
+  it('falls back to label grouping when reviewed_agent_id is absent (legacy path)', () => {
+    const reviews: ParsedReview[] = [];
+    for (const reviewer of ['r1', 'r2', 'r3']) {
+      reviews.push({ ...makeReview('A', 9), reviewer_agent_id: reviewer });
+      reviews.push({ ...makeReview('B', 3), reviewer_agent_id: reviewer });
+    }
+    const agents = [
+      makeAgent('claude', 'anthropic'),
+      makeAgent('gemini', 'google'),
+      makeAgent('gpt', 'openai'),
+    ];
+
+    const result = calculateConsensus(reviews, agents);
+    expect(result.agreement_score).toBeGreaterThanOrEqual(0.6);
+  });
 });
 
 describe('mean', () => {

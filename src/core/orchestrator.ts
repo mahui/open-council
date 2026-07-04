@@ -44,7 +44,13 @@ const PHASE_SEQUENCES: Record<Exclude<DebateMode, 'auto'>, DebatePhase[]> = {
 };
 
 const MAX_DEBATE_ROUNDS = 3;
-const CONSENSUS_THRESHOLD = 0.6;
+/**
+ * Cross-examine stop threshold, compared against `agreement_score` (reviewer
+ * concordance, independent of provider diversity). Using agreement_score here
+ * — rather than the diversity-discounted consensus_score — ensures a
+ * single-provider panel can still reach a stop when reviewers actually agree.
+ */
+const AGREEMENT_STOP_THRESHOLD = 0.6;
 
 export class Orchestrator {
   constructor(
@@ -94,12 +100,12 @@ export class Orchestrator {
     let fatal = false;
     while (round < MAX_DEBATE_ROUNDS - 1) {
       const consensus = session.consensus;
-      if (!consensus || consensus.consensus_score >= CONSENSUS_THRESHOLD) break;
+      if (!consensus || consensus.agreement_score >= AGREEMENT_STOP_THRESHOLD) break;
 
       round++;
       this.renderer.onDegradation({
         phase: 'consensus',
-        reason: `Consensus low (${consensus.consensus_score.toFixed(2)})`,
+        reason: `Agreement low (${consensus.agreement_score.toFixed(2)})`,
         impact: `Round ${round + 1}: initiating cross-examination`,
       });
 
@@ -588,12 +594,21 @@ export class Orchestrator {
       .filter(i => !i.timed_out && i.response_raw)
       .map((_, i) => String.fromCharCode(65 + i));
 
-    // Parse each review response, tagging with the reviewer's agent_id
+    // Resolve each review's label back to the global reviewed agent_id via the
+    // shuffle-aware label_map persisted by executeReview (global baseline).
+    const labelMap = reviewStage.label_map ?? {};
+
+    // Parse each review response, tagging with the reviewer's agent_id and the
+    // resolved reviewed_agent_id (falls back to label inside consensus when absent).
     const allReviews = reviewStage.invocations
       .filter(inv => inv.response_raw)
       .flatMap(inv => {
         const result = parseReviewResponse(inv.response_raw, expectedLabels);
-        return result.reviews.map(r => ({ ...r, reviewer_agent_id: inv.agent_id }));
+        return result.reviews.map(r => ({
+          ...r,
+          reviewer_agent_id: inv.agent_id,
+          reviewed_agent_id: labelMap[r.label],
+        }));
       });
 
     // Calculate consensus
@@ -655,7 +670,12 @@ export class Orchestrator {
         .filter(inv => inv.response_raw)
         .flatMap(inv => {
           const result = parseReviewResponse(inv.response_raw, expectedLabels);
-          return result.reviews;
+          // Backfill the resolved reviewed agent id (global baseline); the
+          // labelToAgentId map remains as a fallback for legacy paths.
+          return result.reviews.map(r => ({
+            ...r,
+            reviewed_agent_id: labelToAgentId.get(r.label),
+          }));
         });
 
       const aggregatedScores = aggregateReviewScores(allReviews, labelToAgentId);

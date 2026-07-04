@@ -65,7 +65,7 @@ describe('parseReviewResponse', () => {
     expect(result.reviews[0]!.scores.overall).toBe(5);
   });
 
-  it('should fill missing labels with partial status', () => {
+  it('should mark missing-label filler entries as parse_error (excluded from consensus)', () => {
     const raw = JSON.stringify({
       reviews: [{
         label: 'A',
@@ -78,7 +78,23 @@ describe('parseReviewResponse', () => {
 
     const result = parseReviewResponse(raw, ['A', 'B']);
     expect(result.reviews).toHaveLength(2);
+    const reviewA = result.reviews.find(r => r.label === 'A');
     const reviewB = result.reviews.find(r => r.label === 'B');
-    expect(reviewB!.status).toBe('partial');
+    // A is real data; B is a pure filler placeholder (no data) → parse_error so
+    // consensus (which admits valid|partial only) never counts its filler 5s.
+    expect(reviewA!.status).toBe('valid');
+    expect(reviewB!.status).toBe('parse_error');
+    expect(reviewB!.scores.overall).toBe(5);
+  });
+
+  it('should keep regex-recovered reviews as partial (real extracted scores)', () => {
+    // No JSON block, but a scannable "Response A ... overall: 7" line → regex path.
+    const raw = 'Response A is decent. accuracy: 8 completeness: 6 overall: 7';
+
+    const result = parseReviewResponse(raw, ['A']);
+    expect(result.parseMethod).toBe('regex');
+    expect(result.reviews).toHaveLength(1);
+    expect(result.reviews[0]!.status).toBe('partial');
+    expect(result.reviews[0]!.scores.overall).toBe(7);
   });
 });

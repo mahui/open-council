@@ -4,52 +4,62 @@ import type { InvocationAdapter, InvocationResult, HealthStatus } from '../../sr
 import type { ModelConfig } from '../../src/types/config.js';
 import type { Renderer } from '../../src/ui/renderer.js';
 
+/**
+ * Branch on prompt content rather than a fragile call counter. Role generation,
+ * broadcast, review and synthesis calls interleave (and multi-round debates
+ * repeat review), so counting calls mis-routes responses. Each prompt kind
+ * carries a stable marker string we can match on.
+ */
 function createMockAdapter(): InvocationAdapter {
-  let callCount = 0;
+  let reviewCount = 0;
   return {
-    invoke: vi.fn().mockImplementation(async () => {
-      callCount++;
-      const isBroadcast = callCount <= 3; // First 3 calls are broadcast
-      const isReview = callCount > 3 && callCount <= 6; // Next 3 are review
+    invoke: vi.fn().mockImplementation(async (_config: unknown, prompt: string) => {
+      const base = {
+        elapsed_ms: 500 + Math.random() * 2000,
+        invocation_mode: 'api' as const,
+        http_status: 200,
+        token_usage: { input_tokens: 200, output_tokens: 400 },
+        timed_out: false,
+      };
 
-      if (isReview) {
-        // Return JSON review format
+      // Role generation prompt → return a JSON role array so the panel is well-formed.
+      if (prompt.includes('multi-expert debate panel')) {
         return {
-          response: JSON.stringify({
-            reviews: [
-              {
-                label: 'A',
-                scores: { accuracy: 8, completeness: 7, practicality: 9, insight: 6, overall: 8 },
-                strengths: 'Good analysis',
-                weaknesses: 'Could be more specific',
-                ranking: 1,
-              },
-              {
-                label: 'B',
-                scores: { accuracy: 7, completeness: 8, practicality: 7, insight: 7, overall: 7 },
-                strengths: 'Thorough',
-                weaknesses: 'Verbose',
-                ranking: 2,
-              },
-            ],
-          }),
-          elapsed_ms: 500 + Math.random() * 2000,
-          invocation_mode: 'api' as const,
-          http_status: 200,
-          token_usage: { input_tokens: 200, output_tokens: 400 },
-          timed_out: false,
+          ...base,
+          response: JSON.stringify([
+            { name: 'Analyst', icon: '🔍', description: 'analysis', system_prompt: 'You analyze.', assigned_model: 'claude' },
+            { name: 'Engineer', icon: '⚙️', description: 'engineering', system_prompt: 'You build.', assigned_model: 'gemini' },
+            { name: 'Critic', icon: '🎯', description: 'critique', system_prompt: 'You challenge.', assigned_model: 'claude' },
+          ]),
         } satisfies InvocationResult;
       }
 
+      // Peer-review prompt → return a JSON review scoring the anonymized answers.
+      // High agreement (identical scores across reviewers) so the debate reaches
+      // its stop criterion after the first round.
+      if (prompt.includes('peer reviewer')) {
+        reviewCount++;
+        return {
+          ...base,
+          response: JSON.stringify({
+            reviews: [
+              { label: 'A', scores: { accuracy: 9, completeness: 9, practicality: 9, insight: 9, overall: 9 }, strengths: 'Strong', weaknesses: 'Minor', ranking: 1 },
+              { label: 'B', scores: { accuracy: 8, completeness: 8, practicality: 8, insight: 8, overall: 8 }, strengths: 'Solid', weaknesses: 'Minor', ranking: 2 },
+              { label: 'C', scores: { accuracy: 7, completeness: 7, practicality: 7, insight: 7, overall: 7 }, strengths: 'Adequate', weaknesses: 'Some', ranking: 3 },
+            ],
+          }),
+        } satisfies InvocationResult;
+      }
+
+      // Synthesis (Chairman) prompt.
+      if (prompt.includes('Chairman')) {
+        return { ...base, response: 'Synthesized conclusion combining all expert perspectives.' } satisfies InvocationResult;
+      }
+
+      // Otherwise a broadcast / cross-examine response.
       return {
-        response: isBroadcast
-          ? `Expert analysis of the topic from perspective ${callCount}. Redis is a great choice for caching.`
-          : `Synthesized conclusion combining all expert perspectives.`,
-        elapsed_ms: 1000 + Math.random() * 3000,
-        invocation_mode: 'api' as const,
-        http_status: 200,
-        token_usage: { input_tokens: 150, output_tokens: 300 },
-        timed_out: false,
+        ...base,
+        response: `Expert analysis of the topic. Redis is a great choice for caching. (rev ${reviewCount})`,
       } satisfies InvocationResult;
     }),
     healthCheck: vi.fn().mockResolvedValue({
@@ -137,7 +147,17 @@ describe('Full Debate Flow Integration', () => {
     expect(session.consensus).toBeDefined();
     expect(session.consensus!.consensus_score).toBeGreaterThanOrEqual(0);
     expect(session.consensus!.consensus_score).toBeLessThanOrEqual(1);
+    // agreement_score is the (delta-free) stop criterion; with valid reviews
+    // parsed it must be a real value in [0, 1].
+    expect(session.consensus!.agreement_score).toBeGreaterThanOrEqual(0);
+    expect(session.consensus!.agreement_score).toBeLessThanOrEqual(1);
+    // Two providers (anthropic + google) → diversity factor must be > 0.
     expect(session.consensus!.model_diversity_factor).toBeGreaterThan(0);
+    // consensus_score is the diversity-discounted view = agreement_score × delta.
+    expect(session.consensus!.consensus_score).toBeCloseTo(
+      session.consensus!.agreement_score * session.consensus!.model_diversity_factor,
+      5,
+    );
     expect(renderer.onConsensus).toHaveBeenCalled();
   });
 

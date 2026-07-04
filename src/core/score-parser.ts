@@ -20,6 +20,12 @@ export interface ParsedReview {
   status: 'valid' | 'partial' | 'parse_error';
   /** The agent_id of the reviewer. Set by the orchestrator after parsing. */
   reviewer_agent_id?: string;
+  /**
+   * The global agent_id of the reviewed answer, resolved by the orchestrator
+   * from the (per-reviewer) label map after parsing. When set, consensus and
+   * compression aggregate by this id; otherwise they fall back to `label`.
+   */
+  reviewed_agent_id?: string;
 }
 
 export interface ReviewParseResult {
@@ -81,7 +87,11 @@ function tryJsonParse(raw: string, expectedLabels: string[]): ParsedReview[] | n
       });
     }
 
-    // Ensure all expected labels are present
+    // Ensure all expected labels are present. Missing labels are pure
+    // placeholders with no real data (filler 5s), so they are marked
+    // 'parse_error' and excluded from consensus statistics (consensus.ts
+    // only admits 'valid' | 'partial'). This distinguishes them from
+    // regex-recovered 'partial' reviews that carry real extracted scores.
     for (const label of expectedLabels) {
       if (!reviews.find(r => r.label === label)) {
         reviews.push({
@@ -90,7 +100,7 @@ function tryJsonParse(raw: string, expectedLabels: string[]): ParsedReview[] | n
           strengths: '',
           weaknesses: '',
           ranking: 0,
-          status: 'partial',
+          status: 'parse_error',
         });
       }
     }

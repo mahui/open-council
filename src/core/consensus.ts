@@ -14,7 +14,13 @@ export function calculateConsensus(
   // 1. Filter valid reviews (exclude PARSE_ERROR)
   const valid = reviews.filter(r => r.status === 'valid' || r.status === 'partial');
   if (valid.length < 2) {
-    return { consensus_score: 0, dimension_scores: {}, model_diversity_factor: 0, raw_agreement: 0 };
+    return {
+      agreement_score: 0,
+      consensus_score: 0,
+      dimension_scores: {},
+      model_diversity_factor: 0,
+      raw_agreement: 0,
+    };
   }
 
   // 2. Group reviews by reviewer (agent_id) — each agent is one rater
@@ -46,6 +52,9 @@ export function calculateConsensus(
   // 8. Combined consensus score
   //    sigmaAvg is on 1-10 scale, divide by 4.5 to normalize
   const rawAgreement = 0.5 * (1 - sigmaAvg / 4.5) + 0.5 * W;
+  // agreement_score is the stop criterion (reviewer concordance, no delta).
+  const agreementScore = Math.max(0, Math.min(1, rawAgreement * rho));
+  // consensus_score additionally applies the diversity discount for display.
   const score = Math.max(0, Math.min(1, rawAgreement * rho * delta));
 
   // 9. Per-dimension divergence analysis (on raw scores)
@@ -61,10 +70,11 @@ export function calculateConsensus(
   }
 
   return {
+    agreement_score: agreementScore,
     consensus_score: score,
     dimension_scores: dimensionScores,
     model_diversity_factor: delta,
-    raw_agreement: rawAgreement * rho,
+    raw_agreement: agreementScore,
   };
 }
 
@@ -126,12 +136,21 @@ function zScoreNormalizeByReviewer(
   });
 }
 
+/**
+ * The key an answer is aggregated under. Prefer the resolved global
+ * `reviewed_agent_id` (correct even under per-reviewer anonymization); fall
+ * back to `label` for legacy paths where the orchestrator did not backfill it.
+ */
+function answerKey(review: ParsedReview): string {
+  return review.reviewed_agent_id ?? review.label;
+}
+
 function groupScoresByAnswer(reviews: ParsedReview[]): Record<string, number[]> {
   const result: Record<string, number[]> = {};
   for (const review of reviews) {
-    const label = review.label;
-    if (!result[label]) result[label] = [];
-    result[label].push(review.scores.overall);
+    const key = answerKey(review);
+    if (!result[key]) result[key] = [];
+    result[key].push(review.scores.overall);
   }
   return result;
 }
@@ -142,11 +161,11 @@ function groupScoresByDimension(
 ): Record<string, number[]> {
   const result: Record<string, number[]> = {};
   for (const review of reviews) {
-    const label = review.label;
-    if (!result[label]) result[label] = [];
+    const key = answerKey(review);
+    if (!result[key]) result[key] = [];
     const scoreRecord = review.scores as unknown as Record<string, number>;
     const score = scoreRecord[dimension] ?? 0;
-    result[label].push(score);
+    result[key].push(score);
   }
   return result;
 }
@@ -162,9 +181,11 @@ function kendallsW(
   reviews: ParsedReview[],
   byReviewer: Map<string, ParsedReview[]>,
 ): number {
-  const labels = [...new Set(reviews.map(r => r.label))];
-  const n = labels.length;   // number of items being ranked
-  const k = byReviewer.size; // number of raters (reviewers)
+  // Items are keyed by resolved answer id (reviewed_agent_id) when available,
+  // falling back to label — consistent with the by-answer grouping helpers.
+  const items = [...new Set(reviews.map(r => answerKey(r)))];
+  const n = items.length;     // number of items being ranked
+  const k = byReviewer.size;  // number of raters (reviewers)
 
   if (k < 2 || n < 2) return 0;
 
@@ -174,14 +195,14 @@ function kendallsW(
 
   for (const [, raterReviews] of byReviewer) {
     // Build score array for this rater's items
-    const scoresByLabel = new Map<string, number>();
+    const scoresByItem = new Map<string, number>();
     for (const review of raterReviews) {
-      scoresByLabel.set(review.label, review.scores.overall);
+      scoresByItem.set(answerKey(review), review.scores.overall);
     }
 
     // Sort by score descending to compute ranks
-    const sorted = labels
-      .map(label => ({ label, score: scoresByLabel.get(label) ?? 0 }))
+    const sorted = items
+      .map(item => ({ item, score: scoresByItem.get(item) ?? 0 }))
       .sort((a, b) => b.score - a.score);
 
     // Assign ranks with tie averaging
@@ -192,14 +213,14 @@ function kendallsW(
       while (j < sorted.length && sorted[j]!.score === sorted[i]!.score) j++;
       const avgRank = (i + 1 + j) / 2; // average rank for tied items
       for (let t = i; t < j; t++) {
-        ranks.set(sorted[t]!.label, avgRank);
+        ranks.set(sorted[t]!.item, avgRank);
       }
       i = j;
     }
 
     // Accumulate rank sums per item
-    for (let idx = 0; idx < labels.length; idx++) {
-      rankSums[idx] = (rankSums[idx] ?? 0) + (ranks.get(labels[idx]!) ?? 0);
+    for (let idx = 0; idx < items.length; idx++) {
+      rankSums[idx] = (rankSums[idx] ?? 0) + (ranks.get(items[idx]!) ?? 0);
     }
   }
 
