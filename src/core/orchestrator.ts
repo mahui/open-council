@@ -351,12 +351,43 @@ export class Orchestrator {
 
     stage.invocations = allInvocations.flat();
     const succeeded = stage.invocations.filter(i => !i.timed_out && i.response_raw);
+    const failedCount = stage.invocations.length - succeeded.length;
+
     if (succeeded.length === 0) {
+      // Preserve the failed invocations on the stage for diagnostics before
+      // aborting. handlePhaseError('broadcast') marks the session failed.
+      stage.status = 'failed';
+      stage.completed_at = new Date().toISOString();
+      session.stages.push(stage);
       throw new Error('All agents failed');
     }
+
     stage.status = 'completed';
     stage.completed_at = new Date().toISOString();
     session.stages.push(stage);
+
+    // Partial-failure degradation (three-tier policy lives here — the only place
+    // that has the full success/failure counts; handlePhaseError only handles
+    // the all-failed abort).
+    if (succeeded.length === 1) {
+      // A lone survivor leaves no panel to review/compare. Collapse to quick
+      // mode so review/consensus naturally skip (their < 2 guards) and synthesis
+      // takes the single-response shortcut.
+      if (session.resolved_mode !== 'quick') {
+        session.resolved_mode = 'quick';
+      }
+      this.recordDegradation(session, {
+        phase: 'broadcast',
+        reason: `${failedCount} of ${stage.invocations.length} agents failed`,
+        impact: 'Only 1 agent succeeded, degrading to quick mode',
+      });
+    } else if (failedCount > 0) {
+      this.recordDegradation(session, {
+        phase: 'broadcast',
+        reason: `${failedCount} of ${stage.invocations.length} agents failed`,
+        impact: `Continuing with ${succeeded.length} responses`,
+      });
+    }
   }
 
   private async executeCrossExamine(session: Session, roundNumber: number): Promise<void> {
@@ -880,18 +911,12 @@ export class Orchestrator {
 
     switch (phase) {
       case 'broadcast': {
-        const broadcastStage = session.stages.find(s => s.phase === 'broadcast');
-        const completed = broadcastStage?.invocations.filter(i => !i.timed_out && i.response_raw) ?? [];
-        if (completed.length >= 2) {
-          event.impact = `Some agents failed, continuing with ${completed.length} responses`;
-        } else if (completed.length === 1) {
-          event.impact = 'Only 1 agent succeeded, degrading to quick mode';
-          session.resolved_mode = 'quick';
-        } else {
-          session.status = 'failed';
-          event.impact = 'All agents failed';
-          fatal = true;
-        }
+        // executeBroadcast only throws when zero agents succeeded (partial-
+        // failure degradation is handled there, where the counts are known).
+        // Reaching here therefore always means a fatal, all-failed broadcast.
+        session.status = 'failed';
+        event.impact = 'All agents failed';
+        fatal = true;
         break;
       }
       case 'synthesis': {
@@ -906,10 +931,15 @@ export class Orchestrator {
         event.impact = `Phase ${phase} failed, skipping`;
     }
 
+    this.recordDegradation(session, event);
+    return fatal;
+  }
+
+  /** Record a degradation event on the session and notify the renderer (ASYNC-05). */
+  private recordDegradation(session: Session, event: DegradationEvent): void {
     session.degradation_events = session.degradation_events ?? [];
     session.degradation_events.push(event);
     this.renderer.onDegradation(event);
-    return fatal;
   }
 
   /**

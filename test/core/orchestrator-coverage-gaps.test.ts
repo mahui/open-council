@@ -307,6 +307,71 @@ describe('Orchestrator.run — single surviving response reaches synthesis direc
   });
 });
 
+describe('Orchestrator.run — broadcast partial-failure degradation tiers', () => {
+  it('continues with the survivors and notifies when >= 2 agents succeed (some failed)', async () => {
+    // 3 models, 1 fails broadcast -> 2 valid answers -> continue normally with
+    // a "continuing with N responses" degradation notice.
+    const { adapter } = createGapAdapter({ broadcast: { gpt: 'THROW' } });
+    const models = [model('claude'), model('gemini', 'google'), model('gpt', 'openai')];
+    const renderer = createRenderer();
+    const orch = new Orchestrator(adapter, renderer, models);
+
+    const session = await orch.run('Compare A and B', { mode: 'compare' });
+
+    expect(session.status).toBe('completed');
+    // Mode is NOT downgraded — the panel still has >= 2 answers.
+    expect(session.resolved_mode).toBe('compare');
+    const broadcastStage = session.stages.find(s => s.phase === 'broadcast')!;
+    expect(broadcastStage.status).toBe('completed');
+    expect(broadcastStage.invocations.filter(i => !i.timed_out && i.response_raw)).toHaveLength(2);
+    expect(renderer.onDegradation).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: 'broadcast', impact: expect.stringContaining('Continuing with 2') }),
+    );
+    expect(session.degradation_events?.some(e => e.impact.includes('Continuing with 2'))).toBe(true);
+  });
+
+  it('downgrades resolved_mode to quick and notifies when exactly 1 agent succeeds', async () => {
+    // 2 models, 1 fails broadcast -> a lone survivor -> resolved_mode collapses
+    // to 'quick' with a degradation notice.
+    const { adapter } = createGapAdapter({ broadcast: { gemini: 'THROW' } });
+    const models = [model('claude'), model('gemini', 'google')];
+    const renderer = createRenderer();
+    const orch = new Orchestrator(adapter, renderer, models);
+
+    const session = await orch.run('Compare A and B', { mode: 'compare' });
+
+    expect(session.status).toBe('completed');
+    expect(session.resolved_mode).toBe('quick');
+    expect(session.synthesis).toBe('Answer from claude');
+    expect(renderer.onDegradation).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: 'broadcast', impact: expect.stringContaining('degrading to quick mode') }),
+    );
+    expect(session.degradation_events?.some(e => e.impact.includes('degrading to quick mode'))).toBe(true);
+  });
+
+  it('fails the session and preserves the failed broadcast stage when 0 agents succeed', async () => {
+    // Every model fails broadcast -> fatal abort. The stage is still pushed
+    // (status failed) so the failed invocations remain for diagnostics.
+    const { adapter } = createGapAdapter({ broadcast: { claude: 'THROW', gemini: 'THROW' } });
+    const models = [model('claude'), model('gemini', 'google')];
+    const renderer = createRenderer();
+    const orch = new Orchestrator(adapter, renderer, models);
+
+    const session = await orch.run('Compare A and B', { mode: 'compare' });
+
+    expect(session.status).toBe('failed');
+    const broadcastStage = session.stages.find(s => s.phase === 'broadcast')!;
+    expect(broadcastStage.status).toBe('failed');
+    expect(broadcastStage.invocations.length).toBeGreaterThanOrEqual(2);
+    expect(broadcastStage.invocations.every(i => i.timed_out)).toBe(true);
+    expect(renderer.onDegradation).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: 'broadcast', impact: 'All agents failed' }),
+    );
+    // Synthesis must not run after a fatal broadcast.
+    expect(session.synthesis).toBeUndefined();
+  });
+});
+
 describe('Orchestrator.run — truncated response notification', () => {
   it('surfaces a degradation event when a response is truncated, without dropping it', async () => {
     const { adapter } = createGapAdapter({ truncatedFor: ['claude'] });
