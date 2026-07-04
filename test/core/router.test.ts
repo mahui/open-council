@@ -62,6 +62,36 @@ describe('classifyQuestion', () => {
   it('should default to general for unrecognized questions', () => {
     expect(classifyQuestion('What is the meaning of life?')).toBe('general');
   });
+
+  // Chinese keyword matching — regression for `\b` never matching CJK characters.
+  it('should classify Chinese code questions', () => {
+    expect(classifyQuestion('帮我重构这段代码')).toBe('code');
+  });
+
+  it('should classify Chinese architecture questions', () => {
+    expect(classifyQuestion('这个系统架构设计合理吗')).toBe('architecture');
+  });
+
+  it('should classify Chinese comparison questions', () => {
+    expect(classifyQuestion('对比一下 React 和 Vue')).toBe('comparison');
+  });
+
+  it('should classify Chinese security questions', () => {
+    expect(classifyQuestion('这里有 SQL 注入风险吗')).toBe('security');
+  });
+
+  it('should classify Chinese math questions', () => {
+    expect(classifyQuestion('这个方程怎么求解')).toBe('math');
+  });
+
+  it('should classify Chinese creative questions', () => {
+    expect(classifyQuestion('给我一些创新的想法')).toBe('creative');
+  });
+
+  it('should still keep English word boundaries (no substring match)', () => {
+    // `code` must not match inside `decode` / `encoder`
+    expect(classifyQuestion('The encoder pipeline runs nightly')).toBe('general');
+  });
 });
 
 describe('allocateSeats', () => {

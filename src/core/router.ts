@@ -29,44 +29,87 @@ interface KeywordRule {
   suggestedRoleSet: string;
 }
 
-const KEYWORD_RULES: readonly KeywordRule[] = [
+/**
+ * Table-driven rule definition.
+ *
+ * Keywords are split into two groups because word boundaries (`\b`) only
+ * recognize ASCII word characters — a Chinese character never forms a `\b`
+ * boundary with its neighbour, so Chinese keywords wrapped in `\b...\b` can
+ * NEVER match. English keywords keep `\b` (to avoid matching substrings such
+ * as `code` inside `encoder`); Chinese keywords are matched literally.
+ *
+ * `en` entries may be small regex fragments (e.g. `vs\.?`, `which\s+is\s+better`).
+ */
+interface KeywordRuleDef {
+  type: QuestionType;
+  en: readonly string[];
+  zh: readonly string[];
+  requiredCapabilities: string[];
+  suggestedRoleSet: string;
+}
+
+/**
+ * Build a case-insensitive matcher combining an ASCII-boundary-guarded English
+ * group with an unguarded Chinese group: `\b(?:en...)\b|(?:zh...)`.
+ */
+function buildKeywordPattern(en: readonly string[], zh: readonly string[]): RegExp {
+  const parts: string[] = [];
+  if (en.length > 0) parts.push(`\\b(?:${en.join('|')})\\b`);
+  if (zh.length > 0) parts.push(`(?:${zh.join('|')})`);
+  return new RegExp(parts.join('|'), 'i');
+}
+
+const KEYWORD_RULE_DEFS: readonly KeywordRuleDef[] = [
   {
     type: 'code',
-    keywords: /\b(code|coding|bug|debug|function|函数|代码|refactor|重构|lint|compile|编译|snippet|implementation)\b/i,
+    en: ['code', 'coding', 'bug', 'debug', 'function', 'refactor', 'lint', 'compile', 'snippet', 'implementation'],
+    zh: ['函数', '代码', '重构', '编译', '调试', '报错', '实现'],
     requiredCapabilities: ['code'],
     suggestedRoleSet: 'code-review',
   },
   {
     type: 'security',
-    keywords: /\b(security|vulnerability|CVE|exploit|注入|injection|XSS|CSRF|安全|auth|认证|加密|encrypt)\b/i,
+    en: ['security', 'vulnerability', 'CVE', 'exploit', 'injection', 'XSS', 'CSRF', 'auth', 'encrypt'],
+    zh: ['注入', '安全', '认证', '鉴权', '权限', '加密', '漏洞'],
     requiredCapabilities: ['analysis'],
     suggestedRoleSet: 'default',
   },
   {
     type: 'architecture',
-    keywords: /\b(architecture|架构|design|设计|system|系统|microservice|monolith|scalab|可扩展|分布式|distributed)\b/i,
+    en: ['architecture', 'design', 'system', 'microservice', 'monolith', 'scalab', 'distributed'],
+    zh: ['架构', '设计', '系统', '可扩展', '扩展性', '分布式', '微服务', '单体'],
     requiredCapabilities: ['analysis'],
     suggestedRoleSet: 'architecture',
   },
   {
     type: 'creative',
-    keywords: /\b(creative|创意|brainstorm|头脑风暴|ideation|创新|novel|unconventional)\b/i,
+    en: ['creative', 'brainstorm', 'ideation', 'novel', 'unconventional'],
+    zh: ['创意', '头脑风暴', '创新', '灵感'],
     requiredCapabilities: ['creative'],
     suggestedRoleSet: 'default',
   },
   {
     type: 'comparison',
-    keywords: /\b(vs\.?|versus|compare|对比|比较|选择|choose|which\s+is\s+better|pros?\s+and\s+cons?|优劣)\b/i,
+    en: ['vs\\.?', 'versus', 'compare', 'choose', 'which\\s+is\\s+better', 'pros?\\s+and\\s+cons?'],
+    zh: ['对比', '比较', '选择', '优劣', '区别', '相比', '哪个更好'],
     requiredCapabilities: [],
     suggestedRoleSet: 'default',
   },
   {
     type: 'math',
-    keywords: /\b(math|数学|calcul|计算|proof|证明|equation|方程|theorem|定理|algorithm|算法)\b/i,
+    en: ['math', 'calcul', 'proof', 'equation', 'theorem', 'algorithm'],
+    zh: ['数学', '计算', '证明', '方程', '定理', '算法', '公式', '求解'],
     requiredCapabilities: ['math'],
     suggestedRoleSet: 'default',
   },
 ] as const;
+
+const KEYWORD_RULES: readonly KeywordRule[] = KEYWORD_RULE_DEFS.map(def => ({
+  type: def.type,
+  keywords: buildKeywordPattern(def.en, def.zh),
+  requiredCapabilities: def.requiredCapabilities,
+  suggestedRoleSet: def.suggestedRoleSet,
+}));
 
 // ---------------------------------------------------------------------------
 // Auto mode resolution
