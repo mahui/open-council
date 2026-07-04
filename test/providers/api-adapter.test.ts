@@ -637,3 +637,169 @@ describe('ApiAdapter.invoke — retry + error classification', () => {
     expect(vi.mocked(recordFailure)).toHaveBeenCalledWith('custom:myservice', 'retryable', true);
   });
 });
+
+// --------------------------------------------------------------------------
+// Truncation detection — pi-ai StopReason 'length' means the model hit the
+// max_tokens ceiling. The content is still real and must be returned; the
+// result is flagged truncated=true so the orchestrator can surface it.
+// --------------------------------------------------------------------------
+
+describe('ApiAdapter.invoke — truncation detection (stopReason length)', () => {
+  let credManager: CredentialManager;
+  let adapter: ApiAdapter;
+
+  function truncConfig(overrides: Partial<ModelConfig> = {}): ModelConfig {
+    return makeConfig({
+      api_base_url: 'https://api.example.com/v1',
+      api_key_env: 'CUSTOM_API_KEY',
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    vi.mocked(completeSimple).mockReset();
+    vi.mocked(streamSimple).mockReset();
+    credManager = makeFakeCredentialManager();
+    adapter = new ApiAdapter(credManager);
+    process.env['CUSTOM_API_KEY'] = 'sk-test';
+  });
+
+  afterEach(() => {
+    delete process.env['CUSTOM_API_KEY'];
+    vi.restoreAllMocks();
+  });
+
+  it('complete: stopReason "length" → truncated=true and content preserved', async () => {
+    vi.mocked(completeSimple).mockResolvedValue({
+      stopReason: 'length',
+      content: [{ type: 'text', text: 'partial but useful answer' }],
+      usage: { input: 10, output: 8192 },
+      errorMessage: undefined,
+    } as never);
+
+    const result = await adapter.invoke(truncConfig(), 'prompt');
+
+    expect(result.truncated).toBe(true);
+    expect(result.response).toBe('partial but useful answer');
+    expect(result.timed_out).toBe(false);
+  });
+
+  it('complete: stopReason "stop" → truncated=false', async () => {
+    vi.mocked(completeSimple).mockResolvedValue({
+      stopReason: 'stop',
+      content: [{ type: 'text', text: 'complete answer' }],
+      usage: { input: 10, output: 20 },
+      errorMessage: undefined,
+    } as never);
+
+    const result = await adapter.invoke(truncConfig(), 'prompt');
+
+    expect(result.truncated).toBe(false);
+    expect(result.response).toBe('complete answer');
+  });
+
+  it('streaming: stopReason "length" → truncated=true and streamed content preserved', async () => {
+    const events = [
+      { type: 'text_delta', delta: 'chunk-1 ' },
+      { type: 'text_delta', delta: 'chunk-2' },
+    ];
+    const stream = {
+      async *[Symbol.asyncIterator]() {
+        for (const e of events) yield e;
+      },
+      result: (): Promise<unknown> => Promise.resolve({
+        stopReason: 'length',
+        content: [{ type: 'text', text: 'chunk-1 chunk-2' }],
+        usage: { input: 5, output: 8192 },
+        errorMessage: undefined,
+      }),
+    };
+    vi.mocked(streamSimple).mockReturnValue(stream as never);
+
+    const chunks: string[] = [];
+    const result = await adapter.invoke(
+      truncConfig({ streaming: true }),
+      'prompt',
+      (c) => chunks.push(c),
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.response).toBe('chunk-1 chunk-2');
+    expect(chunks).toEqual(['chunk-1 ', 'chunk-2']);
+  });
+});
+
+// --------------------------------------------------------------------------
+// max_tokens default tiering — the request-side default scales with reasoning
+// effort (no reasoning → 8192, minimal/low/medium → 16384, high+ → 32768).
+// An explicit config.max_tokens always overrides the tiered default.
+// --------------------------------------------------------------------------
+
+describe('ApiAdapter.invoke — reasoning-tiered max_tokens default', () => {
+  let credManager: CredentialManager;
+  let adapter: ApiAdapter;
+
+  function tierConfig(overrides: Partial<ModelConfig> = {}): ModelConfig {
+    return makeConfig({
+      api_base_url: 'https://api.example.com/v1',
+      api_key_env: 'CUSTOM_API_KEY',
+      ...overrides,
+    });
+  }
+
+  function lastMaxTokens(): number {
+    const callArgs = vi.mocked(completeSimple).mock.calls[0];
+    const opts = callArgs![2] as { maxTokens: number };
+    return opts.maxTokens;
+  }
+
+  beforeEach(() => {
+    vi.mocked(completeSimple).mockReset();
+    vi.mocked(completeSimple).mockResolvedValue({
+      stopReason: 'stop',
+      content: [{ type: 'text', text: 'ok' }],
+      usage: { input: 1, output: 1 },
+      errorMessage: undefined,
+    } as never);
+    credManager = makeFakeCredentialManager();
+    adapter = new ApiAdapter(credManager);
+    process.env['CUSTOM_API_KEY'] = 'sk-test';
+  });
+
+  afterEach(() => {
+    delete process.env['CUSTOM_API_KEY'];
+    vi.restoreAllMocks();
+  });
+
+  it('no reasoning_effort → default 8192', async () => {
+    const config = tierConfig();
+    delete (config as Partial<ModelConfig>).reasoning_effort;
+    await adapter.invoke(config, 'prompt');
+    expect(lastMaxTokens()).toBe(8192);
+  });
+
+  it('reasoning_effort "low" → default 16384', async () => {
+    await adapter.invoke(tierConfig({ reasoning_effort: 'low' }), 'prompt');
+    expect(lastMaxTokens()).toBe(16384);
+  });
+
+  it('reasoning_effort "medium" → default 16384', async () => {
+    await adapter.invoke(tierConfig({ reasoning_effort: 'medium' }), 'prompt');
+    expect(lastMaxTokens()).toBe(16384);
+  });
+
+  it('reasoning_effort "high" → default 32768', async () => {
+    await adapter.invoke(tierConfig({ reasoning_effort: 'high' }), 'prompt');
+    expect(lastMaxTokens()).toBe(32768);
+  });
+
+  it('reasoning_effort "xhigh" → default 32768', async () => {
+    await adapter.invoke(tierConfig({ reasoning_effort: 'xhigh' }), 'prompt');
+    expect(lastMaxTokens()).toBe(32768);
+  });
+
+  it('explicit max_tokens always overrides the tiered default', async () => {
+    await adapter.invoke(tierConfig({ reasoning_effort: 'high', max_tokens: 2048 }), 'prompt');
+    expect(lastMaxTokens()).toBe(2048);
+  });
+});

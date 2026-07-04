@@ -17,6 +17,13 @@ export interface InvocationResult {
     output_tokens: number;
   };
   timed_out: boolean;
+  /**
+   * The response was cut off by the model's max_tokens / length limit (API finish_reason
+   * `length`). Orthogonal to `timed_out`: `timed_out` means the call never completed in time
+   * (content may be empty), whereas `truncated` means the call completed with real, usable
+   * content that was clipped mid-way. Optional — absent/undefined ≡ not truncated.
+   */
+  truncated?: boolean;
 }
 
 export interface HealthStatus {

@@ -48,6 +48,43 @@ const RETRY_BACKOFF_FACTOR = 4;
 const RETRY_JITTER_FRACTION = 0.25;
 
 /**
+ * Default output-token budget, tiered by reasoning effort. Reasoning models spend a large,
+ * invisible share of the budget on thinking tokens before emitting any answer, so a flat 8192
+ * would clip their visible output. Scale the ceiling with effort so higher-effort requests get
+ * room for both thinking and a complete answer. Tunable — adjust here, not at call sites.
+ * - no reasoning         → 8192
+ * - minimal / low / medium → 16384
+ * - high and above (high, xhigh) → 32768
+ */
+const MAX_TOKENS_NO_REASONING = 8192;
+const MAX_TOKENS_LOW_REASONING = 16384;
+const MAX_TOKENS_HIGH_REASONING = 32768;
+
+/**
+ * Default contextWindow for custom OpenAI-compatible endpoints. Mainstream self-hosted / gateway
+ * models are ≥128k; a low value would make pi-ai under-budget the request. 8192 was misleading.
+ */
+const CUSTOM_MODEL_CONTEXT_WINDOW = 131072;
+
+/**
+ * Resolve the default max_tokens for a request from its reasoning effort. An explicit
+ * `config.max_tokens` always wins over this (applied at the call site).
+ */
+function defaultMaxTokens(reasoning: ModelConfig['reasoning_effort']): number {
+  switch (reasoning) {
+    case undefined:
+      return MAX_TOKENS_NO_REASONING;
+    case 'minimal':
+    case 'low':
+    case 'medium':
+      return MAX_TOKENS_LOW_REASONING;
+    case 'high':
+    case 'xhigh':
+      return MAX_TOKENS_HIGH_REASONING;
+  }
+}
+
+/**
  * Injectable knobs — production uses the defaults; tests inject a synchronous/fake `sleep`
  * (or override the retry counts/timing) so backoff can be asserted without real waiting.
  */
@@ -322,8 +359,11 @@ export class ApiAdapter implements InvocationAdapter {
       reasoning: false,
       input: ['text' as const],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 8192,
-      maxTokens: config.max_tokens ?? 4096,
+      // Mainstream custom endpoints are ≥128k; a low window would make pi-ai under-budget requests.
+      contextWindow: CUSTOM_MODEL_CONTEXT_WINDOW,
+      // Keep the default aligned with the request-side tiering (reasoning-aware) rather than a
+      // separate hardcoded 4096, so custom endpoints don't clip reasoning output.
+      maxTokens: config.max_tokens ?? defaultMaxTokens(config.reasoning_effort),
     };
   }
 
@@ -431,7 +471,7 @@ export class ApiAdapter implements InvocationAdapter {
       }, {
         apiKey,
         signal: guard.signal,
-        maxTokens: config.max_tokens ?? 8192,
+        maxTokens: config.max_tokens ?? defaultMaxTokens(config.reasoning_effort),
         temperature: config.temperature,
         reasoning: config.reasoning_effort,
       });
@@ -487,6 +527,9 @@ export class ApiAdapter implements InvocationAdapter {
           output_tokens: message.usage.output,
         },
         timed_out: false,
+        // pi-ai StopReason `length` means the model hit the max_tokens ceiling: content is
+        // real but clipped. Flag it (content still returned) so the orchestrator can surface it.
+        truncated: message.stopReason === 'length',
       };
     } catch (err) {
       // pi-ai may throw its own AbortError when we abort; reclassify as a timeout.
@@ -514,7 +557,7 @@ export class ApiAdapter implements InvocationAdapter {
         }, {
           apiKey,
           signal: guard.signal,
-          maxTokens: config.max_tokens ?? 8192,
+          maxTokens: config.max_tokens ?? defaultMaxTokens(config.reasoning_effort),
           temperature: config.temperature,
           reasoning: config.reasoning_effort,
         }),
@@ -548,6 +591,9 @@ export class ApiAdapter implements InvocationAdapter {
           output_tokens: message.usage.output,
         },
         timed_out: false,
+        // pi-ai StopReason `length` means the model hit the max_tokens ceiling: content is
+        // real but clipped. Flag it (content still returned) so the orchestrator can surface it.
+        truncated: message.stopReason === 'length',
       };
     } catch (err) {
       // pi-ai may throw its own AbortError when we abort; reclassify as a timeout.
