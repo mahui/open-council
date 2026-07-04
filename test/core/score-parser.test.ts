@@ -87,6 +87,37 @@ describe('parseReviewResponse', () => {
     expect(reviewB!.scores.overall).toBe(5);
   });
 
+  it('should parse devil_advocate_notes when present', () => {
+    const raw = JSON.stringify({
+      reviews: [{
+        label: 'A',
+        scores: { accuracy: 8, completeness: 7, practicality: 9, insight: 6, overall: 8 },
+        strengths: 'Good',
+        weaknesses: 'Minor',
+        devil_advocate_notes: 'Assumes stable traffic; no rollback plan',
+        ranking: 1,
+      }],
+    });
+
+    const result = parseReviewResponse(raw, ['A']);
+    expect(result.reviews[0]!.devil_advocate_notes).toBe('Assumes stable traffic; no rollback plan');
+  });
+
+  it('should default devil_advocate_notes to empty string when absent', () => {
+    const raw = JSON.stringify({
+      reviews: [{
+        label: 'A',
+        scores: { accuracy: 8, completeness: 7, practicality: 9, insight: 6, overall: 8 },
+        strengths: 'Good',
+        weaknesses: 'Minor',
+        ranking: 1,
+      }],
+    });
+
+    const result = parseReviewResponse(raw, ['A']);
+    expect(result.reviews[0]!.devil_advocate_notes).toBe('');
+  });
+
   it('should keep regex-recovered reviews as partial (real extracted scores)', () => {
     // No JSON block, but a scannable "Response A ... overall: 7" line → regex path.
     const raw = 'Response A is decent. accuracy: 8 completeness: 6 overall: 7';

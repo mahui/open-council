@@ -31,8 +31,10 @@ import type { InvocationAdapter, InvocationResult } from '../types/provider.js';
 import type { Renderer } from '../ui/renderer.js';
 import { buildBroadcastPrompt, buildSynthesisPrompt, buildReviewPrompt, buildDevilAdvocateReviewPrompt, buildCrossExaminePrompt, extractDivergencePoints } from './prompt-builder.js';
 import { Anonymizer } from './anonymizer.js';
-import { parseReviewResponse } from './score-parser.js';
+import { parseReviewResponse, type ParsedReview } from './score-parser.js';
 import { calculateConsensus } from './consensus.js';
+import { buildReviewSummaries, type AnswerReviewSummary } from './review-aggregator.js';
+import { detectLanguage } from './language.js';
 import { generateRoles, resolveModel } from './role-generator.js';
 import { resolveMode } from './router.js';
 import { buildCompressionPlan, applyFallbackCompression, type ScoredResponse, aggregateReviewScores } from './compression.js';
@@ -276,6 +278,7 @@ export class Orchestrator {
   private async executeBroadcast(session: Session): Promise<void> {
     const stage = this.createStage('broadcast');
     const agents = session.agents;
+    const language = detectLanguage(session.question);
 
     // Group by model — same model agents run serially, different models run in parallel
     const groups = this.groupByModel(agents);
@@ -290,6 +293,7 @@ export class Orchestrator {
             agent.system_prompt,
             session.parent_synthesis,
             session.historical_context,
+            language,
           );
 
           this.renderer.onAgentStart(agent);
@@ -297,6 +301,7 @@ export class Orchestrator {
             const onChunk = (chunk: string) => this.renderer.onAgentProgress(agent, chunk);
             const result = await this.adapter.invoke(agent.config, prompt, onChunk);
             this.renderer.onAgentComplete(agent, result);
+            this.notifyIfTruncated('broadcast', agent, result);
             results.push(this.toInvocation(agent, result, prompt));
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -352,11 +357,18 @@ export class Orchestrator {
       return;
     }
 
-    // Extract divergence points from consensus
+    // Aggregate peer critique (keyed by reviewed agent_id) so each agent sees
+    // what reviewers said about their own answer, and a one-line signal for others.
+    const reviewSummaries = this.buildReviewSummaryMap(session);
+    const language = detectLanguage(session.question);
+
+    // Extract divergence points — primarily from aggregated peer weaknesses,
+    // with dimension σ as a supplement.
     const divergencePoints = session.consensus
       ? extractDivergencePoints(
           session.consensus,
           validInvocations.map(inv => ({ role: inv.role, response: inv.response_raw })),
+          [...reviewSummaries.values()],
         )
       : [];
 
@@ -368,7 +380,11 @@ export class Orchestrator {
 
         const otherResponses = validInvocations
           .filter(inv => inv.agent_id !== agent.agent_id)
-          .map(inv => ({ role: inv.role, response: inv.response_raw }));
+          .map(inv => ({
+            role: inv.role,
+            response: inv.response_raw,
+            reviewSummary: reviewSummaries.get(inv.agent_id),
+          }));
 
         const prompt = buildCrossExaminePrompt(
           session.question,
@@ -377,6 +393,8 @@ export class Orchestrator {
           otherResponses,
           divergencePoints,
           roundNumber,
+          reviewSummaries.get(agent.agent_id),
+          language,
         );
 
         this.renderer.onAgentStart(agent);
@@ -384,6 +402,7 @@ export class Orchestrator {
           const onChunk = (chunk: string) => this.renderer.onAgentProgress(agent, chunk);
           const result = await this.adapter.invoke(agent.config, prompt, onChunk);
           this.renderer.onAgentComplete(agent, result);
+          this.notifyIfTruncated('cross_examine', agent, result);
           return this.toInvocation(agent, result, prompt);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -417,12 +436,16 @@ export class Orchestrator {
       return;
     }
 
+    // Peer-review summaries let the Chairman weigh answers by their reception.
+    const reviewSummaries = this.buildReviewSummaryMap(session);
+
     const responses = latestStage.invocations
       .filter(inv => !inv.timed_out && inv.response_raw)
       .map(inv => ({
         role: inv.role,
         modelName: inv.model_name,
         response: inv.response_compressed ?? inv.response_raw,
+        reviewSummary: reviewSummaries.get(inv.agent_id),
       }));
 
     if (responses.length === 0) {
@@ -460,7 +483,7 @@ export class Orchestrator {
       return;
     }
 
-    const prompt = buildSynthesisPrompt(session.question, responses);
+    const prompt = buildSynthesisPrompt(session.question, responses, detectLanguage(session.question));
 
     const synthAgent = this.makeSynthAgent(session)!;
     this.renderer.onAgentStart(synthAgent);
@@ -478,6 +501,7 @@ export class Orchestrator {
   private async executeReview(session: Session): Promise<void> {
     const stage = this.createStage('review');
     const anonymizer = new Anonymizer();
+    const language = detectLanguage(session.question);
 
     // Get the LATEST response stage (broadcast or cross_examine for multi-round debates)
     const responseStages = session.stages.filter(
@@ -523,7 +547,7 @@ export class Orchestrator {
     this.renderer.onAgentStart(reviewAgent);
 
     // Pre-build standard prompt (shared by all non-DA agents)
-    const basePrompt = buildReviewPrompt(session.question, anonymized);
+    const basePrompt = buildReviewPrompt(session.question, anonymized, language);
 
     // P0-3 fix: parallel review — same model → serial, different models → parallel
     // (mirrors executeBroadcast pattern)
@@ -535,7 +559,7 @@ export class Orchestrator {
           // P0-1 fix: devil's advocate gets an augmented prompt that requires
           // critical auditing (risk hunting, edge cases, assumption challenging)
           const prompt = agent.is_devil_advocate
-            ? buildDevilAdvocateReviewPrompt(session.question, anonymized)
+            ? buildDevilAdvocateReviewPrompt(session.question, anonymized, language)
             : basePrompt;
 
           this.renderer.onAgentProgress(reviewAgent, `\n--- ${agent.role} [${agent.config.name}] reviewing... ---\n`);
@@ -594,22 +618,9 @@ export class Orchestrator {
       .filter(i => !i.timed_out && i.response_raw)
       .map((_, i) => String.fromCharCode(65 + i));
 
-    // Resolve each review's label back to the global reviewed agent_id via the
-    // shuffle-aware label_map persisted by executeReview (global baseline).
-    const labelMap = reviewStage.label_map ?? {};
-
     // Parse each review response, tagging with the reviewer's agent_id and the
     // resolved reviewed_agent_id (falls back to label inside consensus when absent).
-    const allReviews = reviewStage.invocations
-      .filter(inv => inv.response_raw)
-      .flatMap(inv => {
-        const result = parseReviewResponse(inv.response_raw, expectedLabels);
-        return result.reviews.map(r => ({
-          ...r,
-          reviewer_agent_id: inv.agent_id,
-          reviewed_agent_id: labelMap[r.label],
-        }));
-      });
+    const allReviews = this.parseReviewStage(reviewStage, expectedLabels);
 
     // Calculate consensus
     const consensusResult = calculateConsensus(allReviews, session.agents);
@@ -666,17 +677,9 @@ export class Orchestrator {
         });
       }
 
-      const allReviews = reviewStage.invocations
-        .filter(inv => inv.response_raw)
-        .flatMap(inv => {
-          const result = parseReviewResponse(inv.response_raw, expectedLabels);
-          // Backfill the resolved reviewed agent id (global baseline); the
-          // labelToAgentId map remains as a fallback for legacy paths.
-          return result.reviews.map(r => ({
-            ...r,
-            reviewed_agent_id: labelToAgentId.get(r.label),
-          }));
-        });
+      // Backfill the resolved reviewed agent id (global baseline); the
+      // labelToAgentId map remains as a fallback for legacy paths.
+      const allReviews = this.parseReviewStage(reviewStage, expectedLabels, labelToAgentId);
 
       const aggregatedScores = aggregateReviewScores(allReviews, labelToAgentId);
       for (const [agentId, score] of aggregatedScores.entries()) {
@@ -715,6 +718,62 @@ export class Orchestrator {
     stage.status = 'completed';
     stage.completed_at = new Date().toISOString();
     session.stages.push(stage);
+  }
+
+  /**
+   * Parse a completed review stage into ParsedReview[] with reviewer and
+   * reviewed agent ids resolved. Shared parse chain for consensus, compression,
+   * and review-summary construction (avoids duplicating the label→agentId logic).
+   *
+   * @param labelToAgentId Optional explicit label map; when omitted the stage's
+   *                       own shuffle-aware `label_map` is used.
+   */
+  private parseReviewStage(
+    reviewStage: Stage,
+    expectedLabels: string[],
+    labelToAgentId?: ReadonlyMap<string, string>,
+  ): ParsedReview[] {
+    const resolve = (label: string): string | undefined =>
+      labelToAgentId ? labelToAgentId.get(label) : reviewStage.label_map?.[label];
+
+    return reviewStage.invocations
+      .filter(inv => inv.response_raw)
+      .flatMap(inv => {
+        const result = parseReviewResponse(inv.response_raw, expectedLabels);
+        return result.reviews.map(r => ({
+          ...r,
+          reviewer_agent_id: inv.agent_id,
+          reviewed_agent_id: resolve(r.label),
+        }));
+      });
+  }
+
+  /**
+   * Build per-answer peer-review summaries (keyed by reviewed agent_id) from the
+   * latest completed review stage. Returns an empty map when no review data
+   * exists yet (e.g. review was skipped / degraded to compare).
+   */
+  private buildReviewSummaryMap(session: Session): Map<string, AnswerReviewSummary> {
+    const reviewStages = session.stages.filter(s => s.phase === 'review' && s.status === 'completed');
+    const reviewStage = reviewStages[reviewStages.length - 1];
+    if (!reviewStage) return new Map();
+
+    const responseStages = session.stages.filter(
+      s => (s.phase === 'broadcast' || s.phase === 'cross_examine') && s.status === 'completed',
+    );
+    const latestResponseStage = responseStages[responseStages.length - 1];
+    const expectedLabels = (latestResponseStage?.invocations ?? [])
+      .filter(i => !i.timed_out && i.response_raw)
+      .map((_, i) => String.fromCharCode(65 + i));
+
+    const reviews = this.parseReviewStage(reviewStage, expectedLabels);
+
+    const agentIdToRole = new Map<string, string>();
+    for (const agent of session.agents) {
+      agentIdToRole.set(agent.agent_id, agent.role);
+    }
+
+    return buildReviewSummaries(reviews, agentIdToRole);
   }
 
   /** True when the session has been fatally marked as failed. */
@@ -795,6 +854,21 @@ export class Orchestrator {
       invocations: [],
       started_at: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Surface a truncated (max_tokens-clipped) response as a degradation event for visibility.
+   * Per design (work item #4): a truncated answer still holds substantial valid content, so it
+   * is NOT blocked, dropped, or retried — it flows into review/consensus/synthesis as usual;
+   * we only notify the renderer so the user knows the answer may be incomplete.
+   */
+  private notifyIfTruncated(phase: DebatePhase, agent: Agent, result: InvocationResult): void {
+    if (!result.truncated) return;
+    this.renderer.onDegradation({
+      phase,
+      reason: `Agent "${agent.role}" response was truncated at the model's max_tokens limit`,
+      impact: 'Response kept as-is and still participates in the debate; it may be incomplete',
+    });
   }
 
   private toInvocation(agent: Agent, result: InvocationResult, prompt: string): Invocation {

@@ -6,6 +6,7 @@
 
 import type { InvocationAdapter } from '../types/provider.js';
 import type { ModelConfig } from '../types/config.js';
+import { detectLanguage } from './language.js';
 
 export interface GeneratedRole {
   name: string;
@@ -163,12 +164,6 @@ function pickFastestModel(models: ModelConfig[]): ModelConfig | null {
     if (found) return found;
   }
   return models[0] ?? null;
-}
-
-function detectLanguage(text: string): string {
-  const cjk = text.match(/[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]/g);
-  if (cjk && cjk.length > text.length * 0.1) return '中文';
-  return 'English';
 }
 
 function parseRoleResponse(raw: string, models: ModelConfig[]): GeneratedRole[] | null {

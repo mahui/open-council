@@ -18,6 +18,11 @@ export interface ParsedReview {
   weaknesses: string;
   ranking: number;
   status: 'valid' | 'partial' | 'parse_error';
+  /**
+   * Key risks flagged by a Devil's Advocate reviewer (PRD §543). Empty string
+   * for standard (non-DA) reviews or when the field is absent from the JSON.
+   */
+  devil_advocate_notes?: string;
   /** The agent_id of the reviewer. Set by the orchestrator after parsing. */
   reviewer_agent_id?: string;
   /**
@@ -49,6 +54,7 @@ export function parseReviewResponse(raw: string, expectedLabels: string[]): Revi
       scores: { accuracy: 5, completeness: 5, practicality: 5, insight: 5, overall: 5 },
       strengths: '',
       weaknesses: '',
+      devil_advocate_notes: '',
       ranking: 0,
       status: 'parse_error' as const,
     })),
@@ -82,6 +88,7 @@ function tryJsonParse(raw: string, expectedLabels: string[]): ParsedReview[] | n
         },
         strengths: String(r['strengths'] ?? ''),
         weaknesses: String(r['weaknesses'] ?? ''),
+        devil_advocate_notes: String(r['devil_advocate_notes'] ?? ''),
         ranking: Number(r['ranking'] ?? 0),
         status: 'valid',
       });
@@ -99,6 +106,7 @@ function tryJsonParse(raw: string, expectedLabels: string[]): ParsedReview[] | n
           scores: { accuracy: 5, completeness: 5, practicality: 5, insight: 5, overall: 5 },
           strengths: '',
           weaknesses: '',
+          devil_advocate_notes: '',
           ranking: 0,
           status: 'parse_error',
         });
@@ -153,6 +161,7 @@ function tryRegexParse(raw: string, expectedLabels: string[]): ParsedReview[] | 
       scores,
       strengths: '',
       weaknesses: '',
+      devil_advocate_notes: '',
       ranking: 0,
       status: 'partial',
     });

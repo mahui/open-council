@@ -194,6 +194,73 @@ describe('Full Debate Flow Integration', () => {
     expect(session2.resolved_mode).toBe('debate');
   });
 
+  it('feeds aggregated peer criticism into the cross-examine prompt', async () => {
+    const prompts: string[] = [];
+    let reviewCount = 0;
+
+    const adapter: InvocationAdapter = {
+      invoke: vi.fn().mockImplementation(async (_config: unknown, prompt: string) => {
+        prompts.push(prompt);
+        const base = {
+          elapsed_ms: 100, invocation_mode: 'api' as const, http_status: 200,
+          token_usage: { input_tokens: 10, output_tokens: 20 }, timed_out: false,
+        };
+
+        if (prompt.includes('multi-expert debate panel')) {
+          return {
+            ...base,
+            response: JSON.stringify([
+              { name: 'Analyst', icon: '🔍', description: 'a', system_prompt: 'You analyze.', assigned_model: 'claude' },
+              { name: 'Engineer', icon: '⚙️', description: 'e', system_prompt: 'You build.', assigned_model: 'gemini' },
+              { name: 'Critic', icon: '🎯', description: 'c', system_prompt: 'You challenge.', assigned_model: 'claude' },
+            ]),
+          } satisfies InvocationResult;
+        }
+
+        // Peer-review prompt → strongly divergent rankings across reviewers so
+        // agreement_score stays below the stop threshold and cross-examine runs.
+        if (prompt.includes('peer reviewer')) {
+          const variants = [
+            [{ a: 9 }, { a: 5 }, { a: 1 }],
+            [{ a: 1 }, { a: 5 }, { a: 9 }],
+            [{ a: 5 }, { a: 9 }, { a: 1 }],
+          ];
+          const v = variants[reviewCount % variants.length]!;
+          reviewCount++;
+          return {
+            ...base,
+            response: JSON.stringify({
+              reviews: [
+                { label: 'A', scores: { accuracy: v[0]!.a, completeness: v[0]!.a, practicality: v[0]!.a, insight: v[0]!.a, overall: v[0]!.a }, strengths: 'ok', weaknesses: 'WEAKNESS_MARKER ignores scaling limits', ranking: 1 },
+                { label: 'B', scores: { accuracy: v[1]!.a, completeness: v[1]!.a, practicality: v[1]!.a, insight: v[1]!.a, overall: v[1]!.a }, strengths: 'ok', weaknesses: 'WEAKNESS_MARKER no cost analysis', ranking: 2 },
+                { label: 'C', scores: { accuracy: v[2]!.a, completeness: v[2]!.a, practicality: v[2]!.a, insight: v[2]!.a, overall: v[2]!.a }, strengths: 'ok', weaknesses: 'WEAKNESS_MARKER weak evidence', ranking: 3 },
+              ],
+            }),
+          } satisfies InvocationResult;
+        }
+
+        if (prompt.includes('Chairman')) {
+          return { ...base, response: 'Synthesis.' } satisfies InvocationResult;
+        }
+
+        return { ...base, response: 'Expert analysis of the topic.' } satisfies InvocationResult;
+      }),
+      healthCheck: vi.fn().mockResolvedValue({ level: 'healthy', message: 'OK', checked_at: new Date().toISOString() } satisfies HealthStatus),
+    };
+
+    const orchestrator = new Orchestrator(adapter, createMockRenderer(), createModels());
+    const session = await orchestrator.run('Design a scalable system architecture', { mode: 'debate' });
+
+    // Cross-examine must have run (low agreement) …
+    expect(session.stages.some(s => s.phase === 'cross_examine' && s.status === 'completed')).toBe(true);
+
+    // … and its prompt must carry the aggregated peer criticism back to authors.
+    const crossExaminePrompts = prompts.filter(p => p.includes('Round 2 of a multi-model debate'));
+    expect(crossExaminePrompts.length).toBeGreaterThan(0);
+    expect(crossExaminePrompts.some(p => p.includes('WEAKNESS_MARKER'))).toBe(true);
+    expect(crossExaminePrompts.some(p => p.includes("Peer reviewers' assessment of your answer"))).toBe(true);
+  });
+
   it('should track timing metadata', async () => {
     const adapter = createMockAdapter();
     const renderer = createMockRenderer();
