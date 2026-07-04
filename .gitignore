@@ -33,3 +33,4 @@ coverage/
 *.bak
 .claude/settings.local.json
 .claude/agent-memory/
+.claude/tasks/
