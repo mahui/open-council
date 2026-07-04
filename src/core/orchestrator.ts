@@ -26,7 +26,7 @@ import type {
   Session, Stage, Invocation, Agent, RunOptions,
   DebateMode, DebatePhase, SessionStatus, DegradationEvent,
 } from '../types/session.js';
-import type { ModelConfig } from '../types/config.js';
+import type { ModelConfig, RoleSet } from '../types/config.js';
 import type { InvocationAdapter, InvocationResult } from '../types/provider.js';
 import type { Renderer } from '../types/renderer.js';
 import { buildBroadcastPrompt, buildSynthesisPrompt, buildReviewPrompt, buildDevilAdvocateReviewPrompt, buildCrossExaminePrompt, extractDivergencePoints } from './prompt-builder.js';
@@ -35,7 +35,7 @@ import { parseReviewResponse, type ParsedReview } from './score-parser.js';
 import { calculateConsensus } from './consensus.js';
 import { buildReviewSummaries, type AnswerReviewSummary } from './review-aggregator.js';
 import { detectLanguage } from './language.js';
-import { generateRoles, resolveModel, defaultRoles, rateModelCapability } from './role-generator.js';
+import { generateRoles, resolveModel, defaultRoles, rateModelCapability, rolesFromRoleSet } from './role-generator.js';
 import { resolveMode } from './router.js';
 import { buildCompressionPlan, applyFallbackCompression, type ScoredResponse, aggregateReviewScores } from './compression.js';
 
@@ -63,6 +63,12 @@ export class Orchestrator {
     private maxAgents: number = 5,
     /** Optional explicit model for role-panel design (config: role_generator_model). */
     private roleGenModel?: ModelConfig,
+    /**
+     * Optional explicit role-set template (from `council --role-set X`). When
+     * present, executeRoute uses these fixed template roles verbatim and skips
+     * the dynamic LLM role-generation call entirely (explicit override path).
+     */
+    private explicitRoleSet?: RoleSet,
   ) {}
 
   async run(question: string, options: RunOptions): Promise<Session> {
@@ -247,18 +253,24 @@ export class Orchestrator {
       range = { min: 3, max: Math.max(upperBound, 3) };
     }
 
-    // Quick mode is a single-agent path: no productive-disagreement panel to
-    // design, so skip the role-generation LLM call entirely and use the
-    // built-in default role (keeps the GeneratedRole[] shape consistent).
-    const roles = session.resolved_mode === 'quick'
-      ? defaultRoles(range.min, models)
-      : await generateRoles(
-          session.question,
-          range,
-          this.adapter,
-          models,
-          this.roleGenModel,
-        );
+    // Role source, in priority order:
+    // 1. Explicit --role-set override: use the template roles verbatim (capped
+    //    at the mode's upper bound), skipping the role-generation LLM call.
+    // 2. Quick mode: single-agent path with no productive-disagreement panel to
+    //    design — use the built-in default role, also skipping the LLM call.
+    // 3. Otherwise: dynamic LLM role-panel design.
+    // All three yield GeneratedRole[] so the role→agent mapping below is shared.
+    const roles = this.explicitRoleSet
+      ? rolesFromRoleSet(this.explicitRoleSet, models).slice(0, range.max)
+      : session.resolved_mode === 'quick'
+        ? defaultRoles(range.min, models)
+        : await generateRoles(
+            session.question,
+            range,
+            this.adapter,
+            models,
+            this.roleGenModel,
+          );
 
     session.agents = roles.map(role => {
       const model = resolveModel(role, models);

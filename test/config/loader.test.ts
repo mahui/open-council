@@ -131,4 +131,52 @@ streaming: true
     expect(models).toHaveLength(1);
     expect(models[0]!.name).toBe('enabled');
   });
+
+  describe('role sets', () => {
+    it('lists the built-in default role sets', () => {
+      const loader = new ConfigLoader(testDir);
+      const sets = loader.listRoleSets();
+      // Built-in defaults/roles/*.yaml ship with the package.
+      expect(sets).toContain('default');
+      expect(sets).toContain('code-review');
+      expect(sets).toContain('architecture');
+    });
+
+    it('merges and dedupes user-defined role sets with built-ins', () => {
+      mkdirSync(join(testDir, 'roles'), { recursive: true });
+      writeFileSync(join(testDir, 'roles', 'my-set.yaml'), 'version: "1.0.0"\nroles: {}\n');
+      // A user file that shadows a built-in name must not appear twice.
+      writeFileSync(join(testDir, 'roles', 'default.yaml'), 'version: "1.0.0"\nroles: {}\n');
+
+      const loader = new ConfigLoader(testDir);
+      const sets = loader.listRoleSets();
+      expect(sets).toContain('my-set');
+      expect(sets.filter(s => s === 'default')).toHaveLength(1);
+      // Sorted output.
+      expect([...sets]).toEqual([...sets].sort());
+    });
+
+    it('loads a built-in role set by name', () => {
+      const loader = new ConfigLoader(testDir);
+      const roleSet = loader.loadRoleSet('default');
+      expect(Object.keys(roleSet.roles).length).toBeGreaterThan(0);
+    });
+
+    it('prefers a user-defined role set over a built-in of the same name', () => {
+      mkdirSync(join(testDir, 'roles'), { recursive: true });
+      writeFileSync(
+        join(testDir, 'roles', 'default.yaml'),
+        'version: "9.9.9"\nroles:\n  solo:\n    description: d\n    system_prompt: p\n    assign_to: []\n',
+      );
+      const loader = new ConfigLoader(testDir);
+      const roleSet = loader.loadRoleSet('default');
+      expect(roleSet.version).toBe('9.9.9');
+      expect(Object.keys(roleSet.roles)).toEqual(['solo']);
+    });
+
+    it('throws RoleSetNotFoundError for an unknown role set', () => {
+      const loader = new ConfigLoader(testDir);
+      expect(() => loader.loadRoleSet('does-not-exist')).toThrow('Role set not found');
+    });
+  });
 });

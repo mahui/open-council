@@ -5,7 +5,7 @@
  */
 
 import type { InvocationAdapter } from '../types/provider.js';
-import type { ModelConfig } from '../types/config.js';
+import type { ModelConfig, RoleSet } from '../types/config.js';
 import { detectLanguage } from './language.js';
 
 export interface GeneratedRole {
@@ -239,6 +239,56 @@ function parseRoleResponse(raw: string, models: ModelConfig[]): GeneratedRole[] 
   } catch {
     return null;
   }
+}
+
+/**
+ * Convert an explicit RoleSet template (from `council --role-set X`) into
+ * GeneratedRole[] — the same shape the dynamic panel designer produces — so the
+ * explicit-override path can reuse orchestrator.executeRoute's role→agent
+ * mapping verbatim (no divergent construction path).
+ *
+ * Model assignment: each role's `assign_to` list is an ordered model preference,
+ * matched against model name / id / provider (exact first, then substring). When
+ * no preference matches, models are assigned round-robin by role index.
+ *
+ * NOTE: role_set versioning (PRD §1780 — pinning/validating RoleSet.version) is
+ * intentionally out of scope for this phase (Phase discipline). RoleSet.version
+ * is carried through as data but not enforced here.
+ */
+export function rolesFromRoleSet(roleSet: RoleSet, models: ModelConfig[]): GeneratedRole[] {
+  return Object.entries(roleSet.roles).map(([roleName, def], index) => ({
+    name: roleName,
+    icon: '🤖',
+    description: def.description,
+    system_prompt: def.system_prompt,
+    assigned_model: pickModelForRole(def.assign_to, models, index).name,
+  }));
+}
+
+/**
+ * Resolve a role's `assign_to` preference list to a concrete model. Tries exact
+ * matches (name / id / provider) across the whole preference list first, then a
+ * substring pass, then falls back to round-robin by role index.
+ */
+function pickModelForRole(
+  assignTo: readonly string[],
+  models: ModelConfig[],
+  index: number,
+): ModelConfig {
+  const exact = models.find(m =>
+    assignTo.some(pref => m.name === pref || m.model === pref || m.provider === pref),
+  );
+  if (exact) return exact;
+
+  const fuzzy = models.find(m =>
+    assignTo.some(pref =>
+      m.name.includes(pref) || pref.includes(m.name) ||
+      (m.model !== undefined && (m.model.includes(pref) || pref.includes(m.model))),
+    ),
+  );
+  if (fuzzy) return fuzzy;
+
+  return models[index % models.length]!;
 }
 
 export function defaultRoles(count: number, models: ModelConfig[]): GeneratedRole[] {

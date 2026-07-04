@@ -74,6 +74,26 @@ export class ConfigLoader {
     throw new RoleSetNotFoundError(name);
   }
 
+  /**
+   * List all available role-set names (built-in defaults + user-defined),
+   * deduped and sorted. Used to build a helpful "available sets" hint when an
+   * explicit `--role-set` name cannot be resolved.
+   */
+  listRoleSets(): string[] {
+    const names = new Set<string>();
+    const dirs = [
+      join(import.meta.dirname, '..', '..', 'defaults', 'roles'),
+      join(this.configDir, 'roles'),
+    ];
+    for (const dir of dirs) {
+      if (!existsSync(dir)) continue;
+      for (const f of readdirSync(dir)) {
+        if (f.endsWith('.yaml')) names.add(f.slice(0, -'.yaml'.length));
+      }
+    }
+    return [...names].sort();
+  }
+
   isConfigured(): boolean {
     return existsSync(join(this.configDir, 'council.yaml'));
   }

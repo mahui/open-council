@@ -1,5 +1,7 @@
-import type { ModelConfig } from '../types/config.js';
+import type { ModelConfig, RoleSet } from '../types/config.js';
 import { Orchestrator } from '../core/orchestrator.js';
+import { ConfigLoader } from '../config/loader.js';
+import { RoleSetNotFoundError } from '../types/errors.js';
 import { createRenderer } from '../ui/renderer-factory.js';
 import { offerViewer } from '../ui/interactive.js';
 import { PATHS } from '../config/paths.js';
@@ -55,9 +57,19 @@ export async function runCouncil(question: string | undefined, options: CouncilO
 
   printModelBanner(models);
 
+  // Explicit --role-set override: load the named template up-front so a missing
+  // set fails fast with a clear message before any model is invoked. When
+  // omitted, roles are generated dynamically (unchanged behavior).
+  const explicitRoleSet = options.roleSet ? loadRoleSetOrExit(options.roleSet) : undefined;
+  if (explicitRoleSet) {
+    process.stderr.write(
+      `Using role set "${options.roleSet}" (${Object.keys(explicitRoleSet.roles).length} roles)\n`,
+    );
+  }
+
   const adapter = buildAdapter(credentialManager);
   const renderer = await createRenderer({ question, mode: options.mode, json: options.json, tuiMode });
-  const orchestrator = new Orchestrator(adapter, renderer, models, chairman, undefined, roleGenModel);
+  const orchestrator = new Orchestrator(adapter, renderer, models, chairman, undefined, roleGenModel, explicitRoleSet);
 
   const parentSynthesis = options.follow ? await loadParentSynthesis(store, options.follow) : undefined;
 
@@ -105,6 +117,37 @@ function printModelBanner(models: ModelConfig[]): void {
       ? `\x1b[1m🏛️  Council\x1b[0m \x1b[2m${models.length} model(s): ${modelList}\x1b[0m\n`
       : `Council: ${models.length} model(s): ${modelList}\n`,
   );
+}
+
+/**
+ * Load an explicit role set by name, exiting with a clear, actionable error
+ * (listing available sets) when it cannot be resolved or is empty.
+ */
+function loadRoleSetOrExit(name: string): RoleSet {
+  const loader = new ConfigLoader();
+  let roleSet: RoleSet;
+  try {
+    roleSet = loader.loadRoleSet(name);
+  } catch (err) {
+    if (err instanceof RoleSetNotFoundError) {
+      const available = loader.listRoleSets();
+      process.stderr.write(
+        `Error: role set "${name}" not found.\n` +
+        (available.length > 0
+          ? `Available role sets: ${available.join(', ')}\n`
+          : 'No role sets available.\n'),
+      );
+      process.exit(1);
+    }
+    throw err;
+  }
+
+  if (!roleSet.roles || Object.keys(roleSet.roles).length === 0) {
+    process.stderr.write(`Error: role set "${name}" defines no roles.\n`);
+    process.exit(1);
+  }
+
+  return roleSet;
 }
 
 /** Load a parent session's synthesis for --follow context (best-effort). */
