@@ -1,13 +1,25 @@
 /**
- * Benchmark reporting — silent renderer, response extraction, ablation /
- * release-gate / error-rate analysis, dry-run tables and summary computation.
- * Extracted from benchmark.ts to keep the command file thin (ARCH-03).
+ * Benchmark reporting — silent renderer plus ablation / release-gate /
+ * error-rate output tables. Statistics computation lives in report-stats.ts
+ * to keep this file thin (ARCH-03).
  */
 
 import type { BenchmarkQuestion, BenchmarkResult, BenchmarkReport } from '../../types/benchmark.js';
 import type { Session, Agent, DebatePhase, DegradationEvent, ConsensusResult } from '../../types/session.js';
 import type { InvocationResult } from '../../types/provider.js';
 import type { Renderer } from '../../ui/renderer.js';
+import {
+  RELEASE_GATES,
+  avgCoverageForCategory,
+  avgErrorRateForCategory,
+  groupQuestionsByCategory,
+} from './report-stats.js';
+
+export {
+  extractResponse,
+  computeSummary,
+  buildDryRunReport,
+} from './report-stats.js';
 
 // ---------------------------------------------------------------------------
 // Silent renderer — suppresses all debate progress output during benchmark
@@ -22,29 +34,6 @@ export class SilentRenderer implements Renderer {
   onDegradation(_event: DegradationEvent): void {}
   renderResult(_session: Session): void {}
 }
-
-// ---------------------------------------------------------------------------
-// Response extraction from a completed session
-// ---------------------------------------------------------------------------
-
-export function extractResponse(session: Session): string {
-  if (session.synthesis) return session.synthesis;
-
-  const broadcastStage = session.stages.find(s => s.phase === 'broadcast');
-  const first = broadcastStage?.invocations.find(inv => !inv.timed_out && inv.response_raw);
-  return first?.response_raw ?? '';
-}
-
-// ---------------------------------------------------------------------------
-// Release gate thresholds (D vs B, coverage delta)
-// ---------------------------------------------------------------------------
-
-const RELEASE_GATES: Record<string, { coverage: number; errorRate: number }> = {
-  architecture: { coverage: 0.20, errorRate: 0.30 },
-  code:         { coverage: 0.10, errorRate: 0.20 },
-  security:     { coverage: 0.25, errorRate: 0.40 },
-  general:      { coverage: 0.15, errorRate: 0.25 },
-};
 
 // ---------------------------------------------------------------------------
 // Output formatting helpers
@@ -67,26 +56,6 @@ export function printBanner(date: string): void {
   process.stdout.write('╚' + '═'.repeat(BANNER_WIDTH - 2) + '╝\n\n');
 }
 
-// ---------------------------------------------------------------------------
-// Dry-run helpers
-// ---------------------------------------------------------------------------
-
-export function buildDryRunReport(questions: BenchmarkQuestion[]): BenchmarkReport {
-  const results: BenchmarkResult[] = [];
-  const groups = ['A best-single-quick', 'B best-single-deep', 'C compare+synthesis', 'D full-debate'];
-  for (const q of questions) {
-    for (const mode of groups) {
-      results.push({ question_id: q.id, mode, coverage_score: 0, error_score: 0, elapsed_ms: 0, models_used: [] });
-    }
-  }
-  return {
-    run_id: `bench_${Date.now()}`,
-    timestamp: new Date().toISOString(),
-    results,
-    summary: { avg_coverage: 0, avg_error_rate: 0, total_elapsed_ms: 0 },
-  };
-}
-
 export function printDryRunTable(questions: BenchmarkQuestion[], report: BenchmarkReport): void {
   process.stdout.write('\nDry-run table (all scores = 0):\n');
   for (const q of questions) {
@@ -96,48 +65,8 @@ export function printDryRunTable(questions: BenchmarkQuestion[], report: Benchma
 }
 
 // ---------------------------------------------------------------------------
-// Analysis helpers
+// Analysis output tables
 // ---------------------------------------------------------------------------
-
-type GroupLabel = 'A best-single-quick' | 'B best-single-deep' | 'C compare+synthesis' | 'D full-debate';
-
-function avgCoverage(results: BenchmarkResult[], mode: GroupLabel, category?: string): number {
-  const filtered = results.filter(r =>
-    r.mode === mode && (category === undefined || true),
-  );
-  if (filtered.length === 0) return 0;
-  return filtered.reduce((s, r) => s + r.coverage_score, 0) / filtered.length;
-}
-
-function avgCoverageForCategory(
-  results: BenchmarkResult[],
-  questionIds: string[],
-  mode: GroupLabel,
-): number {
-  const filtered = results.filter(r => questionIds.includes(r.question_id) && r.mode === mode);
-  if (filtered.length === 0) return 0;
-  return filtered.reduce((s, r) => s + r.coverage_score, 0) / filtered.length;
-}
-
-function avgErrorRateForCategory(
-  results: BenchmarkResult[],
-  questionIds: string[],
-  mode: GroupLabel,
-): number {
-  const filtered = results.filter(r => questionIds.includes(r.question_id) && r.mode === mode);
-  if (filtered.length === 0) return 0;
-  // error_score = 1 - error_rate, so error_rate = 1 - error_score
-  const avgScore = filtered.reduce((s, r) => s + r.error_score, 0) / filtered.length;
-  return 1 - avgScore;
-}
-
-function groupQuestionsByCategory(questions: BenchmarkQuestion[]): Record<string, string[]> {
-  const map: Record<string, string[]> = {};
-  for (const q of questions) {
-    (map[q.category] ??= []).push(q.id);
-  }
-  return map;
-}
 
 export function printAblationAnalysis(questions: BenchmarkQuestion[], results: BenchmarkResult[]): void {
   process.stdout.write('─'.repeat(BANNER_WIDTH) + '\n\n');
@@ -216,17 +145,3 @@ export function printErrorRateSummary(questions: BenchmarkQuestion[], results: B
   }
   process.stdout.write('\n');
 }
-
-export function computeSummary(results: BenchmarkResult[]): BenchmarkReport['summary'] {
-  if (results.length === 0) {
-    return { avg_coverage: 0, avg_error_rate: 0, total_elapsed_ms: 0 };
-  }
-  const avg_coverage = results.reduce((s, r) => s + r.coverage_score, 0) / results.length;
-  const avg_error_rate = results.reduce((s, r) => s + (1 - r.error_score), 0) / results.length;
-  const total_elapsed_ms = results.reduce((s, r) => s + r.elapsed_ms, 0);
-  return { avg_coverage, avg_error_rate, total_elapsed_ms };
-}
-
-// Suppress unused-variable warning: avgCoverage is a utility that may be
-// used by future callers; keep it to avoid re-implementation.
-void avgCoverage;
