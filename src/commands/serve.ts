@@ -67,6 +67,18 @@ export async function runServe(options: ServeOptions): Promise<void> {
     if (options.open !== false) openBrowser(url);
   });
 
+  // serve() binds asynchronously; without a listener a bind failure (e.g.
+  // EADDRINUSE) surfaces as an unhandled 'error' event and a raw stack trace.
+  server.on('error', (err) => {
+    const e = err as NodeJS.ErrnoException;
+    process.stderr.write(
+      e.code === 'EADDRINUSE'
+        ? `Error: 端口 ${port} 已被占用。换用 "council serve --port <其它端口>" 或释放该端口。\n`
+        : `Error: 服务启动失败: ${e.message}\n`,
+    );
+    process.exit(1);
+  });
+
   // Graceful shutdown: release the SQLite connection (design §7).
   const shutdown = (): void => {
     server.close(() => {
