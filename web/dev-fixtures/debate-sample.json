@@ -1,0 +1,120 @@
+{
+  "_note": "录制的完整辩论事件序列，用于 ?mock=1 回放驱动 UI 开发。每帧 event/data 严格对应设计文档 §4 DebateEvent；delay 为 mock 回放节奏（毫秒），真实 SSE 忽略此字段。",
+  "debateId": "mock-debate-01",
+  "events": [
+    { "id": 1, "event": "debate_start", "delay": 200, "data": {
+      "debateId": "mock-debate-01",
+      "question": "我们的新项目初期存储应该选 SQLite 还是 Postgres？团队只有 3 个人，但预期一年内用户会快速增长。",
+      "mode": "debate"
+    }},
+    { "id": 2, "event": "phase", "delay": 300, "data": { "phase": "route", "index": 0, "total": 6 }},
+    { "id": 3, "event": "phase", "delay": 400, "data": { "phase": "broadcast", "index": 1, "total": 6 }},
+
+    { "id": 4, "event": "agent_start", "delay": 150, "data": { "agent": {
+      "agentId": "agent-researcher", "role": "🔬 研究员", "roleDescription": "循证分析，重数据与先例",
+      "modelName": "claude-sonnet-4", "isChairman": false, "isDevilAdvocate": false }}},
+    { "id": 5, "event": "agent_start", "delay": 150, "data": { "agent": {
+      "agentId": "agent-architect", "role": "🏗️ 架构师", "roleDescription": "关注可演进性与运维成本",
+      "modelName": "gpt-4o", "isChairman": false, "isDevilAdvocate": false }}},
+    { "id": 6, "event": "agent_start", "delay": 150, "data": { "agent": {
+      "agentId": "agent-risk", "role": "⚖️ 风险官", "roleDescription": "唱反调，专找失败模式",
+      "modelName": "gemini-1.5-pro", "isChairman": false, "isDevilAdvocate": true }}},
+
+    { "id": 7, "event": "agent_progress", "delay": 120, "data": { "agentId": "agent-researcher", "role": "🔬 研究员", "chunk": "## 初步判断\n\n先看数据。" }},
+    { "id": 8, "event": "agent_progress", "delay": 120, "data": { "agentId": "agent-architect", "role": "🏗️ 架构师", "chunk": "从**可演进性**角度，" }},
+    { "id": 9, "event": "agent_progress", "delay": 140, "data": { "agentId": "agent-researcher", "role": "🔬 研究员", "chunk": "SQLite 在**单写者**负载下可达数万 TPS 读，" }},
+    { "id": 10, "event": "agent_progress", "delay": 140, "data": { "agentId": "agent-risk", "role": "⚖️ 风险官", "chunk": "我要提醒一个常被忽视的失败模式：" }},
+    { "id": 11, "event": "agent_progress", "delay": 140, "data": { "agentId": "agent-architect", "role": "🏗️ 架构师", "chunk": "初期用 SQLite 的**迁移债**往往被低估。" }},
+    { "id": 12, "event": "agent_progress", "delay": 160, "data": { "agentId": "agent-researcher", "role": "🔬 研究员", "chunk": "但一旦出现**并发写**，写锁会成为瓶颈。\n\n" }},
+    { "id": 13, "event": "agent_progress", "delay": 160, "data": { "agentId": "agent-risk", "role": "⚖️ 风险官", "chunk": "如果一年内真的快速增长，`ALTER TABLE` 在百万行上的停机窗口。" }},
+
+    { "id": 14, "event": "agent_complete", "delay": 260, "data": {
+      "agent": { "agentId": "agent-researcher", "role": "🔬 研究员", "roleDescription": "循证分析，重数据与先例", "modelName": "claude-sonnet-4", "isChairman": false, "isDevilAdvocate": false },
+      "result": { "response": "## 初步判断\n\n先看数据。SQLite 在**单写者**负载下可达数万 TPS 读，写入受单一写锁限制。对 3 人团队的早期产品，绝大多数负载是读多写少，SQLite 足以支撑到**数千日活**。\n\n关键拐点在于：\n\n1. **并发写** 一旦成为常态，写锁排队会显著抬高 p99 延迟；\n2. 需要**多进程/多实例**写同一份数据时，SQLite 力不从心。\n\n> 结论：以数据看，早期 SQLite 不会是瓶颈，但要预留清晰的迁移路径。", "elapsedMs": 8400, "invocationMode": "api", "timedOut": false, "tokenUsage": { "inputTokens": 620, "outputTokens": 240 } }}},
+    { "id": 15, "event": "agent_complete", "delay": 240, "data": {
+      "agent": { "agentId": "agent-architect", "role": "🏗️ 架构师", "roleDescription": "关注可演进性与运维成本", "modelName": "gpt-4o", "isChairman": false, "isDevilAdvocate": false },
+      "result": { "response": "从**可演进性**角度，初期用 SQLite 的**迁移债**往往被低估。\n\n- 好处：零运维、单文件、本地开发极快；\n- 代价：日后迁 Postgres 要重写连接层、事务语义、类型映射（SQLite 动态类型 vs Postgres 严格类型）。\n\n我的建议是**从一开始就用 Postgres**，用 Docker Compose 一行起本地实例，把「迁移」这件事从路线图里彻底删除。运维成本在托管数据库（如 Neon/Supabase）时代已经很低。", "elapsedMs": 9100, "invocationMode": "api", "timedOut": false, "tokenUsage": { "inputTokens": 610, "outputTokens": 210 } }}},
+    { "id": 16, "event": "agent_complete", "delay": 240, "data": {
+      "agent": { "agentId": "agent-risk", "role": "⚖️ 风险官", "roleDescription": "唱反调，专找失败模式", "modelName": "gemini-1.5-pro", "isChairman": false, "isDevilAdvocate": true },
+      "result": { "response": "我要提醒一个常被忽视的失败模式：**过早乐观**。\n\n如果一年内真的快速增长，`ALTER TABLE` 在百万行上的停机窗口、备份/恢复策略、时区与并发事务的边界，SQLite 都会让你**在最忙的时候**踩坑。\n\n但反过来说——**如果增长没如期到来**，你为 Postgres 付出的运维复杂度就是纯浪费。真正的风险不是选错数据库，而是**没有可逆的决策**。", "elapsedMs": 8800, "invocationMode": "api", "timedOut": false, "tokenUsage": { "inputTokens": 600, "outputTokens": 205 } }}},
+
+    { "id": 17, "event": "phase", "delay": 350, "data": { "phase": "cross_examine", "index": 2, "total": 6 }},
+    { "id": 18, "event": "agent_progress", "delay": 160, "data": { "agentId": "agent-architect", "role": "🏗️ 架构师", "chunk": "\n\n**回应风险官**：可逆性正是我主张 Postgres 的理由——" }},
+    { "id": 19, "event": "agent_progress", "delay": 180, "data": { "agentId": "agent-architect", "role": "🏗️ 架构师", "chunk": "先上 Postgres 才是可逆的，反向迁移几乎不可逆。" }},
+    { "id": 20, "event": "agent_complete", "delay": 300, "data": {
+      "agent": { "agentId": "agent-architect", "role": "🏗️ 架构师", "roleDescription": "关注可演进性与运维成本", "modelName": "gpt-4o", "isChairman": false, "isDevilAdvocate": false },
+      "result": { "response": "从**可演进性**角度，初期用 SQLite 的**迁移债**往往被低估。\n\n**回应风险官**：可逆性正是我主张 Postgres 的理由——先上 Postgres 才是可逆的（用得不重可随时降级心智），而「先 SQLite 再迁 Postgres」在数据量上来后几乎不可逆。用托管 Postgres，运维复杂度已被外包。", "elapsedMs": 5200, "invocationMode": "api", "timedOut": false, "tokenUsage": { "inputTokens": 720, "outputTokens": 180 } }}},
+
+    { "id": 21, "event": "phase", "delay": 350, "data": { "phase": "review", "index": 3, "total": 6 }},
+    { "id": 22, "event": "agent_start", "delay": 150, "data": { "agent": {
+      "agentId": "__review__", "role": "📊 交叉评审", "roleDescription": "对匿名回答按维度打分",
+      "modelName": "claude-sonnet-4", "isChairman": false, "isDevilAdvocate": false }}},
+    { "id": 23, "event": "agent_progress", "delay": 200, "data": { "agentId": "__review__", "role": "📊 交叉评审", "chunk": "对三份匿名回答按 **论证严谨性 / 可执行性 / 风险覆盖** 打分…\n\n" }},
+    { "id": 24, "event": "agent_progress", "delay": 220, "data": { "agentId": "__review__", "role": "📊 交叉评审", "chunk": "| 回答 | 严谨性 | 可执行性 | 风险覆盖 |\n|---|---|---|---|\n| A | 8.5 | 7.0 | 6.5 |\n| B | 7.5 | 8.5 | 6.0 |\n| C | 7.0 | 6.0 | 9.0 |\n" }},
+    { "id": 25, "event": "agent_complete", "delay": 300, "data": {
+      "agent": { "agentId": "__review__", "role": "📊 交叉评审", "roleDescription": "对匿名回答按维度打分", "modelName": "claude-sonnet-4", "isChairman": false, "isDevilAdvocate": false },
+      "result": { "response": "对三份匿名回答按 **论证严谨性 / 可执行性 / 风险覆盖** 打分：\n\n| 回答 | 严谨性 | 可执行性 | 风险覆盖 |\n|---|---|---|---|\n| A（研究员） | 8.5 | 7.0 | 6.5 |\n| B（架构师） | 7.5 | 8.5 | 6.0 |\n| C（风险官） | 7.0 | 6.0 | 9.0 |\n\n三者高度互补：A 提供量化拐点，B 给出可执行路径，C 点出不可逆性风险。分歧集中在**是否应为未必到来的增长提前付费**。", "elapsedMs": 6100, "invocationMode": "api", "timedOut": false, "tokenUsage": { "inputTokens": 1400, "outputTokens": 260 } }}},
+
+    { "id": 26, "event": "degradation", "delay": 300, "data": { "event": {
+      "phase": "cross_examine", "reason": "gemini-1.5-pro 在第 2 轮质询超时（30s）", "impact": "该轮跳过风险官的二次质询，使用其首轮回答参与后续评审" }}},
+
+    { "id": 27, "event": "phase", "delay": 350, "data": { "phase": "consensus", "index": 4, "total": 6 }},
+    { "id": 28, "event": "consensus", "delay": 400, "data": { "consensus": {
+      "agreement_score": 0.72,
+      "consensus_score": 0.58,
+      "model_diversity_factor": 0.81,
+      "raw_agreement": 0.72,
+      "dimension_scores": {
+        "论证严谨性": { "score": 7.7, "divergence": 0.6 },
+        "可执行性": { "score": 7.2, "divergence": 1.1 },
+        "风险覆盖": { "score": 7.2, "divergence": 1.4 }
+      }
+    }}},
+
+    { "id": 29, "event": "phase", "delay": 350, "data": { "phase": "synthesis", "index": 5, "total": 6 }},
+    { "id": 30, "event": "agent_start", "delay": 150, "data": { "agent": {
+      "agentId": "__synthesis__", "role": "🏛️ 主席", "roleDescription": "综合各方，给出可执行结论",
+      "modelName": "claude-opus-4", "isChairman": true, "isDevilAdvocate": false }}},
+    { "id": 31, "event": "agent_progress", "delay": 200, "data": { "agentId": "__synthesis__", "role": "🏛️ 主席", "chunk": "## 结论\n\n" }},
+    { "id": 32, "event": "agent_progress", "delay": 200, "data": { "agentId": "__synthesis__", "role": "🏛️ 主席", "chunk": "**用 Postgres，但走托管、保持 schema 极简。**\n\n" }},
+    { "id": 33, "event": "agent_progress", "delay": 220, "data": { "agentId": "__synthesis__", "role": "🏛️ 主席", "chunk": "三方分歧的核心不是性能，而是**决策可逆性**。" }},
+    { "id": 34, "event": "agent_complete", "delay": 350, "data": {
+      "agent": { "agentId": "__synthesis__", "role": "🏛️ 主席", "roleDescription": "综合各方，给出可执行结论", "modelName": "claude-opus-4", "isChairman": true, "isDevilAdvocate": false },
+      "result": { "response": "## 结论\n\n**用 Postgres，但走托管、保持 schema 极简。**\n\n三方分歧的核心不是性能，而是**决策可逆性**（风险官）。研究员证明 SQLite 早期不会成为性能瓶颈，但架构师指出的迁移不可逆性是更大的隐性成本。\n\n### 可执行路径\n\n1. 用托管 Postgres（Neon / Supabase 免费档），本地 `docker compose up` 起实例——运维成本趋近于零；\n2. schema 保持极简、迁移用工具管理（如 Prisma / Drizzle），把变更成本前置摊薄；\n3. 若三个月内增长未启动，这个决策的额外成本几乎为零，却买断了「最忙时迁库」的尾部风险。\n\n> 一句话：**为可逆性付一点小钱，避免为不可逆性付一大笔。**", "elapsedMs": 11200, "invocationMode": "api", "timedOut": false, "tokenUsage": { "inputTokens": 2100, "outputTokens": 420 } }}},
+
+    { "id": 35, "event": "phase", "delay": 250, "data": { "phase": "completed", "index": 6, "total": 6 }},
+    { "id": 36, "event": "result", "delay": 300, "data": { "session": {
+      "session_id": "sess-mock-01",
+      "question": "我们的新项目初期存储应该选 SQLite 还是 Postgres？团队只有 3 个人，但预期一年内用户会快速增长。",
+      "question_hash": "mockhash01",
+      "mode": "debate",
+      "resolved_mode": "debate",
+      "status": "completed",
+      "agents": [
+        { "agent_id": "agent-researcher", "role": "🔬 研究员", "role_description": "循证分析，重数据与先例", "is_chairman": false, "is_devil_advocate": false, "config": { "name": "claude-sonnet-4" }, "system_prompt": "" },
+        { "agent_id": "agent-architect", "role": "🏗️ 架构师", "role_description": "关注可演进性与运维成本", "is_chairman": false, "is_devil_advocate": false, "config": { "name": "gpt-4o" }, "system_prompt": "" },
+        { "agent_id": "agent-risk", "role": "⚖️ 风险官", "role_description": "唱反调，专找失败模式", "is_chairman": false, "is_devil_advocate": true, "config": { "name": "gemini-1.5-pro" }, "system_prompt": "" },
+        { "agent_id": "agent-chair", "role": "🏛️ 主席", "role_description": "综合各方，给出可执行结论", "is_chairman": true, "is_devil_advocate": false, "config": { "name": "claude-opus-4" }, "system_prompt": "" }
+      ],
+      "stages": [],
+      "synthesis": "## 结论\n\n**用 Postgres，但走托管、保持 schema 极简。**\n\n三方分歧的核心不是性能，而是**决策可逆性**（风险官）。研究员证明 SQLite 早期不会成为性能瓶颈，但架构师指出的迁移不可逆性是更大的隐性成本。\n\n### 可执行路径\n\n1. 用托管 Postgres（Neon / Supabase 免费档），本地 `docker compose up` 起实例；\n2. schema 保持极简、迁移用工具管理；\n3. 若三个月内增长未启动，额外成本几乎为零，却买断了「最忙时迁库」的尾部风险。\n\n> **为可逆性付一点小钱，避免为不可逆性付一大笔。**",
+      "consensus": {
+        "agreement_score": 0.72, "consensus_score": 0.58, "model_diversity_factor": 0.81, "raw_agreement": 0.72,
+        "dimension_scores": {
+          "论证严谨性": { "score": 7.7, "divergence": 0.6 },
+          "可执行性": { "score": 7.2, "divergence": 1.1 },
+          "风险覆盖": { "score": 7.2, "divergence": 1.4 }
+        }
+      },
+      "degradation_events": [
+        { "phase": "cross_examine", "reason": "gemini-1.5-pro 在第 2 轮质询超时（30s）", "impact": "该轮跳过风险官的二次质询，使用其首轮回答参与后续评审" }
+      ],
+      "tags": ["架构", "数据库"],
+      "user_rating": 5,
+      "created_at": "2026-07-05T09:12:00.000Z",
+      "completed_at": "2026-07-05T09:13:18.000Z",
+      "total_elapsed_ms": 78000,
+      "devil_advocate_mode": true
+    }}}
+  ]
+}

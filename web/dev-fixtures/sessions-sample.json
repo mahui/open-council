@@ -1,0 +1,10 @@
+{
+  "_note": "GET /api/sessions 的 mock 响应（?mock=1）。字段对应设计文档 §5 SessionSummary 精简投影。点开详情时 mock 模式统一用 debate-sample.json 的终态 session 回放。",
+  "sessions": [
+    { "session_id": "sess-mock-01", "question": "我们的新项目初期存储应该选 SQLite 还是 Postgres？团队只有 3 个人，但预期一年内用户会快速增长。", "resolved_mode": "debate", "status": "completed", "consensus_score": 0.58, "created_at": "2026-07-05T09:12:00.000Z", "user_rating": 5 },
+    { "session_id": "sess-mock-02", "question": "该不该在这个阶段引入微服务架构？", "resolved_mode": "debate", "status": "completed", "consensus_score": 0.41, "created_at": "2026-07-04T18:40:00.000Z", "user_rating": 4 },
+    { "session_id": "sess-mock-03", "question": "用 REST 还是 GraphQL 做对外 API？", "resolved_mode": "compare", "status": "completed", "consensus_score": 0.77, "created_at": "2026-07-03T11:05:00.000Z" },
+    { "session_id": "sess-mock-04", "question": "如何在两周内把首屏加载从 4.2s 降到 1.5s 以内？", "resolved_mode": "quick", "status": "completed", "consensus_score": 0.83, "created_at": "2026-07-02T20:22:00.000Z", "user_rating": 5 },
+    { "session_id": "sess-mock-05", "question": "现在这个规模，值得自建可观测性栈还是买 SaaS？", "resolved_mode": "auto", "status": "failed", "created_at": "2026-07-01T08:15:00.000Z" }
+  ]
+}

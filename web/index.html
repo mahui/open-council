@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light dark" />
+  <title>议事厅 · Open Council</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <div id="app" v-scope @vue:mounted="init()" v-cloak>
+
+    <!-- ============ 顶栏 ============ -->
+    <header class="topbar">
+      <a class="brand" href="#/" @click="go('/')">
+        <span class="brand-mark">⚖</span>
+        <span class="brand-text">议事厅<span class="brand-sub">Open Council</span></span>
+      </a>
+      <nav class="topnav">
+        <a href="#/" :class="{active: route.name==='launch'}">发起</a>
+        <a href="#/history" :class="{active: route.name==='history'}">历史</a>
+      </nav>
+      <button class="theme-btn" @click="cycleTheme()" :title="'主题：'+theme">
+        <span v-text="themeIcon()"></span>
+      </button>
+    </header>
+
+    <main>
+      <!-- ================= 发起页 ================= -->
+      <section v-if="route.name==='launch'" class="launch">
+        <div class="launch-inner">
+          <h1 class="launch-title">把一个难题，交给一屋子专家</h1>
+          <p class="launch-lede">多位模型分头作答、相互质询、评审打分，主席综合成一份可执行结论。</p>
+
+          <textarea class="q-input" v-model="form.question" autofocus
+            rows="3" placeholder="描述你要请教的问题，越具体越好…"
+            @keydown.meta.enter="submitDebate()" @keydown.ctrl.enter="submitDebate()"></textarea>
+
+          <div class="field">
+            <label class="field-label">辩论模式</label>
+            <div class="seg">
+              <button v-for="m in modes" :key="m" type="button"
+                :class="{on: form.mode===m}" @click="form.mode=m" v-text="modeLabel(m)"></button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="field-label">参与模型 <span class="hint">（不选则用默认阵容）</span></label>
+            <div v-if="modelsError" class="inline-error" v-text="modelsError"></div>
+            <div class="chips">
+              <button v-for="m in models" :key="m.name" type="button"
+                :class="{on: form.models.includes(m.name)}" @click="toggleModel(m.name)">
+                <span class="chip-name" v-text="m.name"></span>
+                <span class="chip-tag" v-if="m.invocation" v-text="m.invocation"></span>
+              </button>
+            </div>
+          </div>
+
+          <div class="field row">
+            <label class="switch">
+              <input type="checkbox" v-model="form.devilAdvocate" />
+              <span>加入唱反调的「风险官」</span>
+            </label>
+          </div>
+
+          <div v-if="launchError" class="inline-error" v-text="launchError"></div>
+
+          <div class="launch-actions">
+            <button class="primary" :disabled="!canSubmit()" @click="submitDebate()">
+              <span v-if="!launching">开始辩论</span>
+              <span v-else>发起中…</span>
+            </button>
+            <span class="kbd-hint">⌘/Ctrl + Enter</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= 观看 / 回放（共用） ================= -->
+      <section v-if="route.name==='watch' || route.name==='replay'" class="watch">
+        <div v-if="debate.error" class="inline-error big" v-text="debate.error"></div>
+
+        <div class="watch-head">
+          <div class="watch-q">
+            <span class="mode-badge" v-text="modeLabel(debate.mode)"></span>
+            <h2 v-text="debate.question || '（加载中…）'"></h2>
+          </div>
+          <span v-if="route.name==='watch'" :class="'conn conn-'+debate.conn" v-text="connLabel()"></span>
+        </div>
+
+        <!-- 阶段进度条 -->
+        <ol class="stops">
+          <li v-for="(s, i) in phaseStopDefs" :key="s.key" :class="'stop '+stopState(i)">
+            <span class="stop-dot"></span>
+            <span class="stop-label" v-text="s.label"></span>
+            <span class="stop-round" v-if="s.key==='review' && debate.crossExamineRound>0"
+              v-text="'质询 '+debate.crossExamineRound+' 轮'"></span>
+          </li>
+        </ol>
+
+        <!-- 降级提示条（非侵入） -->
+        <div v-if="debate.degradations.length" class="degrade-strip">
+          <div v-for="(g, i) in debate.degradations" :key="i" class="degrade">
+            <span class="degrade-icon">▲</span>
+            <span><b v-text="g.reason"></b> — <span class="muted" v-text="g.impact"></span></span>
+          </div>
+        </div>
+
+        <!-- 专家面板网格 -->
+        <div class="experts">
+          <article v-for="e in debate.experts" :key="e.agentId" class="card expert" :class="{running: e.status==='running'}">
+            <header class="card-head">
+              <div class="card-id">
+                <span class="role" v-text="e.role"></span>
+                <span v-if="e.isDevilAdvocate" class="devil" title="唱反调">反</span>
+              </div>
+              <div class="card-meta">
+                <span class="model" v-text="e.modelName"></span>
+                <span v-if="e.status==='running'" class="speaking"><i></i><i></i><i></i> 发言中</span>
+                <span v-else-if="e.result" class="elapsed nums" v-text="fmtMs(e.result.elapsedMs)"></span>
+              </div>
+            </header>
+            <p class="card-desc" v-text="e.roleDescription"></p>
+            <div class="md" v-html="e.html"></div>
+            <span v-if="e.status==='running'" class="caret"></span>
+            <footer v-if="e.result && (e.result.truncated || e.result.timedOut)" class="card-flags">
+              <span v-if="e.result.timedOut" class="flag warn">超时</span>
+              <span v-if="e.result.truncated" class="flag">截断</span>
+            </footer>
+          </article>
+        </div>
+
+        <!-- 交叉评审 -->
+        <section v-if="debate.review" class="block review">
+          <h3 class="block-title"><span v-text="debate.review.role"></span>
+            <span v-if="debate.review.status==='running'" class="speaking sm"><i></i><i></i><i></i></span>
+          </h3>
+          <div class="md" v-html="debate.review.html"></div>
+        </section>
+
+        <!-- 共识仪表 -->
+        <section v-if="debate.consensus" class="block consensus" :class="'tone-'+consensusTone()">
+          <h3 class="block-title">共识判定</h3>
+          <div class="gauges">
+            <div class="gauge">
+              <div class="gauge-val nums" v-text="pct(debate.consensus.consensus_score)+'%'"></div>
+              <div class="gauge-label">共识度</div>
+              <div class="bar"><span :style="{width: pct(debate.consensus.consensus_score)+'%'}"></span></div>
+            </div>
+            <div class="gauge">
+              <div class="gauge-val nums" v-text="pct(debate.consensus.agreement_score)+'%'"></div>
+              <div class="gauge-label">评审一致度</div>
+              <div class="bar"><span :style="{width: pct(debate.consensus.agreement_score)+'%'}"></span></div>
+            </div>
+            <div class="gauge">
+              <div class="gauge-val nums" v-text="pct(debate.consensus.model_diversity_factor)+'%'"></div>
+              <div class="gauge-label">模型多样性</div>
+              <div class="bar"><span :style="{width: pct(debate.consensus.model_diversity_factor)+'%'}"></span></div>
+            </div>
+          </div>
+          <table v-if="dimEntries().length" class="dims">
+            <thead><tr><th>维度</th><th class="num">得分</th><th class="num">分歧</th></tr></thead>
+            <tbody>
+              <tr v-for="d in dimEntries()" :key="d.name">
+                <td v-text="d.name"></td>
+                <td class="num nums" v-text="fmtScore(d.score)"></td>
+                <td class="num nums" v-text="fmtScore(d.divergence)"></td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <!-- 主席综合（突出） -->
+        <section v-if="debate.synthesis" class="block synthesis">
+          <h3 class="block-title">主席综合结论
+            <span v-if="debate.synthesis.status==='running'" class="speaking sm"><i></i><i></i><i></i></span>
+          </h3>
+          <div class="md md-lg" v-html="debate.synthesis.html"></div>
+          <span v-if="debate.synthesis.status==='running'" class="caret"></span>
+        </section>
+
+        <div class="watch-foot">
+          <a href="#/history">← 返回历史</a>
+          <a v-if="debate.session" :href="'#/session/'+debate.session.session_id">查看完整会话 →</a>
+        </div>
+      </section>
+
+      <!-- ================= 历史页 ================= -->
+      <section v-if="route.name==='history'" class="history">
+        <h1 class="page-title">历史会话</h1>
+        <div v-if="historyError" class="inline-error" v-text="historyError"></div>
+        <div v-if="historyLoading" class="muted pad">加载中…</div>
+        <div v-else-if="!sessions.length" class="empty">还没有会话，去<a href="#/">发起一场辩论</a>吧。</div>
+        <ul v-else class="sess-list">
+          <li v-for="s in sessions" :key="s.session_id" class="sess" @click="go('/session/'+s.session_id)">
+            <div class="sess-main">
+              <p class="sess-q" v-text="preview(s.question, 120)"></p>
+              <div class="sess-meta">
+                <span class="mode-badge sm" v-text="modeLabel(s.resolved_mode)"></span>
+                <span :class="'status s-'+s.status" v-text="s.status"></span>
+                <span class="muted nums" v-text="fmtDate(s.created_at)"></span>
+              </div>
+            </div>
+            <div class="sess-side">
+              <div v-if="s.consensus_score!=null" class="cons-chip nums" v-text="pct(s.consensus_score)+'%'"></div>
+              <div v-if="s.user_rating" class="stars" v-text="'★'.repeat(s.user_rating)"></div>
+            </div>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
