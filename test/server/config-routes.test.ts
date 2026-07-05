@@ -71,7 +71,12 @@ function makeHarness(models: ModelConfig[]): Harness {
   } as unknown as SessionStore;
   const manager = new DebateManager({ runtime, store, eventLogOptions: { ttlMs: 60_000 } });
 
-  const app = createApp({ manager, store, runtime, loader, credentialManager, port: PORT, webRoot: tmpdir() });
+  const app = createApp({
+    manager, store, runtime, loader, credentialManager, port: PORT, webRoot: tmpdir(),
+    // Keep custom-endpoint key files inside the temp dir — never touch the
+    // user's real ~/.council/credentials (cleaned up in afterEach).
+    credentialsDir: join(dir, 'credentials'),
+  });
   return { app, loader, runtime, dir };
 }
 
@@ -223,8 +228,10 @@ describe('POST /api/providers/custom — credential ingress', () => {
     const modelRaw = harness.loader.readModelConfigRaw('custom:mylab:a');
     expect(modelRaw).not.toContain(secret);
 
-    // Cleanup the key file written outside the temp config dir.
+    // Key file lives under the injected temp credentialsDir → afterEach's
+    // rmSync(dir) cleans it; this belt-and-braces removal keeps the test hermetic.
     rmSync(keyPath, { force: true });
+    expect(keyPath.startsWith(harness.dir)).toBe(true);
   });
 
   it('rejects a non-http base URL with 400', async () => {

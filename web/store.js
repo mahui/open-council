@@ -442,7 +442,8 @@ export function createStore() {
       try {
         if (MOCK) { this.mockPut(payload, okMsg); return; }
         const res = await reqJSON('PUT', '/api/config', payload);
-        if (res.status === 409) { this.onConflict(res.data); return; }
+        // 409 body is { error, current: ConfigDTO } —— 取 current 做 rebase。
+        if (res.status === 409) { this.onConflict(res.data && res.data.current ? res.data.current : res.data); return; }
         if (!res.ok) throw new Error((res.data && res.data.error) || `HTTP ${res.status}`);
         this.applyConfigDTO(res.data);
         this.showToast(okMsg, 'ok');
@@ -496,7 +497,13 @@ export function createStore() {
           return;
         }
         const res = await reqJSON('PATCH', `/api/models/${encodeURIComponent(m.name)}`, { enabled: next, version: m.version });
-        if (res.status === 409) { this.onConflict(res.data); return; }
+        // 模型文件有独立乐观锁：409 body 是 { error, current: ModelSettingDTO|null }。
+        // 就地 rebase 该行（刷新 version/enabled），让用户带新令牌重试，不牵动整份 config。
+        if (res.status === 409) {
+          if (res.data && res.data.current) Object.assign(m, res.data.current);
+          this.showToast(`${m.name} 已被外部修改，请重试`, 'bad');
+          return;
+        }
         if (res.status === 404) throw new Error('模型不存在');
         if (!res.ok) throw new Error((res.data && res.data.error) || `HTTP ${res.status}`);
         Object.assign(m, res.data);

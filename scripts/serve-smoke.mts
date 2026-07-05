@@ -11,7 +11,11 @@ import { join } from 'node:path';
 import { request } from 'node:http';
 import { createApp } from '../src/server/app.js';
 import { DebateManager } from '../src/server/debate-manager.js';
+import { RuntimeConfig, buildSnapshot } from '../src/server/runtime-config.js';
 import { SessionStore } from '../src/storage/session-store.js';
+import { ConfigLoader } from '../src/config/loader.js';
+import { CredentialManager } from '../src/providers/credentials/discovery.js';
+import { assembleConfig } from '../src/config/assemble-council.js';
 import { ModelConfigSchema } from '../src/config/schema.js';
 import type { InvocationAdapter, InvocationResult, HealthStatus, OnChunk } from '../src/types/provider.js';
 import type { ModelConfig } from '../src/types/config.js';
@@ -56,10 +60,26 @@ const models: ModelConfig[] = ['mock-a', 'mock-b', 'mock-c'].map((name, i) =>
 
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'oc-smoke-'));
-  const store = new SessionStore(dir);
-  const manager = new DebateManager({ adapter: mockAdapter, models, store, defaultChairman: 'mock-a' });
+  const store = new SessionStore(join(dir, 'sessions'));
+
+  // Post-#40 wiring: models/chairman/adapter live behind a RuntimeConfig snapshot
+  // that DebateManager + routes read at request time. Seed a temp config dir so
+  // buildSnapshot resolves the enabled set + default chairman from on-disk truth.
+  const loader = new ConfigLoader(dir);
+  for (const m of models) loader.saveModelConfig(m);
+  loader.saveCouncilConfig(
+    assembleConfig({
+      generalOverride: { default_mode: 'auto', default_chairman: 'mock-a', min_agents: 2, max_agents: 5 },
+      prefer: models.map((m) => m.name),
+      chairman: 'mock-a',
+      base: null,
+    }),
+  );
+  const credentialManager = new CredentialManager();
+  const runtime = new RuntimeConfig(buildSnapshot({ loader, credentialManager, adapter: mockAdapter }));
+  const manager = new DebateManager({ runtime, store });
   const webRoot = join(import.meta.dirname, '..', 'web');
-  const app = createApp({ manager, store, models, defaultChairman: 'mock-a', port: PORT, webRoot });
+  const app = createApp({ manager, store, runtime, loader, credentialManager, port: PORT, webRoot });
   const server = serve({ fetch: app.fetch, port: PORT, hostname: '127.0.0.1' });
   await new Promise((r) => setTimeout(r, 300));
 

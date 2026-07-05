@@ -30,6 +30,8 @@ export interface RouteDeps {
   loader: ConfigLoader;
   /** Boot credential set (rescan replaces it). */
   credentialManager: CredentialManager;
+  /** Override for the custom-endpoint key dir (tests inject a temp dir). */
+  credentialsDir?: string;
 }
 
 const StartDebateSchema = z.object({
@@ -122,6 +124,7 @@ export function createApiRoutes(deps: RouteDeps): Hono {
     runtime: deps.runtime,
     loader: deps.loader,
     credentialManager: deps.credentialManager,
+    ...(deps.credentialsDir !== undefined ? { credentialsDir: deps.credentialsDir } : {}),
   }));
 
   return api;

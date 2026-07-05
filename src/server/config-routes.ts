@@ -43,6 +43,12 @@ export interface ConfigRouteDeps {
   loader: ConfigLoader;
   /** Credential set the boot adapter was built from (rescan replaces it). */
   credentialManager: CredentialManager;
+  /**
+   * Directory custom-endpoint key files land in. Defaults to the real
+   * `~/.council/credentials`; injected in tests to avoid touching the user's
+   * credential store.
+   */
+  credentialsDir?: string;
 }
 
 // —— request schemas —— //
@@ -174,10 +180,11 @@ export function createConfigRoutes(deps: ConfigRouteDeps): Hono {
     }
 
     // Persist the key straight to a 0o600 file — never logged, never echoed (SEC-02).
+    const credentialsDir = deps.credentialsDir ?? PATHS.credentials;
     let credPath: string | undefined;
     if (parsed.data.apiKey && parsed.data.apiKey.length > 0) {
-      mkdirSync(PATHS.credentials, { recursive: true, mode: 0o700 });
-      credPath = customCredentialPath(sanitized);
+      mkdirSync(credentialsDir, { recursive: true, mode: 0o700 });
+      credPath = customCredentialPath(sanitized, credentialsDir);
       writeFileSync(credPath, parsed.data.apiKey);
       chmodSync(credPath, 0o600);
     }

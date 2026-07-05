@@ -101,9 +101,13 @@ export function sanitizeProviderName(raw: string): string {
   return raw.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
 }
 
-/** Absolute path of the credential key file for a custom provider (0o600 on write). */
-export function customCredentialPath(sanitizedName: string): string {
-  return join(PATHS.credentials, `custom-${sanitizedName}.key`);
+/**
+ * Absolute path of the credential key file for a custom provider (0o600 on write).
+ * `baseDir` defaults to the real credentials dir; callers (tests) inject a temp
+ * dir to avoid touching the user's `~/.council/credentials`.
+ */
+export function customCredentialPath(sanitizedName: string, baseDir: string = PATHS.credentials): string {
+  return join(baseDir, `custom-${sanitizedName}.key`);
 }
 
 /**
