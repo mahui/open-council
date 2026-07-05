@@ -108,6 +108,9 @@ describe('GET /api/config — redaction', () => {
     expect(custom?.apiBaseUrl).toBe('http://localhost:11434/v1');
     expect(custom?.hasCredentialFile).toBe(false); // path doesn't exist
 
+    // Each model carries its own per-file optimistic-lock token (§4.3).
+    for (const m of dto.models) expect(m.version).toMatch(/^[0-9a-f]{64}$/);
+
     // No secret-ish fields anywhere in the response body.
     const raw = JSON.stringify(dto);
     for (const forbidden of ['api_key_env', 'api_credential_path', 'ANTHROPIC_API_KEY', 'apiKey', 'token']) {
@@ -166,20 +169,22 @@ describe('PATCH /api/models/:name — enable toggle', () => {
     const dto = await getConfig(harness);
     const model = dto.models.find((m) => m.name === 'gemini');
     expect(model?.enabled).toBe(true);
-    const raw = harness.loader.readModelConfigRaw('gemini');
-    const version = await modelVersion(harness, 'gemini');
+    expect(model?.version).toMatch(/^[0-9a-f]{64}$/);
 
+    // Echo back the per-model version token from the GET projection (frontend flow).
     const res = await harness.app.request('http://x/api/models/gemini', {
       method: 'PATCH', headers: WRITE_HEADERS,
-      body: JSON.stringify({ enabled: false, version }),
+      body: JSON.stringify({ enabled: false, version: model!.version }),
     });
     expect(res.status).toBe(200);
     const patched = (await res.json()) as ModelSettingDTO;
     expect(patched.enabled).toBe(false);
+    // The write changed the file, so the returned lock token must be fresh.
+    expect(patched.version).toMatch(/^[0-9a-f]{64}$/);
+    expect(patched.version).not.toBe(model!.version);
 
     expect(harness.loader.loadModelConfig('gemini')?.enabled).toBe(false);
     expect(harness.runtime.current.models.map((m) => m.name)).not.toContain('gemini');
-    expect(raw).not.toBeNull();
   });
 
   it('returns 404 for an unknown model', async () => {
@@ -251,10 +256,3 @@ describe('POST /api/setup/rescan — discovery summary', () => {
     }
   });
 });
-
-/** Fetch the current per-file version token for a model (via GET /config? no — hash). */
-async function modelVersion(h: Harness, name: string): Promise<string> {
-  const raw = h.loader.readModelConfigRaw(name);
-  const { createHash } = await import('node:crypto');
-  return createHash('sha256').update(raw ?? '').digest('hex');
-}

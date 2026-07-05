@@ -142,7 +142,7 @@ export function createConfigRoutes(deps: ConfigRouteDeps): Hono {
     if (parsed.data.version !== hashContent(raw)) {
       const current = deps.loader.loadModelConfig(name);
       return c.json(
-        { error: 'version conflict', current: current ? toModelDTO(current) : null },
+        { error: 'version conflict', current: current ? toModelDTO(current, hashContent(raw)) : null },
         409,
       );
     }
@@ -152,7 +152,8 @@ export function createConfigRoutes(deps: ConfigRouteDeps): Hono {
     model.enabled = parsed.data.enabled;
     deps.loader.saveModelConfig(model);
     reloadRuntime(deps.runtime, deps.loader, deps.credentialManager);
-    return c.json(toModelDTO(model));
+    // Re-hash the file we just wrote so the client gets the fresh lock token.
+    return c.json(toModelDTO(model, modelVersion(deps.loader, name)));
   });
 
   // POST /api/providers/custom — add a custom OpenAI-compatible endpoint (§3).
@@ -235,8 +236,12 @@ export function createConfigRoutes(deps: ConfigRouteDeps): Hono {
 
 // ---------- projection (redaction) ----------
 
-/** Project a ModelConfig to its wire shape — never exposes credentials. */
-function toModelDTO(m: ModelConfig): ModelSettingDTO {
+/**
+ * Project a ModelConfig to its wire shape — never exposes credentials.
+ * `version` is the sha256 of the model's on-disk YAML bytes (its per-file
+ * optimistic-lock token, echoed by PATCH; §4.3).
+ */
+function toModelDTO(m: ModelConfig, version: string): ModelSettingDTO {
   const isCustom = (m.provider ?? '').startsWith('custom:');
   const dto: ModelSettingDTO = {
     name: m.name,
@@ -247,9 +252,16 @@ function toModelDTO(m: ModelConfig): ModelSettingDTO {
     isCustom,
     // Existence only — never the file's contents (SEC-02).
     hasCredentialFile: !!m.api_credential_path && existsSync(m.api_credential_path),
+    version,
   };
   if (isCustom && m.api_base_url) dto.apiBaseUrl = m.api_base_url;
   return dto;
+}
+
+/** sha256 of a model's on-disk YAML bytes — the per-file optimistic-lock token. */
+function modelVersion(loader: ConfigLoader, name: string): string {
+  const raw = loader.readModelConfigRaw(name);
+  return raw === null ? '' : hashContent(raw);
 }
 
 /** Build the full redacted config projection from on-disk truth. */
@@ -268,7 +280,7 @@ function buildConfigDTO(loader: ConfigLoader): ConfigDTO {
       language: config.general.language,
     },
     prefer: config.routing.default.prefer,
-    models: loader.loadAllModelConfigs().map(toModelDTO),
+    models: loader.loadAllModelConfigs().map((m) => toModelDTO(m, modelVersion(loader, m.name))),
     readOnly: {
       schema_version: config.schema_version,
       storage: {

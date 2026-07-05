@@ -99,6 +99,7 @@ export interface ModelSettingDTO {
   isCustom: boolean; // provider 以 "custom:" 前缀
   apiBaseUrl?: string; // 仅自定义端点展示
   hasCredentialFile: boolean; // api_credential_path 是否存在 —— 绝不含 key
+  version: string; // 该模型 yaml 字节的 sha256 —— PATCH 乐观锁令牌（§4.3，独立于 council.yaml）
 }
 
 /** 只读段：仅供展示现值，无写路径。 */
