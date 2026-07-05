@@ -47,6 +47,16 @@ export class ConfigLoader {
   }
 
   loadAllModels(): ModelConfig[] {
+    return this.loadAllModelConfigs().filter(m => m.enabled);
+  }
+
+  /**
+   * Like {@link loadAllModels} but WITHOUT the `enabled` filter — returns every
+   * model file (enabled and disabled). The Web GUI config面 needs to enumerate
+   * disabled models to render their toggles; orchestration keeps using
+   * {@link loadAllModels}.
+   */
+  loadAllModelConfigs(): ModelConfig[] {
     const modelsDir = join(this.configDir, 'models');
     if (!existsSync(modelsDir)) return [];
 
@@ -55,8 +65,33 @@ export class ConfigLoader {
       .map(f => {
         const raw = parseYaml(readFileSync(join(modelsDir, f), 'utf-8')) as unknown;
         return ModelConfigSchema.parse(raw) as unknown as ModelConfig;
-      })
-      .filter(m => m.enabled);
+      });
+  }
+
+  /**
+   * Load a single model config by name (incl. disabled), or null when absent.
+   * `safePath` blocks path traversal via a crafted `:name` route param.
+   */
+  loadModelConfig(name: string): ModelConfig | null {
+    const modelsDir = join(this.configDir, 'models');
+    const path = safePath(modelsDir, `${name}.yaml`);
+    if (!existsSync(path)) return null;
+    const raw = parseYaml(readFileSync(path, 'utf-8')) as unknown;
+    return ModelConfigSchema.parse(raw) as unknown as ModelConfig;
+  }
+
+  /** Raw council.yaml bytes (utf-8) for version hashing, or null when absent. */
+  readCouncilConfigRaw(): string | null {
+    const path = join(this.configDir, 'council.yaml');
+    if (!existsSync(path)) return null;
+    return readFileSync(path, 'utf-8');
+  }
+
+  /** Raw model YAML bytes (utf-8) for version hashing (safePath), or null when absent. */
+  readModelConfigRaw(name: string): string | null {
+    const path = safePath(join(this.configDir, 'models'), `${name}.yaml`);
+    if (!existsSync(path)) return null;
+    return readFileSync(path, 'utf-8');
   }
 
   saveModelConfig(config: ModelConfig): void {

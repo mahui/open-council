@@ -1,13 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import {
-  selectBestChairman,
   isRecommended,
-  discoveredToModelConfig,
-  buildNamedModels,
-  assembleConfig,
   clampAgents,
   credentialHint,
 } from '../../../src/ui/wizard/first-run.js';
+import {
+  selectBestChairman,
+  discoveredToModelConfig,
+  buildNamedModels,
+} from '../../../src/providers/model-assembly.js';
+import { assembleConfig } from '../../../src/config/assemble-council.js';
 import type { ModelConfig, CouncilConfig } from '../../../src/types/config.js';
 import type { DiscoveredModel } from '../../../src/providers/model-discovery.js';
 import { PATHS } from '../../../src/config/paths.js';
