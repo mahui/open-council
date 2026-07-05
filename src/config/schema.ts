@@ -85,15 +85,17 @@ export const CouncilConfigSchema = z.object({
     }),
   }),
 
+  // Top-level .default({}) lets a partial config (or a wizard-assembled
+  // minimal object) omit whole sections and still parse to full defaults.
   concurrency: z.object({
     global_resource_limit: z.number().int().positive().default(10),
-  }),
+  }).default({}),
 
   circuit_breaker: z.object({
     failure_threshold: z.number().int().positive().default(5),
     recovery_seconds: z.number().int().positive().default(3600),
     enabled: z.boolean().default(true),
-  }),
+  }).default({}),
 
   output: z.object({
     format: z.enum(['markdown', 'json', 'plain']).default('markdown'),
@@ -104,11 +106,11 @@ export const CouncilConfigSchema = z.object({
     show_timing: z.boolean().default(true),
     copy_to_clipboard: z.boolean().default(false),
     tui_mode: z.enum(['auto', 'always', 'never']).default('auto'),
-  }),
+  }).default({}),
 
   storage_security: z.object({
     session_retention_days: z.number().int().nonnegative().default(90),
-  }),
+  }).default({}),
 });
 
 export type CouncilConfigFromSchema = z.infer<typeof CouncilConfigSchema>;

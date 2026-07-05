@@ -68,7 +68,7 @@ interface NamedModel {
  * `prefer` list. Only the CLI variant is suffixed `-cli`, and only when a
  * collision actually exists, so the common single-variant case stays clean.
  */
-function buildNamedModels(models: DiscoveredModel[]): NamedModel[] {
+export function buildNamedModels(models: DiscoveredModel[]): NamedModel[] {
   const idCounts = new Map<string, number>();
   for (const m of models) idCounts.set(m.id, (idCounts.get(m.id) ?? 0) + 1);
   return models.map(m => {
@@ -83,7 +83,7 @@ function buildNamedModels(models: DiscoveredModel[]): NamedModel[] {
  * core heuristic ({@link rateModelCapability}); a flagship-id bonus only breaks
  * ties within a tier, so the coarse capability judgement stays in one place.
  */
-function selectBestChairman(configs: ModelConfig[]): ModelConfig | undefined {
+export function selectBestChairman(configs: ModelConfig[]): ModelConfig | undefined {
   const flagshipBonus = (id: string, invocation: string): number => {
     if (/opus/.test(id)) return 9;
     if (/gpt-5/.test(id)) return 8;
@@ -108,7 +108,7 @@ function pickBalancedModel(configs: ModelConfig[]): string {
 }
 
 /** Clamp the agent-count range to the number of available models. */
-function clampAgents(modelCount: number): { min: number; max: number } {
+export function clampAgents(modelCount: number): { min: number; max: number } {
   const min = modelCount >= 2 ? 2 : 1;
   const max = modelCount === 1 ? 3 : Math.min(5, modelCount);
   return { min, max: Math.max(min, max) };
@@ -131,7 +131,7 @@ function providerDisplayName(id: string): string {
 }
 
 /** A short, actionable hint for refreshing a broken credential, by provider. */
-function credentialHint(provider: string): string {
+export function credentialHint(provider: string): string {
   const p = provider.toLowerCase();
   if (p.includes('anthropic') || p.includes('claude')) return 'run `claude login` to refresh';
   if (p.includes('codex') || p.includes('openai')) return 'run `codex login` to refresh';
@@ -147,7 +147,7 @@ function credentialHint(provider: string): string {
  * is null the config is derived from schema defaults, so the two paths never
  * drift out of sync with the schema.
  */
-function assembleConfig(opts: {
+export function assembleConfig(opts: {
   generalOverride: Partial<CouncilConfig['general']>;
   prefer: string[];
   chairman: string;
@@ -580,7 +580,7 @@ function modelKey(m: DiscoveredModel): string {
  * Prefers the most capable models from each provider while excluding
  * mini/lite/experimental variants that aren't suitable as debate participants.
  */
-function isRecommended(m: DiscoveredModel): boolean {
+export function isRecommended(m: DiscoveredModel): boolean {
   const id = m.id.toLowerCase();
   if (m.invocation === 'cli') return true; // CLI models are always manually installed, always recommend
 
@@ -708,7 +708,7 @@ async function runOAuthLogins(
 
 // ---------- model conversion ----------
 
-function discoveredToModelConfig(m: DiscoveredModel, name: string = m.id): ModelConfig {
+export function discoveredToModelConfig(m: DiscoveredModel, name: string = m.id): ModelConfig {
   const base: ModelConfig = {
     name,
     invocation: m.invocation,
