@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import type { ModelConfig } from '../types/config.js';
 import type { BenchmarkReport } from '../types/benchmark.js';
 import { Orchestrator } from '../core/orchestrator.js';
+import { resolveDefaultsDir } from '../shared/resources.js';
 import { discoverCredentials, buildAdapter, resolveModels } from './shared/assemble.js';
 import { loadBenchmarkSuite } from './benchmark/suite.js';
 import { runExperiments } from './benchmark/runner.js';
@@ -30,7 +31,7 @@ export interface BenchmarkOptions {
 
 export async function runBenchmark(options: BenchmarkOptions): Promise<void> {
   const suitePath = options.suite
-    ?? join(import.meta.dirname, '..', '..', 'defaults', 'benchmark.yaml');
+    ?? join(resolveDefaultsDir(), 'benchmark.yaml');
   const questions = loadBenchmarkSuite(suitePath);
   process.stderr.write(`Loaded ${questions.length} benchmark question(s).\n`);
 

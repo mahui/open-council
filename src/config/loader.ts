@@ -6,6 +6,7 @@ import type { CouncilConfig, ModelConfig, RoleSet } from '../types/config.js';
 import { ConfigNotFoundError, RoleSetNotFoundError } from '../types/errors.js';
 import { PATHS } from './paths.js';
 import { safePath } from '../shared/paths.js';
+import { resolveDefaultsDir } from '../shared/resources.js';
 
 export class ConfigLoader {
   constructor(private configDir: string = PATHS.config) {}
@@ -57,7 +58,7 @@ export class ConfigLoader {
 
   loadRoleSet(name: string): RoleSet {
     const rolesDir = join(this.configDir, 'roles');
-    const builtinDir = join(import.meta.dirname, '..', '..', 'defaults', 'roles');
+    const builtinDir = join(resolveDefaultsDir(), 'roles');
 
     // Check user-defined roles first (safePath prevents path traversal)
     const userPath = safePath(rolesDir, `${name}.yaml`);
@@ -82,7 +83,7 @@ export class ConfigLoader {
   listRoleSets(): string[] {
     const names = new Set<string>();
     const dirs = [
-      join(import.meta.dirname, '..', '..', 'defaults', 'roles'),
+      join(resolveDefaultsDir(), 'roles'),
       join(this.configDir, 'roles'),
     ];
     for (const dir of dirs) {

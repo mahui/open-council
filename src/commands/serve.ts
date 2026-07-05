@@ -8,10 +8,10 @@
  */
 
 import { join } from 'node:path';
-import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { serve } from '@hono/node-server';
 import { PATHS } from '../config/paths.js';
+import { resolveResourceRoot } from '../shared/resources.js';
 import { ConfigLoader } from '../config/loader.js';
 import { SessionStore } from '../storage/session-store.js';
 import { createApp } from '../server/app.js';
@@ -81,18 +81,13 @@ export async function runServe(options: ServeOptions): Promise<void> {
 }
 
 /**
- * Resolve the bundled `web/` static root, working in both layouts:
- *  - dev/tsx:  src/commands/serve.ts → repo root is two levels up.
- *  - built:    dist/serve-*.js       → package root is one level up.
- * `web/` sits at the package root in both, so probe the candidates and pick the
- * first that exists (falling back to the dev path for a sensible error).
+ * Resolve the bundled `web/` static root. `web/` ships at the package root in
+ * every layout (dev repo, built dist, npm install), so defer to the shared
+ * resource-root resolver, which walks up to the package root regardless of the
+ * caller's module depth. See {@link resolveResourceRoot}.
  */
 export function resolveWebRoot(dirname: string = import.meta.dirname): string {
-  const devRoot = join(dirname, '..', '..', 'web'); // src/commands/serve.ts → repo root
-  const builtRoot = join(dirname, '..', 'web'); // dist/serve-*.js → package root
-  if (existsSync(devRoot)) return devRoot;
-  if (existsSync(builtRoot)) return builtRoot;
-  return devRoot;
+  return join(resolveResourceRoot(dirname), 'web');
 }
 
 /** Validate a --port string; returns the port or null when out of range. Pure. */
