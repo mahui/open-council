@@ -184,6 +184,17 @@ program
     await runPrune(options);
   });
 
+// Serve — local Web GUI
+program
+  .command('serve')
+  .description('Launch the local Web GUI (loopback only)')
+  .option('-p, --port <port>', 'Port to bind', String(3720))
+  .option('--no-open', 'Do not auto-open the browser')
+  .action(async (options) => {
+    const { runServe } = await import('./commands/serve.js');
+    await runServe(options);
+  });
+
 // Reload
 program
   .command('reload')
