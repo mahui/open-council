@@ -1,13 +1,13 @@
 # Open Council — 技术设计文档 (TDD)
 
-**Technical Design Document v2.2**
+**Technical Design Document v2.3**
 
 | 项目 | 内容 |
 |------|------|
 | 文档状态 | Draft |
-| 版本 | 2.2 |
+| 版本 | 2.3 |
 | 日期 | 2026-07-05 |
-| 对应 PRD | docs/PRD.md v7.1 |
+| 对应 PRD | docs/PRD.md v7.2 |
 | 主语言 | TypeScript (Node.js ≥ 20) |
 | 包管理 | pnpm |
 | 分发方式 | npm 全局包 (`npm install -g open-council`) |
@@ -16,6 +16,7 @@
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| 2.3 | 2026-07-05 | §8.4 增设置面五条 REST 路由（`config-routes.ts`）与 `RuntimeConfig` 热换快照；`ConfigLoader` 增 `loadAllModelConfigs`，纯函数下沉至 `config/assemble-council.ts` + `providers/model-assembly.ts`。详见设计笔记 `docs/design-notes/web-gui-config.md` |
 | 2.2 | 2026-07-05 | 新增 `src/server/` 层与 `web/` 零构建前端（`council serve` 本地 Web GUI，见 §8.4）；新增依赖 `hono` + `@hono/node-server`；`WebRenderer` 为 `Renderer` 第三实现。详见设计笔记 `docs/design-notes/web-gui-design.md` |
 | 2.1 | 2026-07-04 | 依设计笔记 consensus-review-dataflow 同步实现：`ConsensusResult` 增 `agreement_score`（判停用）；`calculateConsensus` filter 纳入 partial；`kendallsW` 均值秩填补 + N=2 回退；`InvocationResult` 增 `truncated`；补 `role_generator_model` 配置项与 `InvocationTimeoutError` 错误类型 |
 | 2.0 | 2026-03-26 | 迁移至 pi-ai 统一 LLM 层 |
@@ -1756,7 +1757,9 @@ function AgentStatusLine({ agent }: { agent: AgentState }) {
 | `debate-manager.ts` | `Map<debateId, EventLog>`；`startDebate()` 装配 `Orchestrator + WebRenderer`，后台 `run → saveSession → emit result` |
 | `event-log.ts` | 单辩论事件缓冲 + 订阅者集合 + 单调 id + 断线回放 + 有界驱逐（progress 事件可丢弃） |
 | `web-renderer.ts` | `implements Renderer`；回调 → `EventLog.push`，`Agent`/`InvocationResult` → 精简 DTO（SEC-02） |
-| `protocol.ts` | SSE 线协议 TS 类型（server 私有契约，纯类型无运行时代码，ARCH-04） |
+| `config-routes.ts` | 设置面五条 REST 路由（GET/PUT `/config`、PATCH `/models/:name`、POST `/providers/custom`、POST `/setup/rescan`）；内容哈希乐观锁 + 脱敏投影 |
+| `runtime-config.ts` | `RuntimeConfig` 持有器：编排 + 路由在**读时**取当前快照，配置写后 `reloadRuntime()` 原子换快照 |
+| `protocol.ts` | SSE 线协议 + 配置 DTO 的 TS 类型（server 私有契约，纯类型无运行时代码，ARCH-04） |
 | `security.ts` | Host 头校验（所有请求）+ Origin 校验（状态变更请求），防 DNS-rebinding / CSRF |
 
 **REST + SSE 契约（五条）**：
@@ -1770,6 +1773,18 @@ function AgentStatusLine({ agent }: { agent: AgentState }) {
 | GET | `/api/models` | 模型元数据 + 模式枚举供发起表单渲染，**绝不返回凭证** |
 
 **SSE 事件协议**：事件类型与 `Renderer` 方法一一映射（`phase` / `agent_start` / `agent_progress` / `agent_complete` / `consensus` / `degradation`），外加服务端注入的 `debate_start` / `result` / `error` 终态事件；每帧带单调 `id:` 供 `Last-Event-ID` 重连回放，心跳用 SSE 注释行 `:hb`。**权威 TS 定义与回放/驱逐语义见设计笔记 `docs/design-notes/web-gui-design.md` §4。**
+
+**设置面 REST 契约（五条，见设计笔记 `docs/design-notes/web-gui-config.md`）**：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/config` | 脱敏配置投影（可编辑 general/prefer + 含禁用模型列表 + 只读段）；`version` 为 `council.yaml` 内容 sha256，各模型另带独立 per-file 令牌 |
+| PUT | `/api/config` | 合并 general/prefer（复用 `assembleConfig`）；乐观锁不符 → `409 { error, current }`（前端据 `current` rebase） |
+| PATCH | `/api/models/:name` | 翻转单模型 `enabled`（独立 per-file 乐观锁）；`404` 未知模型 |
+| POST | `/api/providers/custom` | 接入自定义 OpenAI 兼容端点；key 立即写 `0o600` 文件，仅存路径不入 YAML，响应绝不回显（SEC-02） |
+| POST | `/api/setup/rescan` | 重扫凭证 + 模型，非破坏性 upsert，返回摘要（无 path/secret 出线）；重建 adapter |
+
+写路径统一经 `security.ts`（Host + Origin），成功后调 `reloadRuntime()` 换 `RuntimeConfig` 快照——**下一场辩论自动读到新配置，进行中的辩论保持其已捕获的旧快照**。凭证边界与乐观锁裁定见设计笔记。
 
 **`web/` 零构建前端**：`web/` 为纯静态源码，由 `app.ts` 的 hono `serveStatic` 直接托管（SEC-04），**无构建产物**——不引入 Vite/React 构建链。响应式 DOM 用 petite-vue、Markdown 渲染用 marked + DOMPurify 净化（LLM 输出必过净化，SEC），三者均本地 vendored 到 `web/vendor/`（离线、不外链）。运行期从包根解析 `web/`；`package.json` 的 `files` 已含 `web`，随 npm 包发布。
 

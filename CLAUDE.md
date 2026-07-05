@@ -5,8 +5,8 @@
 **以下文档是开发时的强制约束，所有代码变更必须符合这些文档的要求：**
 
 1. **`CONTRIBUTING.md`** — 开发规范。所有规则以 ID 编号（ARCH-01、SEC-03 等），**规则已内嵌到各 agent 定义中，无需每次任务重复阅读**。
-2. **`docs/PRD.md`** (v7.1) — 产品需求文档。功能设计的权威来源。
-3. **`docs/TDD.md`** (v2.2) — 技术设计文档。架构、接口、数据结构的权威来源。
+2. **`docs/PRD.md`** (v7.2) — 产品需求文档。功能设计的权威来源。
+3. **`docs/TDD.md`** (v2.3) — 技术设计文档。架构、接口、数据结构的权威来源。
 
 **文档查阅策略**：agent 的关键设计约束和规则已内嵌在各自的 `.claude/agents/*.md` 定义中。开发时**不需要全量阅读 PRD/TDD**，仅在对具体细节有疑问时用 Grep 定向搜索对应章节。
 
@@ -188,8 +188,8 @@
 Open Council 是一个基于 TypeScript/Node.js 的多 Agent 辩论编排系统，支持 CLI 和 API 双模调用。
 
 - **开发规范**: `CONTRIBUTING.md` (强制)
-- **PRD**: `docs/PRD.md` (v7.1)
-- **技术设计**: `docs/TDD.md` (v2.2)
+- **PRD**: `docs/PRD.md` (v7.2)
+- **技术设计**: `docs/TDD.md` (v2.3)
 - **角色模板**: `defaults/roles/*.yaml`
 - **基准测试集**: `defaults/benchmark.yaml`
 
