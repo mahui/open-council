@@ -402,7 +402,7 @@ export class CredentialManager {
   }
 
   private saveOAuthCredentials(providerId: string, credentials: OAuthCredentials): void {
-    mkdirSync(PATHS.credentials, { recursive: true });
+    mkdirSync(PATHS.credentials, { recursive: true, mode: 0o700 });
     const path = this.oauthCredentialPath(providerId);
     writeFileSync(path, JSON.stringify(credentials, null, 2), { mode: 0o600 });
   }

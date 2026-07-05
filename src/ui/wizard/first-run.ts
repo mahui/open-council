@@ -3,12 +3,14 @@ import { join } from 'node:path';
 import { select, confirm, checkbox, input, password, Separator } from '@inquirer/prompts';
 import { PATHS } from '../../config/paths.js';
 import { ConfigLoader } from '../../config/loader.js';
+import { CouncilConfigSchema } from '../../config/schema.js';
 import { CredentialManager } from '../../providers/credentials/discovery.js';
 import { discoverModels } from '../../providers/model-discovery.js';
 import type { DiscoveredModel } from '../../providers/model-discovery.js';
 import type { CouncilConfig, ModelConfig } from '../../types/config.js';
 import { ApiAdapter } from '../../providers/api-adapter.js';
-import { hasBinary } from '../../providers/utils.js';
+import { rateModelCapability } from '../../core/role-generator.js';
+import { hasBinary } from '../../shared/env.js';
 
 const TEST_PROMPT = "Reply with exactly the word: ok";
 const TEST_TIMEOUT_MS = 10_000;
@@ -38,6 +40,267 @@ export async function runFirstRunWizard(): Promise<void> {
     process.stderr.write("   Let's set up your multi-model debate system.\n\n");
   }
 
+  const setupType = await select({
+    message: 'Select setup mode:',
+    choices: [
+      { name: '⚡ Quick Setup (Auto-detect credentials and generate default config in 1s)', value: 'quick' },
+      { name: '⚙️  Custom Setup (Interactive step-by-step configuration)', value: 'custom' },
+    ],
+  });
+
+  if (setupType === 'quick') {
+    await runQuickSetup(loader);
+  } else {
+    await runCustomSetup(loader);
+  }
+}
+
+/** A discovered model paired with the (collision-resolved) name it will be saved under. */
+interface NamedModel {
+  model: DiscoveredModel;
+  config: ModelConfig;
+}
+
+/**
+ * Resolve a stable, non-colliding YAML name for each selected model.
+ * API and CLI variants can share the same id (e.g. gemini-2.5-pro); left as-is
+ * they would write to — and overwrite — the same `<id>.yaml` and duplicate the
+ * `prefer` list. Only the CLI variant is suffixed `-cli`, and only when a
+ * collision actually exists, so the common single-variant case stays clean.
+ */
+function buildNamedModels(models: DiscoveredModel[]): NamedModel[] {
+  const idCounts = new Map<string, number>();
+  for (const m of models) idCounts.set(m.id, (idCounts.get(m.id) ?? 0) + 1);
+  return models.map(m => {
+    const collides = (idCounts.get(m.id) ?? 0) > 1;
+    const name = collides && m.invocation === 'cli' ? `${m.id}-cli` : m.id;
+    return { model: m, config: discoveredToModelConfig(m, name) };
+  });
+}
+
+/**
+ * Pick the strongest model to act as Chairman. The base tier reuses the shared
+ * core heuristic ({@link rateModelCapability}); a flagship-id bonus only breaks
+ * ties within a tier, so the coarse capability judgement stays in one place.
+ */
+function selectBestChairman(configs: ModelConfig[]): ModelConfig | undefined {
+  const flagshipBonus = (id: string, invocation: string): number => {
+    if (/opus/.test(id)) return 9;
+    if (/gpt-5/.test(id)) return 8;
+    if (/^o3$/.test(id)) return 7;
+    if (/gemini-2\.5-pro/.test(id)) return 6;
+    if (/claude-sonnet-4|claude-3-5-sonnet/.test(id)) return 5;
+    if (/gpt-4o$/.test(id)) return 4;
+    if (/gemini-pro/.test(id)) return 3;
+    if (invocation === 'cli') return 1;
+    return 0;
+  };
+  const score = (m: ModelConfig): number => {
+    const id = (m.model ?? m.name).toLowerCase();
+    return rateModelCapability(m) * 10 + flagshipBonus(id, m.invocation);
+  };
+  return [...configs].sort((a, b) => score(b) - score(a))[0];
+}
+
+/** Auto-pick a balanced-tier model (by name) to design the expert panel; '' → runtime auto. */
+function pickBalancedModel(configs: ModelConfig[]): string {
+  return configs.find(c => rateModelCapability(c) === 2)?.name ?? '';
+}
+
+/** Clamp the agent-count range to the number of available models. */
+function clampAgents(modelCount: number): { min: number; max: number } {
+  const min = modelCount >= 2 ? 2 : 1;
+  const max = modelCount === 1 ? 3 : Math.min(5, modelCount);
+  return { min, max: Math.max(min, max) };
+}
+
+/** Human-facing provider labels; internal pi-ai ids are kept as option values. */
+const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+  'anthropic': 'Anthropic (Claude)',
+  'openai': 'OpenAI',
+  'openai-codex': 'OpenAI (Codex CLI)',
+  'google': 'Google (Gemini)',
+  'google-gemini-cli': 'Google Gemini CLI',
+  'google-antigravity': 'Google Antigravity',
+  'google-vertex': 'Google Vertex AI',
+  'github-copilot': 'GitHub Copilot',
+};
+
+function providerDisplayName(id: string): string {
+  return PROVIDER_DISPLAY_NAMES[id] ?? id;
+}
+
+/** A short, actionable hint for refreshing a broken credential, by provider. */
+function credentialHint(provider: string): string {
+  const p = provider.toLowerCase();
+  if (p.includes('anthropic') || p.includes('claude')) return 'run `claude login` to refresh';
+  if (p.includes('codex') || p.includes('openai')) return 'run `codex login` to refresh';
+  if (p.includes('gemini') || p.includes('google')) return 'run `gemini` and sign in to refresh';
+  if (p.includes('copilot') || p.includes('github')) return 'run `gh auth login` to refresh';
+  return 'check the credential file';
+}
+
+/**
+ * Build a complete, schema-valid CouncilConfig from the wizard's decisions.
+ * When `base` is provided (reconfigure/merge) only the wizard-decided fields are
+ * overridden — every other field the user hand-tuned is preserved. When `base`
+ * is null the config is derived from schema defaults, so the two paths never
+ * drift out of sync with the schema.
+ */
+function assembleConfig(opts: {
+  generalOverride: Partial<CouncilConfig['general']>;
+  prefer: string[];
+  chairman: string;
+  base: CouncilConfig | null;
+}): CouncilConfig {
+  const { generalOverride, prefer, chairman, base } = opts;
+
+  if (base) {
+    const merged = {
+      ...base,
+      general: { ...base.general, ...generalOverride },
+      routing: { ...base.routing, default: { ...base.routing.default, prefer, chairman } },
+    };
+    return CouncilConfigSchema.parse(merged) as unknown as CouncilConfig;
+  }
+
+  const minimal = {
+    general: generalOverride,
+    storage: {
+      data_dir: PATHS.dataDir,
+      checkpoint_dir: PATHS.checkpoints,
+      log_dir: PATHS.logs,
+    },
+    routing: { default: { prefer, chairman } },
+  };
+  return CouncilConfigSchema.parse(minimal) as unknown as CouncilConfig;
+}
+
+async function runQuickSetup(loader: ConfigLoader): Promise<void> {
+  process.stderr.write('\n⚡ Starting Quick Setup...\n');
+
+  // --- Scan credentials ---
+  process.stderr.write('Step 1/3: Scanning for AI credentials...\n');
+  const credManager = new CredentialManager();
+  const report = await credManager.discoverAll();
+
+  for (const [provider, result] of Object.entries(report)) {
+    const isOk = result.status === 'valid' || result.status === 'refreshed';
+    const statusMsg = `[${result.status}]`.padEnd(12);
+    if (isOk) {
+      const sourceMsg =
+        result.source === 'env' ? 'via env var'
+        : result.path ? `via ${result.path}`
+        : 'via file';
+      process.stderr.write(`  ✓ ${provider.padEnd(24)} ${statusMsg} ${sourceMsg}\n`);
+    } else {
+      // Surface broken credentials instead of hiding them — a silent skip here is
+      // exactly how expired/unparseable creds slip into the config unnoticed.
+      process.stderr.write(
+        `  \x1b[31m✗\x1b[0m ${provider.padEnd(24)} ${statusMsg} \x1b[2m${credentialHint(provider)}\x1b[0m\n`,
+      );
+    }
+  }
+
+  // --- Discover models ---
+  process.stderr.write('\nStep 2/3: Discovering available models...\n');
+  const discovered = await discoverModels(credManager);
+
+  let selected = discovered.filter(isRecommended);
+  if (selected.length === 0) {
+    // If no recommended models, fall back to any discovered models
+    selected = discovered;
+  }
+
+  if (selected.length === 0) {
+    process.stderr.write('\n\x1b[31m⚠️  No models or credentials detected.\x1b[0m\n');
+    process.stderr.write('   Quick Setup cannot continue without credentials.\n');
+    process.stderr.write('   Please set environment variables (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY)\n');
+    process.stderr.write('   or proceed with Custom Setup to configure custom endpoints.\n\n');
+
+    const proceedToCustom = await confirm({ message: 'Proceed with Custom Setup instead?', default: true });
+    if (proceedToCustom) {
+      await runCustomSetup(loader);
+    } else {
+      process.stderr.write('Setup exited.\n');
+    }
+    return;
+  }
+
+  const named = buildNamedModels(selected);
+  const configs = named.map(n => n.config);
+
+  process.stderr.write('\nEnabled models:\n');
+  for (const n of named) {
+    process.stderr.write(`  ✓ ${n.config.name} [${n.model.invocation}]\n`);
+  }
+
+  // --- Agent count: clamped to the number of available models ---
+  const { min: minAgents, max: maxAgents } = clampAgents(named.length);
+  if (named.length === 1) {
+    process.stderr.write(
+      '\n  \x1b[2mOnly one model available — the council will run multiple roles on the same model.\x1b[0m\n',
+    );
+  }
+
+  // --- Select Chairman + panel designer ---
+  const chairman = selectBestChairman(configs);
+  const chairmanName = chairman?.name ?? '';
+  const roleGenModel = pickBalancedModel(configs);
+  process.stderr.write(`\nStep 3/3: Selected default Chairman: ${chairmanName}\n`);
+
+  // --- Probe the chairman only (non-blocking): fast smoke test so a dead
+  //     credential surfaces now instead of on the first real debate. ---
+  const apiAdapter = new ApiAdapter(credManager);
+  const chairmanNamed = named.find(n => n.config.name === chairmanName);
+  if (chairmanNamed) {
+    const { ok, error } = await testConnectivity(chairmanNamed.model, chairmanNamed.config, apiAdapter);
+    if (!ok) {
+      process.stderr.write(
+        `\n  \x1b[33m⚠  Chairman probe failed: ${error ?? 'unknown error'}.\n` +
+        `     Config will still be written — verify credentials, then run "council models test".\x1b[0m\n`,
+      );
+    }
+  }
+
+  // Create required directories
+  mkdirSync(PATHS.config, { recursive: true });
+  mkdirSync(PATHS.modelsDir, { recursive: true });
+  mkdirSync(PATHS.dataDir, { recursive: true });
+  mkdirSync(PATHS.sessionsDir, { recursive: true });
+  mkdirSync(PATHS.checkpoints, { recursive: true });
+  mkdirSync(PATHS.logs, { recursive: true });
+
+  // Quick never wipes existing models — upsert the discovered ones onto whatever
+  // the user already has, preserving any hand-tuned model files.
+  for (const n of named) {
+    loader.saveModelConfig(n.config);
+  }
+
+  // Merge onto the existing council.yaml when present: only the wizard-decided
+  // fields (chairman / prefer / role generator / agent counts) are overwritten.
+  const base = loader.loadCouncilConfigSafe();
+  const config = assembleConfig({
+    generalOverride: {
+      default_chairman: chairmanName,
+      role_generator_model: roleGenModel,
+      min_agents: minAgents,
+      max_agents: maxAgents,
+    },
+    prefer: configs.map(c => c.name),
+    chairman: chairmanName,
+    base,
+  });
+
+  loader.saveCouncilConfig(config);
+
+  process.stderr.write('\n\x1b[32m⚡ Quick Setup complete!\x1b[0m\n');
+  process.stderr.write(`   Config : ${PATHS.councilYaml}\n`);
+  process.stderr.write(`   Models : ${PATHS.modelsDir}\n\n`);
+  process.stderr.write('   Run "council <question>" to start your first debate!\n\n');
+}
+
+async function runCustomSetup(loader: ConfigLoader): Promise<void> {
   // --- Step 1: Credential scan ---
   process.stderr.write('Step 1/5: Scanning for AI credentials...\n');
   const credManager = new CredentialManager();
@@ -77,7 +340,7 @@ export async function runFirstRunWizard(): Promise<void> {
     process.stderr.write('\n');
     const kept = await checkbox({
       message: 'Enable which detected providers? (uncheck all to skip and use only custom providers):',
-      choices: detectedProviders.map(p => ({ name: p, value: p, checked: true })),
+      choices: detectedProviders.map(p => ({ name: providerDisplayName(p), value: p, checked: true })),
       pageSize: 12,
     });
     enabledProviders = new Set(kept);
@@ -130,26 +393,35 @@ export async function runFirstRunWizard(): Promise<void> {
 
       if (selected.length > 0) {
         // --- Step 3: Connectivity test ---
-        process.stderr.write('\nStep 3/5: Testing model connectivity...\n');
-        const testResults = await Promise.all(
-          selected.map(async m => {
-            const modelConfig = discoveredToModelConfig(m);
-            const { ok, error } = await testConnectivity(m, modelConfig, apiAdapter);
-            const icon = ok ? '\x1b[32m\u2713\x1b[0m' : '\x1b[31m\u2717\x1b[0m';
-            const suffix = ok ? '\x1b[32mready\x1b[0m' : `\x1b[31mFAILED\x1b[0m — ${error ?? 'unknown error'}`;
-            process.stderr.write(`  ${icon} ${m.name.padEnd(44)} ${suffix}\n`);
-            return { model: m, ok, error };
-          }),
-        );
+        const wantTest = await confirm({
+          message: 'Test model connectivity? (This makes short API calls to verify credentials, taking ~5-10s)',
+          default: false,
+        });
 
-        const failed = testResults.filter(r => !r.ok);
-        finalSelected = selected;
-        if (failed.length > 0) {
-          process.stderr.write(`\n  \x1b[33m${failed.length} model(s) failed connectivity test.\x1b[0m\n`);
-          const keepFailed = await confirm({ message: 'Keep failed models in configuration anyway?', default: false });
-          if (!keepFailed) {
-            finalSelected = selected.filter(m => testResults.find(r => r.model === m)?.ok);
+        if (wantTest) {
+          process.stderr.write('\nStep 3/5: Testing model connectivity...\n');
+          const testResults = await Promise.all(
+            selected.map(async m => {
+              const modelConfig = discoveredToModelConfig(m);
+              const { ok, error } = await testConnectivity(m, modelConfig, apiAdapter);
+              const icon = ok ? '\x1b[32m\u2713\x1b[0m' : '\x1b[31m\u2717\x1b[0m';
+              const suffix = ok ? '\x1b[32mready\x1b[0m' : `\x1b[31mFAILED\x1b[0m — ${error ?? 'unknown error'}`;
+              process.stderr.write(`  ${icon} ${m.name.padEnd(44)} ${suffix}\n`);
+              return { model: m, ok, error };
+            }),
+          );
+
+          const failed = testResults.filter(r => !r.ok);
+          finalSelected = selected;
+          if (failed.length > 0) {
+            process.stderr.write(`\n  \x1b[33m${failed.length} model(s) failed connectivity test.\x1b[0m\n`);
+            const keepFailed = await confirm({ message: 'Keep failed models in configuration anyway?', default: false });
+            if (!keepFailed) {
+              finalSelected = selected.filter(m => testResults.find(r => r.model === m)?.ok);
+            }
           }
+        } else {
+          finalSelected = selected;
         }
       }
     }
@@ -163,16 +435,30 @@ export async function runFirstRunWizard(): Promise<void> {
     return;
   }
 
+  // Resolve collision-free names once; chairman/role-generator/prefer all reference them.
+  const named = buildNamedModels(finalSelected);
+
   // --- Step 4: Chairman ---
   // Candidate pool spans both auto-discovered and custom providers — user can pick either.
   process.stderr.write('\nStep 4/5: Choose Chairman (synthesizes debate results)\n');
   const chairmanChoices = [
-    ...finalSelected.map(m => ({ name: `${m.name} [${m.invocation}]`, value: m.id })),
+    ...named.map(n => ({ name: `${n.config.name} [${n.model.invocation}]`, value: n.config.name })),
     ...customConfigs.map(c => ({ name: `${c.name} [api, custom]`, value: c.name })),
   ];
   const chairmanId = await select({
     message: 'Chairman model:',
     choices: chairmanChoices,
+  });
+
+  // --- Role panel designer (optional) ---
+  const roleGenModel = await select({
+    message: 'Model to design the expert panel (role generator):',
+    choices: [
+      { name: 'Auto (pick a balanced model at runtime)', value: '' },
+      ...named.map(n => ({ name: n.config.name, value: n.config.name })),
+      ...customConfigs.map(c => ({ name: c.name, value: c.name })),
+    ],
+    default: '',
   });
 
   // --- Step 5: Default mode ---
@@ -187,9 +473,26 @@ export async function runFirstRunWizard(): Promise<void> {
     ],
   }) as 'auto' | 'compare' | 'debate' | 'quick';
 
+  // --- Agent count range (shown with defaults; press enter to accept) ---
+  const modelCount = named.length + customConfigs.length;
+  const minAgents = Number(await input({
+    message: 'Minimum number of agents:',
+    default: String(modelCount >= 2 ? 2 : 1),
+    validate: (v: string) => (/^\d+$/.test(v.trim()) && Number(v) >= 1 ? true : 'Enter a positive integer.'),
+  }));
+  const maxAgents = Number(await input({
+    message: 'Maximum number of agents:',
+    default: String(Math.max(minAgents, 5)),
+    validate: (v: string) => {
+      if (!/^\d+$/.test(v.trim())) return 'Enter a positive integer.';
+      if (Number(v) < minAgents) return `Must be >= minimum (${minAgents}).`;
+      return true;
+    },
+  }));
+
   const confirmed = await confirm({ message: 'Save configuration?' });
   if (!confirmed) {
-    // Cleanup orphan key files written by Step 6 — config was never saved, so the references are dead.
+    // Cleanup orphan key files written by Step 6 \u2014 config was never saved, so the references are dead.
     for (const c of customConfigs) {
       if (c.api_credential_path) {
         try { unlinkSync(c.api_credential_path); } catch { /* already gone */ }
@@ -197,6 +500,20 @@ export async function runFirstRunWizard(): Promise<void> {
     }
     process.stderr.write('Setup cancelled.\n');
     return;
+  }
+
+  // Decide how to reconcile with any pre-existing model set (default: keep & merge).
+  let replaceAll = false;
+  if (loader.hasModelConfigs()) {
+    const strategy = await select({
+      message: 'Existing model configuration detected \u2014 how should it be handled?',
+      choices: [
+        { name: 'Keep & merge (upsert selected models, preserve the rest)', value: 'merge' },
+        { name: 'Replace all (delete existing model configs first)', value: 'replace' },
+      ],
+      default: 'merge',
+    });
+    replaceAll = strategy === 'replace';
   }
 
   // Create required directories
@@ -207,72 +524,42 @@ export async function runFirstRunWizard(): Promise<void> {
   mkdirSync(PATHS.checkpoints, { recursive: true });
   mkdirSync(PATHS.logs, { recursive: true });
 
-  // Wipe stale model files so the new selection fully replaces the old one
-  // (saveModelConfig only writes; without clearing, previously-saved entries linger).
-  loader.clearAllModels();
+  // Only wipe stale model files when the user explicitly chose to replace the set;
+  // saveModelConfig upserts otherwise, so hand-tuned entries survive.
+  if (replaceAll) {
+    loader.clearAllModels();
+  }
 
-  for (const m of finalSelected) {
-    loader.saveModelConfig(discoveredToModelConfig(m));
+  for (const n of named) {
+    loader.saveModelConfig(n.config);
   }
   for (const c of customConfigs) {
     loader.saveModelConfig(c);
   }
 
-  // Save main config — chairmanId already comes from the union pool (Step 4); use it directly,
-  // falling back to the first available id from either pool if somehow unset.
+  // chairmanId already comes from the union pool (Step 4); use it directly, falling
+  // back to the first available name from either pool if somehow unset.
   const chairmanName = chairmanId
-    ?? finalSelected[0]?.id
+    ?? named[0]?.config.name
     ?? customConfigs[0]?.name
     ?? '';
-  const preferIds = [...finalSelected.map(m => m.id), ...customConfigs.map(c => c.name)];
-  const config: CouncilConfig = {
-    schema_version: 1,
-    general: {
+  const preferIds = [...named.map(n => n.config.name), ...customConfigs.map(c => c.name)];
+
+  // Merge onto the existing council.yaml when keeping; rebuild from schema defaults
+  // when replacing. Either way schema.parse guarantees a complete, valid config.
+  const base = replaceAll ? null : loader.loadCouncilConfigSafe();
+  const config = assembleConfig({
+    generalOverride: {
       default_mode: defaultMode,
       default_chairman: chairmanName,
-      min_agents: 2,
-      max_agents: 5,
-      allow_same_model_agents: true,
-      review_rounds: 1,
-      language: 'auto',
-      compression_threshold_ratio: 0.6,
-      devil_advocate: 'auto',
-      high_risk_keywords: [],
+      role_generator_model: roleGenModel,
+      min_agents: minAgents,
+      max_agents: maxAgents,
     },
-    storage: {
-      data_dir: PATHS.dataDir,
-      checkpoint_dir: PATHS.checkpoints,
-      log_dir: PATHS.logs,
-      log_retention_days: 7,
-      orphan_checkpoint_hours: 24,
-    },
-    routing: {
-      strategy: 'keyword',
-      dynamic_weight: true,
-      dynamic_weight_alpha: 0.3,
-      dynamic_weight_shadow: true,
-      exploration_rate: 0.1,
-      rules: [],
-      default: {
-        prefer: preferIds,
-        chairman: chairmanName,
-        role_set: 'default',
-      },
-    },
-    concurrency: { global_resource_limit: 10 },
-    circuit_breaker: { failure_threshold: 5, recovery_seconds: 3600, enabled: true },
-    output: {
-      format: 'markdown',
-      show_individual: false,
-      show_scores: true,
-      show_consensus: true,
-      show_dimension_heatmap: true,
-      show_timing: true,
-      copy_to_clipboard: false,
-      tui_mode: 'auto',
-    },
-    storage_security: { session_retention_days: 90 },
-  };
+    prefer: preferIds,
+    chairman: chairmanName,
+    base,
+  });
 
   loader.saveCouncilConfig(config);
 
@@ -421,9 +708,9 @@ async function runOAuthLogins(
 
 // ---------- model conversion ----------
 
-function discoveredToModelConfig(m: DiscoveredModel): ModelConfig {
+function discoveredToModelConfig(m: DiscoveredModel, name: string = m.id): ModelConfig {
   const base: ModelConfig = {
-    name: m.id,
+    name,
     invocation: m.invocation,
     provider: m.provider,
     model: m.id,
