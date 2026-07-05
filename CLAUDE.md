@@ -5,8 +5,8 @@
 **以下文档是开发时的强制约束，所有代码变更必须符合这些文档的要求：**
 
 1. **`CONTRIBUTING.md`** — 开发规范。所有规则以 ID 编号（ARCH-01、SEC-03 等），**规则已内嵌到各 agent 定义中，无需每次任务重复阅读**。
-2. **`docs/PRD.md`** (v7.0) — 产品需求文档。功能设计的权威来源。
-3. **`docs/TDD.md`** (v2.1) — 技术设计文档。架构、接口、数据结构的权威来源。
+2. **`docs/PRD.md`** (v7.1) — 产品需求文档。功能设计的权威来源。
+3. **`docs/TDD.md`** (v2.2) — 技术设计文档。架构、接口、数据结构的权威来源。
 
 **文档查阅策略**：agent 的关键设计约束和规则已内嵌在各自的 `.claude/agents/*.md` 定义中。开发时**不需要全量阅读 PRD/TDD**，仅在对具体细节有疑问时用 Grep 定向搜索对应章节。
 
@@ -188,8 +188,8 @@
 Open Council 是一个基于 TypeScript/Node.js 的多 Agent 辩论编排系统，支持 CLI 和 API 双模调用。
 
 - **开发规范**: `CONTRIBUTING.md` (强制)
-- **PRD**: `docs/PRD.md` (v7.0)
-- **技术设计**: `docs/TDD.md` (v2.1)
+- **PRD**: `docs/PRD.md` (v7.1)
+- **技术设计**: `docs/TDD.md` (v2.2)
 - **角色模板**: `defaults/roles/*.yaml`
 - **基准测试集**: `defaults/benchmark.yaml`
 
@@ -215,7 +215,9 @@ src/
 ├── storage/     SQLite + JSON 持久化
 ├── config/      YAML 加载 + zod 校验
 ├── ui/          渲染层（plain + TUI）
+├── server/      本地 Web GUI 服务端（council serve，hono + SSE）
 └── types/       纯类型定义，零运行时代码 [ARCH-04]
+web/             Web GUI 零构建前端（静态资源，随包发布）
 defaults/        内置角色集 + benchmark 问题集
 test/            测试（对应 src/ 结构）
 ```
@@ -238,6 +240,7 @@ test/            测试（对应 src/ 结构）
 2. API 模式 + CLI 模式双通道调用（含凭证发现、Token 刷新、健康检查/熔断）
 3. 配置系统（YAML + zod 校验）、SQLite/JSON 持久化、Checkpoint 中断恢复
 4. TUI 仪表盘（ink）、Setup Wizard、benchmark 消融实验框架
+5. 本地 Web GUI（`council serve`，hono + SSE + 零构建前端）：浏览器发起 + 实时观看 + 历史只读
 
 当前工作重心：结构/质量收敛（依赖图修正、测试镜像补齐、文档信息架构治理），不新增 Phase 级功能。
 

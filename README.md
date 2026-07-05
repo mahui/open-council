@@ -184,6 +184,31 @@ council --follow "如果读写比变成 1:10 呢？"
 | `debate` | 2-5 | 并行回答 → 互评 → 共识 → 综合 | 60-180s | 高价值决策 |
 | `auto` | 自动 | 根据问题复杂度选择 | 视情况 | 默认模式 |
 
+## Web 界面
+
+除命令行外，`council serve` 会启动一个本地 Web 控制台，在浏览器里发起并实时观看辩论，适合不习惯终端的场景。
+
+```bash
+# 启动本地 Web 界面（默认端口 3720，仅绑定 127.0.0.1）
+council serve
+
+# 指定端口
+council serve --port 8080
+
+# 启动后不自动打开浏览器
+council serve --no-open
+```
+
+启动后终端会打印访问地址（默认 `http://localhost:3720`），浏览器会自动打开。在页面中：
+
+1. **发起辩论** — 填写问题、选择模式 / 参与模型 / Chairman → 提交
+2. **实时观看** — 多专家流式发言 → 互评 → 共识 → Chairman 综合，逐阶段实时呈现
+3. **历史回看** — 浏览过往辩论的只读详情（与 CLI 共享同一份持久化数据）
+
+<!-- 截图占位：council serve 主界面 / 实时观看视图 -->
+
+> **说明**：Web 界面仅绑定本地环回地址、无鉴权，是面向单机单用户的本地工具；模型与凭证的配置仍在命令行完成（`council setup`），Web 端只负责发起、观看与回看。
+
 ## 模型管理
 
 ```bash
@@ -261,8 +286,8 @@ TypeScript · Node.js ≥ 20 · better-sqlite3 · @mariozechner/pi-ai · command
 
 | 文档 | 说明 |
 |------|------|
-| [PRD](docs/PRD.md) | 产品需求文档 v6.3 |
-| [TDD](docs/TDD.md) | 技术设计文档 v1.0 |
+| [PRD](docs/PRD.md) | 产品需求文档 v7.1 |
+| [TDD](docs/TDD.md) | 技术设计文档 v2.2 |
 | [CONTRIBUTING](CONTRIBUTING.md) | 开发规范（架构约束、编码规范、安全、测试、Git） |
 
 ## 开发路线图
@@ -273,6 +298,7 @@ TypeScript · Node.js ≥ 20 · better-sqlite3 · @mariozechner/pi-ai · command
 - [x] Phase 3 — 效果验证（Benchmark 四组消融实验）
 - [x] Phase 4 — 智能路由 + 完整配置向导 + 动态权重
 - [x] Phase 5 — 辩论回放 + Pre-Synthesis 压缩 + 追问模式
+- [x] 本地 Web 界面（`council serve`）— 发起 + 实时观看 + 历史只读
 
 ## License
 

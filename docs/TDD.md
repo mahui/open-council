@@ -1,13 +1,13 @@
 # Open Council — 技术设计文档 (TDD)
 
-**Technical Design Document v2.1**
+**Technical Design Document v2.2**
 
 | 项目 | 内容 |
 |------|------|
 | 文档状态 | Draft |
-| 版本 | 2.1 |
-| 日期 | 2026-07-04 |
-| 对应 PRD | docs/PRD.md v7.0 |
+| 版本 | 2.2 |
+| 日期 | 2026-07-05 |
+| 对应 PRD | docs/PRD.md v7.1 |
 | 主语言 | TypeScript (Node.js ≥ 20) |
 | 包管理 | pnpm |
 | 分发方式 | npm 全局包 (`npm install -g open-council`) |
@@ -16,6 +16,7 @@
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| 2.2 | 2026-07-05 | 新增 `src/server/` 层与 `web/` 零构建前端（`council serve` 本地 Web GUI，见 §8.4）；新增依赖 `hono` + `@hono/node-server`；`WebRenderer` 为 `Renderer` 第三实现。详见设计笔记 `docs/design-notes/web-gui-design.md` |
 | 2.1 | 2026-07-04 | 依设计笔记 consensus-review-dataflow 同步实现：`ConsensusResult` 增 `agreement_score`（判停用）；`calculateConsensus` filter 纳入 partial；`kendallsW` 均值秩填补 + N=2 回退；`InvocationResult` 增 `truncated`；补 `role_generator_model` 配置项与 `InvocationTimeoutError` 错误类型 |
 | 2.0 | 2026-03-26 | 迁移至 pi-ai 统一 LLM 层 |
 
@@ -34,17 +35,18 @@
 
 ### 1.2 核心依赖
 
+> 与 `package.json` 保持一致（以 `package.json` / 附录 A 为准）。凭证管理、Provider SDK、JWT 解码等已统一委托 `@mariozechner/pi-ai`，故不再单列 `jose` 等依赖（见 §1.3）。
+
 | 模块 | 库 | 版本策略 | 选型理由 |
 |------|-----|---------|---------|
-| **统一 LLM 库** | `@mariozechner/pi-ai` | latest | 统一 LLM 接口，内置 20+ Provider 适配（Anthropic/OpenAI/Google/Mistral/Bedrock 等）、OAuth 凭证管理、模型自动发现、流式输出；替代原来分散的 3 个 Provider SDK |
+| **统一 LLM 库** | `@mariozechner/pi-ai` | ^0.62 | 统一 LLM 接口，内置 20+ Provider 适配（Anthropic/OpenAI/Google/Mistral/Bedrock 等）、OAuth 凭证管理、模型自动发现、流式输出；替代原来分散的 3 个 Provider SDK |
 | **CLI 框架** | `commander` | ^12 | 命令解析、子命令、选项管理；最成熟的 Node CLI 框架 |
 | **交互式 Prompt** | `@inquirer/prompts` | ^7 | Setup Wizard 的多选、确认、列表选择；模块化按需导入 |
-| **TUI 仪表盘** | `ink` + `ink-spinner` | ^5 | React 范式渲染终端 UI；组件化、声明式更新、天然支持实时刷新 |
-| **SQLite** | `better-sqlite3` | ^11 | **同步 API**（事务原子性保证）；WAL 模式；FTS5 支持；原生 C binding 性能优异 |
+| **TUI 仪表盘** | `ink` (+ `react`) | ^7 | React 范式渲染终端 UI；组件化、声明式更新、天然支持实时刷新 |
+| **Web 服务器** | `hono` + `@hono/node-server` | ^4 / ^2 | `council serve` 本地 Web GUI：经审计的安全静态托管（`serveStatic`，SEC-04）、一等 SSE 支持（`streamSSE`）、干净的路由；核心零传递依赖 |
+| **SQLite** | `better-sqlite3` | ^12 | **同步 API**（事务原子性保证）；WAL 模式；FTS5 支持；原生 C binding 性能优异 |
 | **YAML** | `yaml` (eemeli/yaml) | ^2 | 完整 YAML 1.2；保留注释（用户手编配置不丢注释） |
 | **Schema 校验** | `zod` | ^3 | 配置文件校验、API 响应校验；TS 类型推导一体化 |
-| **JWT 解析** | `jose` | ^5 | 解码 Codex 的 `access_token` JWT 提取 `chatgpt_account_id`；零依赖 |
-| **日志** | `pino` | ^9 | 结构化 JSON 日志；低开销；支持 `pino-pretty` 开发模式 |
 | **测试** | `vitest` | ^2 | 与 TypeScript 零配置集成；watch mode 快；内置 mock/spy |
 
 ### 1.3 不引入的依赖（及理由）
@@ -100,6 +102,7 @@ council/
 │   │   ├── stats.ts                  # council stats
 │   │   ├── rate.ts                   # council rate
 │   │   ├── replay.ts                 # council replay
+│   │   ├── serve.ts                   # council serve（薄命令：装配 deps → 启动 server）
 │   │   └── export.ts                 # council export
 │   │
 │   ├── core/                       # 核心编排引擎（纯逻辑，不依赖 CLI/UI）
@@ -146,6 +149,15 @@ council/
 │   │       ├── model-add.ts            # 添加模型向导
 │   │       └── setup-modules.ts        # 完整配置向导各模块
 │   │
+│   ├── server/                     # 本地 Web GUI 服务端（council serve；见 §8.4）
+│   │   ├── app.ts                    # createApp(deps)：装配 Hono（security → /api → 静态 web/），不监听端口
+│   │   ├── routes.ts                 # 五条 REST + SSE 路由（薄传输层）
+│   │   ├── debate-manager.ts         # Map<debateId, EventLog>；装配 Orchestrator + WebRenderer 后台跑
+│   │   ├── event-log.ts              # 单辩论事件缓冲 + 订阅 + 单调 id + 回放 + 驱逐
+│   │   ├── web-renderer.ts           # implements Renderer（第三实现）：回调 → EventLog.push
+│   │   ├── protocol.ts               # SSE 线协议 TS 类型（server 私有，纯类型 ARCH-04）
+│   │   └── security.ts               # Host/Origin 校验中间件（DNS-rebinding / CSRF 防护）
+│   │
 │   └── types/                      # 共享类型定义
 │       ├── session.ts                # Session, Stage, Invocation, Agent
 │       ├── config.ts                 # ModelConfig, CouncilConfig, RouteRule
@@ -158,6 +170,12 @@ council/
 │   │   ├── code-review.yaml          # 代码审查角色集
 │   │   └── architecture.yaml         # 架构设计角色集
 │   └── benchmark.yaml                # 内置基准测试问题集
+│
+├── web/                            # 本地 Web GUI 前端（零构建静态资源，随包发布）
+│   ├── index.html
+│   ├── app.js                       # petite-vue 应用：发起表单 / 实时观看 / 历史列表+详情
+│   ├── store.js  transport.js  md.js  styles.css
+│   └── vendor/                      # 本地 vendored：petite-vue / marked / DOMPurify（离线、不外链）
 │
 └── test/
     ├── core/                       # 编排引擎单元测试
@@ -189,6 +207,7 @@ council/
 - `providers/` 是唯一与外部系统交互的层（subprocess、HTTP API、文件系统凭证读取）。
 - `commands/` 薄层，只负责解析 CLI 参数 → 调用 `core/` → 通过 `ui/` 渲染结果。
 - `ui/` 分为 `tui/`（ink 组件，Phase 5）和 `plain-renderer.ts`（Phase 0-4 的纯文本输出），通过 `process.stdout.isTTY` 自动切换。
+- `server/` 是 `council serve` 的 HTTP 层，位于 core 之外的外层：可依赖 core/storage/config/providers/commands.shared，**core 严格不反向依赖**（ARCH-02）。它经 `Renderer` 接口接入编排（`WebRenderer`），**core 零改动**即可支撑 Web GUI（见 §8.4 与设计笔记 `web-gui-design.md`）。
 
 ---
 
@@ -1579,7 +1598,7 @@ export async function runCouncil(question: string | undefined, options: any) {
 ### 8.1 渲染器接口
 
 ```typescript
-// src/ui/renderer.ts
+// src/types/renderer.ts
 
 export interface Renderer {
   onPhaseStart(phase: DebatePhase, index: number, total: number): void;
@@ -1718,6 +1737,36 @@ function AgentStatusLine({ agent }: { agent: AgentState }) {
   }
 }
 ```
+
+### 8.4 Web GUI（`council serve`，Renderer 第三实现）
+
+`council serve` 启动一个绑定 `127.0.0.1` 的本地 Web 控制台。**核心支点**：`Orchestrator` 经依赖注入接收一个 `Renderer`（`src/types/renderer.ts`）；CLI 注入 `PlainRenderer` / `TuiRenderer`，Web 只需注入 **`WebRenderer`**（第三实现），把回调转成 SSE 事件推给浏览器——**core 零改动**。
+
+**server 模块拆分**（`src/server/`，均见 §2 结构树）：
+
+| 模块 | 职责 |
+|------|------|
+| `app.ts` | `createApp(deps): Hono` 纯装配（security → `/api` → 静态 `web/`），不监听端口，可 `app.request()` 单测 |
+| `routes.ts` | 五条 REST + SSE 路由，薄传输层（校验 → 委托 → 投影） |
+| `debate-manager.ts` | `Map<debateId, EventLog>`；`startDebate()` 装配 `Orchestrator + WebRenderer`，后台 `run → saveSession → emit result` |
+| `event-log.ts` | 单辩论事件缓冲 + 订阅者集合 + 单调 id + 断线回放 + 有界驱逐（progress 事件可丢弃） |
+| `web-renderer.ts` | `implements Renderer`；回调 → `EventLog.push`，`Agent`/`InvocationResult` → 精简 DTO（SEC-02） |
+| `protocol.ts` | SSE 线协议 TS 类型（server 私有契约，纯类型无运行时代码，ARCH-04） |
+| `security.ts` | Host 头校验（所有请求）+ Origin 校验（状态变更请求），防 DNS-rebinding / CSRF |
+
+**REST + SSE 契约（五条）**：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/debates` | 发起辩论（zod 校验 body），`202 { debateId }`，不 await 编排完成 |
+| GET | `/api/debates/:debateId/events` | SSE 实时流；未知/已驱逐 `debateId` → `404`（前端降级到历史详情） |
+| GET | `/api/sessions` | 历史列表（复用 `SessionStore.listSessions`，投影为精简 summary） |
+| GET | `/api/sessions/:id` | 历史详情（复用 `SessionStore.getSession`） |
+| GET | `/api/models` | 模型元数据 + 模式枚举供发起表单渲染，**绝不返回凭证** |
+
+**SSE 事件协议**：事件类型与 `Renderer` 方法一一映射（`phase` / `agent_start` / `agent_progress` / `agent_complete` / `consensus` / `degradation`），外加服务端注入的 `debate_start` / `result` / `error` 终态事件；每帧带单调 `id:` 供 `Last-Event-ID` 重连回放，心跳用 SSE 注释行 `:hb`。**权威 TS 定义与回放/驱逐语义见设计笔记 `docs/design-notes/web-gui-design.md` §4。**
+
+**`web/` 零构建前端**：`web/` 为纯静态源码，由 `app.ts` 的 hono `serveStatic` 直接托管（SEC-04），**无构建产物**——不引入 Vite/React 构建链。响应式 DOM 用 petite-vue、Markdown 渲染用 marked + DOMPurify 净化（LLM 输出必过净化，SEC），三者均本地 vendored 到 `web/vendor/`（离线、不外链）。运行期从包根解析 `web/`；`package.json` 的 `files` 已含 `web`，随 npm 包发布。
 
 ---
 
@@ -2095,31 +2144,30 @@ npx council "Redis vs Memcached 怎么选?"
 
 ## 附录 A: 依赖版本锁定
 
+> 与 `package.json` 保持一致（以 `package.json` 为准）。鉴权/Provider SDK 已统一委托 `@mariozechner/pi-ai`，不再直接依赖各家 SDK（见 §1.3）。
+
 ```json
 {
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.52.0",
-    "openai": "^5.8.0",
-    "@google/genai": "^1.40.0",
-    "commander": "^12.1.0",
+    "@hono/node-server": "^2.0.8",
     "@inquirer/prompts": "^7.0.0",
-    "better-sqlite3": "^11.7.0",
-    "yaml": "^2.7.0",
-    "zod": "^3.24.0",
-    "jose": "^5.9.0",
-    "pino": "^9.6.0",
-    "ink": "^5.1.0",
-    "ink-spinner": "^5.0.0",
-    "react": "^18.3.0"
+    "@mariozechner/pi-ai": "^0.62.0",
+    "better-sqlite3": "^12.8.0",
+    "commander": "^12.0.0",
+    "hono": "^4.12.27",
+    "ink": "^7.0.1",
+    "react": "^19.2.5",
+    "yaml": "^2.0.0",
+    "zod": "^3.0.0"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "tsup": "^8.3.0",
-    "vitest": "^2.1.0",
-    "@types/better-sqlite3": "^7.6.0",
-    "@types/react": "^18.3.0",
-    "pino-pretty": "^13.0.0",
-    "ink-testing-library": "^4.0.0"
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.2.14",
+    "@vitest/coverage-v8": "2.1.9",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^2.0.0"
   }
 }
 ```
