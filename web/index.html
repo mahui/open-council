@@ -20,6 +20,7 @@
       <nav class="topnav">
         <a href="#/" :class="{active: route.name==='launch'}">发起</a>
         <a href="#/history" :class="{active: route.name==='history'}">历史</a>
+        <a href="#/settings" :class="{active: route.name==='settings'}">⚙ 设置</a>
       </nav>
       <button class="theme-btn" @click="cycleTheme()" :title="'主题：'+theme">
         <span v-text="themeIcon()"></span>
@@ -208,7 +209,228 @@
           </li>
         </ul>
       </section>
+
+      <!-- ================= 设置页 ================= -->
+      <section v-if="route.name==='settings'" class="settings">
+        <h1 class="page-title">设置</h1>
+
+        <div v-if="settings.loadError" class="inline-error big" v-text="settings.loadError"></div>
+        <div v-if="settings.loading && !settings.loaded" class="muted pad">加载配置中…</div>
+
+        <!-- 冲突横幅（乐观锁 409） -->
+        <div v-if="settings.conflict" class="conflict-banner">
+          <div class="cb-main">
+            <b>配置已被外部修改</b>
+            <span class="muted" v-if="settings.conflict.fields && settings.conflict.fields.length">
+              冲突字段：<span v-text="settings.conflict.fields.map(fieldLabel).join('、')"></span>
+            </span>
+            <span class="muted" v-else>council.yaml 已在别处更新。</span>
+          </div>
+          <div class="cb-actions">
+            <button class="btn-sm primary" @click="reloadFromConflict()">加载最新配置重新编辑</button>
+            <button class="btn-sm ghost" @click="dismissConflict()">忽略</button>
+          </div>
+        </div>
+
+        <template v-if="settings.loaded">
+          <!-- ===== 分区一：通用设置 ===== -->
+          <section class="set-section">
+            <h2 class="set-title">通用设置</h2>
+            <div class="set-grid">
+              <div class="field">
+                <label class="field-label">默认模式</label>
+                <div class="seg">
+                  <button v-for="m in ['quick','compare','debate','auto']" :key="m" type="button"
+                    :class="{on: settings.general.default_mode===m}"
+                    @click="settings.general.default_mode=m" v-text="modeLabel(m)"></button>
+                </div>
+              </div>
+
+              <div class="field">
+                <label class="field-label">主席模型 <span class="hint">（须为已启用模型或留空）</span></label>
+                <select class="sel" v-model="settings.general.default_chairman">
+                  <option value="">（自动选择）</option>
+                  <option v-for="n in enabledModelNames()" :key="n" :value="n" v-text="n"></option>
+                </select>
+              </div>
+
+              <div class="field">
+                <label class="field-label">角色生成模型 <span class="hint">（留空=运行时自动）</span></label>
+                <select class="sel" v-model="settings.general.role_generator_model">
+                  <option value="">（自动）</option>
+                  <option v-for="n in modelNames()" :key="n" :value="n" v-text="n"></option>
+                </select>
+              </div>
+
+              <div class="field">
+                <label class="field-label">风险官（唱反调）</label>
+                <select class="sel" v-model="settings.general.devil_advocate">
+                  <option value="auto">自动</option>
+                  <option value="always">总是加入</option>
+                  <option value="never">从不</option>
+                </select>
+              </div>
+
+              <div class="field">
+                <label class="field-label">语言</label>
+                <select class="sel" v-model="settings.general.language">
+                  <option value="auto">自动</option>
+                  <option value="zh">中文</option>
+                  <option value="en">English</option>
+                </select>
+              </div>
+
+              <div class="field two-col">
+                <div>
+                  <label class="field-label">最少 agent 数</label>
+                  <input class="num-input" type="number" min="1" v-model.number="settings.general.min_agents" />
+                </div>
+                <div>
+                  <label class="field-label">最多 agent 数</label>
+                  <input class="num-input" type="number" min="1" v-model.number="settings.general.max_agents" />
+                </div>
+              </div>
+            </div>
+
+            <div v-if="!generalValid()" class="inline-error" v-text="generalError()"></div>
+            <div class="set-actions">
+              <button class="primary" :disabled="!generalDirty() || !generalValid() || settings.savingGeneral" @click="saveGeneral()">
+                <span v-if="!settings.savingGeneral">保存通用设置</span><span v-else>保存中…</span>
+              </button>
+              <span v-if="generalDirty()" class="muted sm">有未保存改动</span>
+            </div>
+          </section>
+
+          <!-- ===== 分区二：模型开关 ===== -->
+          <section class="set-section">
+            <h2 class="set-title">模型 <span class="muted sm">（开关即时生效）</span></h2>
+            <ul class="model-list">
+              <li v-for="m in settings.models" :key="m.name" class="model-row" :class="{off: !m.enabled}">
+                <div class="mr-id">
+                  <span class="mr-name" v-text="m.name"></span>
+                  <span v-if="m.isCustom" class="mr-badge">自定义</span>
+                </div>
+                <div class="mr-meta">
+                  <span v-if="m.provider" class="mr-provider" v-text="m.provider"></span>
+                  <span class="chip-tag" v-if="m.invocation" v-text="m.invocation"></span>
+                  <span v-if="m.apiBaseUrl" class="mr-url mono" v-text="m.apiBaseUrl"></span>
+                  <span v-if="m.hasCredentialFile" class="mr-cred" title="已保存凭证文件">🔑 已保存凭证 ✓</span>
+                </div>
+                <label class="toggle" :title="m.enabled ? '点击禁用' : '点击启用'">
+                  <input type="checkbox" :checked="m.enabled" :disabled="m._patching" @change="toggleModel(m)" />
+                  <span class="track"><span class="thumb"></span></span>
+                </label>
+              </li>
+            </ul>
+          </section>
+
+          <!-- ===== 分区三：prefer 顺序 ===== -->
+          <section class="set-section">
+            <h2 class="set-title">优先顺序 <span class="muted sm">（prefer，影响默认阵容择优）</span></h2>
+            <ol class="prefer-list">
+              <li v-for="(n, i) in settings.prefer" :key="n" class="prefer-row">
+                <span class="pr-idx nums" v-text="(i+1)+'.'"></span>
+                <span class="pr-name" v-text="n"></span>
+                <span class="pr-moves">
+                  <button class="mv" :disabled="i===0" @click="movePrefer(i,-1)" title="上移">↑</button>
+                  <button class="mv" :disabled="i===settings.prefer.length-1" @click="movePrefer(i,1)" title="下移">↓</button>
+                </span>
+              </li>
+            </ol>
+            <div v-if="!settings.prefer.length" class="muted sm">尚无 prefer 项。</div>
+            <div class="set-actions">
+              <button class="primary" :disabled="!preferDirty() || settings.savingPrefer" @click="savePrefer()">
+                <span v-if="!settings.savingPrefer">保存顺序</span><span v-else>保存中…</span>
+              </button>
+              <span v-if="preferDirty()" class="muted sm">有未保存改动</span>
+            </div>
+          </section>
+
+          <!-- ===== 分区四：自定义端点 ===== -->
+          <section class="set-section">
+            <h2 class="set-title">添加自定义端点 <span class="muted sm">（OpenAI 兼容）</span></h2>
+            <div class="set-grid">
+              <div class="field">
+                <label class="field-label">名称</label>
+                <input class="txt-input" type="text" v-model="settings.custom.name" placeholder="例如 local-llm" />
+              </div>
+              <div class="field">
+                <label class="field-label">Base URL</label>
+                <input class="txt-input" type="text" v-model="settings.custom.baseUrl" placeholder="https://api.example.com/v1" />
+              </div>
+              <div class="field span-2">
+                <label class="field-label">模型 ID <span class="hint">（多个用逗号或换行分隔）</span></label>
+                <textarea class="txt-input" rows="2" v-model="settings.custom.modelIds" placeholder="gpt-4o, my-model-v2"></textarea>
+              </div>
+              <div class="field span-2">
+                <label class="field-label">API Key <span class="hint">（仅提交、绝不回显；留空则不写凭证）</span></label>
+                <input class="txt-input" type="password" autocomplete="new-password" v-model="settings.custom.apiKey" placeholder="提交后即清空" />
+              </div>
+            </div>
+            <div v-if="settings.custom.error" class="inline-error" v-text="settings.custom.error"></div>
+            <div v-if="settings.custom.result" class="rescan-summary">
+              已接入模型：<b v-text="(settings.custom.result.added||[]).join('、') || '（无）'"></b>
+              <span v-if="settings.custom.result.tested" class="mr-cred">· 凭证已验证 ✓</span>
+            </div>
+            <div class="set-actions">
+              <button class="primary" :disabled="!customValid() || settings.custom.saving" @click="submitCustom()">
+                <span v-if="!settings.custom.saving">添加端点</span><span v-else>提交中…</span>
+              </button>
+            </div>
+          </section>
+
+          <!-- ===== 重新扫描 ===== -->
+          <section class="set-section">
+            <h2 class="set-title">重新扫描凭证与模型</h2>
+            <p class="muted sm" style="margin-top:0">拾取新配置的环境变量 / OAuth 凭证与可用模型（非破坏性合并，不覆盖已有）。</p>
+            <div class="set-actions">
+              <button class="primary" :disabled="settings.rescanning" @click="rescan()">
+                <span v-if="!settings.rescanning">开始扫描</span>
+                <span v-else class="speaking"><i></i><i></i><i></i> 扫描中…</span>
+              </button>
+            </div>
+            <div v-if="settings.rescanError" class="inline-error" v-text="settings.rescanError"></div>
+            <div v-if="settings.rescanResult" class="rescan-summary">
+              <div class="rs-line">
+                模型：新增 <b v-text="(settings.rescanResult.models.added||[]).length"></b>
+                <span v-if="(settings.rescanResult.models.added||[]).length" v-text="'（'+settings.rescanResult.models.added.join('、')+'）'"></span>
+                · 已存 <b v-text="(settings.rescanResult.models.existing||[]).length"></b>
+              </div>
+              <table class="cred-table" v-if="(settings.rescanResult.credentials||[]).length">
+                <thead><tr><th>Provider</th><th>状态</th><th>来源</th></tr></thead>
+                <tbody>
+                  <tr v-for="c in settings.rescanResult.credentials" :key="c.provider">
+                    <td v-text="c.provider"></td>
+                    <td><span :class="'cred-st st-'+c.status" v-text="c.status"></span></td>
+                    <td class="muted" v-text="c.source"></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- ===== 只读段 ===== -->
+          <details class="set-section readonly" v-if="settings.readOnly">
+            <summary class="set-title">只读配置 <span class="muted sm">（编辑 council.yaml 修改）</span></summary>
+            <table class="ro-table">
+              <tbody>
+                <tr><td>schema_version</td><td class="mono" v-text="settings.readOnly.schema_version"></td></tr>
+                <tr><td>data_dir</td><td class="mono" v-text="settings.readOnly.storage.data_dir"></td></tr>
+                <tr><td>checkpoint_dir</td><td class="mono" v-text="settings.readOnly.storage.checkpoint_dir"></td></tr>
+                <tr><td>log_dir</td><td class="mono" v-text="settings.readOnly.storage.log_dir"></td></tr>
+                <tr><td>routing.strategy</td><td class="mono" v-text="settings.readOnly.routing.strategy"></td></tr>
+                <tr><td>concurrency.global_resource_limit</td><td class="mono" v-text="settings.readOnly.concurrency.global_resource_limit"></td></tr>
+                <tr><td>circuit_breaker</td><td class="mono" v-text="'enabled='+settings.readOnly.circuit_breaker.enabled+' · threshold='+settings.readOnly.circuit_breaker.failure_threshold+' · recovery='+settings.readOnly.circuit_breaker.recovery_seconds+'s'"></td></tr>
+                <tr><td>session_retention_days</td><td class="mono" v-text="settings.readOnly.storage_security.session_retention_days"></td></tr>
+              </tbody>
+            </table>
+          </details>
+        </template>
+      </section>
     </main>
+
+    <!-- 全局 toast -->
+    <div v-if="toast.msg" class="toast" :class="'toast-'+toast.tone" v-text="toast.msg"></div>
   </div>
 </body>
 </html>

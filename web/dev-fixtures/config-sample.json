@@ -1,0 +1,88 @@
+{
+  "version": "sha256:9f3c1a7e5b0d4e2f8a6c1b3d5e7f9a0c2b4d6e8f0a1c3e5b7d9f1a3c5e7b9d0f",
+  "general": {
+    "default_mode": "auto",
+    "default_chairman": "claude-opus-4",
+    "role_generator_model": "",
+    "min_agents": 2,
+    "max_agents": 5,
+    "devil_advocate": "auto",
+    "language": "auto"
+  },
+  "prefer": ["claude-opus-4", "gpt-4o", "gemini-1.5-pro"],
+  "models": [
+    {
+      "name": "claude-opus-4",
+      "provider": "anthropic",
+      "invocation": "api",
+      "capabilities": ["reasoning", "long-context"],
+      "enabled": true,
+      "isCustom": false,
+      "hasCredentialFile": false,
+      "version": "sha256:model-claude-opus-4-0001"
+    },
+    {
+      "name": "claude-sonnet-4",
+      "provider": "anthropic",
+      "invocation": "api",
+      "capabilities": ["reasoning"],
+      "enabled": true,
+      "isCustom": false,
+      "hasCredentialFile": false,
+      "version": "sha256:model-claude-sonnet-4-0001"
+    },
+    {
+      "name": "gpt-4o",
+      "provider": "openai",
+      "invocation": "api",
+      "capabilities": ["reasoning", "vision"],
+      "enabled": true,
+      "isCustom": false,
+      "hasCredentialFile": false,
+      "version": "sha256:model-gpt-4o-0001"
+    },
+    {
+      "name": "gemini-1.5-pro",
+      "provider": "google",
+      "invocation": "api",
+      "capabilities": ["long-context"],
+      "enabled": true,
+      "isCustom": false,
+      "hasCredentialFile": false,
+      "version": "sha256:model-gemini-1.5-pro-0001"
+    },
+    {
+      "name": "deepseek-chat",
+      "provider": "deepseek",
+      "invocation": "cli",
+      "capabilities": ["reasoning"],
+      "enabled": false,
+      "isCustom": false,
+      "hasCredentialFile": false,
+      "version": "sha256:model-deepseek-chat-0001"
+    },
+    {
+      "name": "custom:local-llm",
+      "provider": "custom:local-llm",
+      "invocation": "api",
+      "capabilities": ["reasoning"],
+      "enabled": true,
+      "isCustom": true,
+      "apiBaseUrl": "https://llm.internal.example.com/v1",
+      "hasCredentialFile": true,
+      "version": "sha256:model-custom-local-llm-0001"
+    }
+  ],
+  "readOnly": {
+    "schema_version": 2,
+    "storage": {
+      "data_dir": "~/.open-council/data",
+      "checkpoint_dir": "~/.open-council/checkpoints",
+      "log_dir": "~/.open-council/logs"
+    },
+    "routing": { "strategy": "dynamic" },
+    "concurrency": { "global_resource_limit": 4 },
+    "circuit_breaker": { "enabled": true, "failure_threshold": 3, "recovery_seconds": 60 },
+    "storage_security": { "session_retention_days": 90 }
+  }
+}

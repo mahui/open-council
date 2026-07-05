@@ -21,6 +21,30 @@ const MODE_LABELS = { auto: '自动', quick: '快速', compare: '对比', debate
 // 传输实例与 markdown 节流计时器存在 reactivity 之外。
 let transport = null;
 let renderTimer = null;
+let toastTimer = null;
+
+const FIELD_LABELS = {
+  default_mode: '默认模式', default_chairman: '主席', role_generator_model: '角色生成模型',
+  min_agents: '最少 agent 数', max_agents: '最多 agent 数', devil_advocate: '风险官',
+  language: '语言', prefer: 'prefer 顺序',
+};
+
+function freshSettings() {
+  return {
+    loaded: false, loading: false, loadError: '', reloadWanted: false,
+    version: '',
+    general: {
+      default_mode: 'auto', default_chairman: '', role_generator_model: '',
+      min_agents: 2, max_agents: 5, devil_advocate: 'auto', language: 'auto',
+    },
+    base: null, prefer: [], models: [], readOnly: null,
+    savingGeneral: false, savingPrefer: false,
+    custom: { name: '', baseUrl: '', modelIds: '', apiKey: '', saving: false, error: '', result: null },
+    rescanning: false, rescanError: '', rescanResult: null,
+    conflict: null,
+    _mock409Fired: false,
+  };
+}
 
 function freshDebate() {
   return {
@@ -51,6 +75,12 @@ export function createStore() {
 
     // ---- 历史 ----
     sessions: [], historyLoading: false, historyError: '',
+
+    // ---- 设置 ----
+    settings: freshSettings(),
+
+    // ---- 全局 toast ----
+    toast: { msg: '', tone: 'ok' },
 
     // ================= 生命周期 =================
     init() {
@@ -87,6 +117,9 @@ export function createStore() {
       } else if (seg === 'history') {
         this.route = { name: 'history', params: {} };
         this.loadHistory();
+      } else if (seg === 'settings') {
+        this.route = { name: 'settings', params: {} };
+        this.loadConfig();
       } else {
         this.route = { name: 'launch', params: {} };
         this.loadModels();
@@ -321,6 +354,249 @@ export function createStore() {
 
     renderPanel(panel) { panel.html = renderMarkdown(panel.buffer); panel._dirty = false; },
 
+    // ================= 设置 =================
+    async loadConfig() {
+      const s = this.settings;
+      if (s.loaded && !s.reloadWanted) return;
+      s.loading = true; s.loadError = ''; s.reloadWanted = false;
+      try {
+        const dto = MOCK ? await getJSON('./dev-fixtures/config-sample.json') : await getJSON('/api/config');
+        this.applyConfigDTO(dto);
+        s.loaded = true;
+      } catch (e) {
+        s.loadError = `无法加载配置：${e.message}`;
+      } finally {
+        s.loading = false;
+      }
+    },
+
+    // 用一份 ConfigDTO 覆盖本地设置状态（初次加载 / 保存成功 / 409 rebase 共用）。
+    applyConfigDTO(dto) {
+      const s = this.settings;
+      s.version = dto.version || '';
+      s.general = { ...dto.general };
+      s.base = JSON.parse(JSON.stringify({ general: dto.general, prefer: dto.prefer }));
+      s.prefer = [...(dto.prefer || [])];
+      s.models = (dto.models || []).map((m) => ({ ...m }));
+      s.readOnly = dto.readOnly || null;
+    },
+
+    // ---- 通用设置表单 ----
+    modelNames() { return this.settings.models.map((m) => m.name); },
+    enabledModelNames() { return this.settings.models.filter((m) => m.enabled).map((m) => m.name); },
+    generalValid() {
+      const g = this.settings.general;
+      const min = Number(g.min_agents), max = Number(g.max_agents);
+      return Number.isInteger(min) && Number.isInteger(max) && min >= 1 && max >= min;
+    },
+    generalError() {
+      const g = this.settings.general;
+      const min = Number(g.min_agents), max = Number(g.max_agents);
+      if (!(min >= 1)) return '最少 agent 数须 ≥ 1';
+      if (!(max >= min)) return '最多 agent 数须 ≥ 最少 agent 数';
+      return '';
+    },
+    generalDirty() {
+      const s = this.settings;
+      return s.base && JSON.stringify(s.general) !== JSON.stringify(s.base.general);
+    },
+    async saveGeneral() {
+      const s = this.settings;
+      if (!this.generalValid() || s.savingGeneral) return;
+      s.savingGeneral = true;
+      const payload = {
+        general: {
+          ...s.general,
+          min_agents: Number(s.general.min_agents),
+          max_agents: Number(s.general.max_agents),
+        },
+        version: s.version,
+      };
+      await this.putConfig(payload, '通用设置已保存');
+      s.savingGeneral = false;
+    },
+
+    // ---- prefer 顺序 ----
+    movePrefer(i, dir) {
+      const arr = this.settings.prefer;
+      const j = i + dir;
+      if (j < 0 || j >= arr.length) return;
+      const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+    },
+    preferDirty() {
+      const s = this.settings;
+      return s.base && JSON.stringify(s.prefer) !== JSON.stringify(s.base.prefer);
+    },
+    async savePrefer() {
+      const s = this.settings;
+      if (s.savingPrefer) return;
+      s.savingPrefer = true;
+      await this.putConfig({ prefer: [...s.prefer], version: s.version }, 'prefer 顺序已保存');
+      s.savingPrefer = false;
+    },
+
+    // PUT /api/config —— 乐观锁，409 时 rebase。成功回填最新 ConfigDTO。
+    async putConfig(payload, okMsg) {
+      const s = this.settings;
+      s.conflict = null;
+      try {
+        if (MOCK) { this.mockPut(payload, okMsg); return; }
+        const res = await reqJSON('PUT', '/api/config', payload);
+        if (res.status === 409) { this.onConflict(res.data); return; }
+        if (!res.ok) throw new Error((res.data && res.data.error) || `HTTP ${res.status}`);
+        this.applyConfigDTO(res.data);
+        this.showToast(okMsg, 'ok');
+      } catch (e) {
+        this.showToast(`保存失败：${e.message}`, 'bad');
+      }
+    },
+
+    // mock：首次保存模拟一次 409 冲突（供走查冲突横幅），此后成功。
+    mockPut(payload, okMsg) {
+      const s = this.settings;
+      if (!s._mock409Fired) {
+        s._mock409Fired = true;
+        const dto = this.snapshotDTO();
+        dto.version = 'sha256:external-changed-' + Date.now();
+        // 模拟外部把默认模式改成了 debate。
+        dto.general = { ...dto.general, default_mode: dto.general.default_mode === 'debate' ? 'auto' : 'debate' };
+        this.onConflict(dto);
+        return;
+      }
+      // 应用本地改动并回填新版本，模拟保存成功。
+      const dto = this.snapshotDTO();
+      if (payload.general) dto.general = { ...dto.general, ...payload.general };
+      if (payload.prefer) dto.prefer = [...payload.prefer];
+      dto.version = 'sha256:saved-' + Date.now();
+      this.applyConfigDTO(dto);
+      this.showToast(okMsg, 'ok');
+    },
+    // 从当前设置状态重建一份 ConfigDTO（mock 用）。
+    snapshotDTO() {
+      const s = this.settings;
+      return {
+        version: s.version,
+        general: { ...s.general },
+        prefer: [...s.prefer],
+        models: s.models.map((m) => ({ ...m })),
+        readOnly: s.readOnly,
+      };
+    },
+
+    // ---- 模型 enabled 开关（单发 PATCH）----
+    async toggleModel(m) {
+      if (m._patching) return;
+      const s = this.settings;
+      const next = !m.enabled;
+      m._patching = true;
+      try {
+        if (MOCK) {
+          m.enabled = next;
+          this.showToast(`${m.name} 已${next ? '启用' : '禁用'}`, 'ok');
+          return;
+        }
+        const res = await reqJSON('PATCH', `/api/models/${encodeURIComponent(m.name)}`, { enabled: next, version: m.version });
+        if (res.status === 409) { this.onConflict(res.data); return; }
+        if (res.status === 404) throw new Error('模型不存在');
+        if (!res.ok) throw new Error((res.data && res.data.error) || `HTTP ${res.status}`);
+        Object.assign(m, res.data);
+        this.showToast(`${m.name} 已${m.enabled ? '启用' : '禁用'}`, 'ok');
+      } catch (e) {
+        this.showToast(`切换失败：${e.message}`, 'bad');
+      } finally {
+        m._patching = false;
+      }
+    },
+
+    // ---- 自定义端点 ----
+    customValid() {
+      const c = this.settings.custom;
+      return !!(c.name.trim() && c.baseUrl.trim() && c.modelIds.trim());
+    },
+    async submitCustom() {
+      const s = this.settings, c = s.custom;
+      if (!this.customValid() || c.saving) return;
+      c.saving = true; c.error = ''; c.result = null;
+      const modelIds = c.modelIds.split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
+      const body = { name: c.name.trim(), baseUrl: c.baseUrl.trim(), modelIds };
+      if (c.apiKey) body.apiKey = c.apiKey;
+      try {
+        const res = MOCK
+          ? { ok: true, status: 200, data: { added: modelIds, tested: !!c.apiKey } }
+          : await reqJSON('POST', '/api/providers/custom', body);
+        if (!res.ok) throw new Error((res.data && res.data.error) || `HTTP ${res.status}`);
+        c.result = res.data;
+        // key 绝不回显：提交后立即清空输入框。
+        c.apiKey = '';
+        this.showToast(`已接入 ${res.data.added.length} 个模型`, 'ok');
+        // 重新拉取配置以纳入新端点（mock 下跳过，仅展示摘要）。
+        if (!MOCK) { s.reloadWanted = true; await this.loadConfig(); }
+      } catch (e) {
+        c.error = `接入失败：${e.message}`;
+      } finally {
+        c.saving = false;
+      }
+    },
+
+    // ---- 重新扫描 ----
+    async rescan() {
+      const s = this.settings;
+      if (s.rescanning) return;
+      s.rescanning = true; s.rescanError = ''; s.rescanResult = null;
+      try {
+        const res = MOCK
+          ? { ok: true, status: 200, data: mockRescan() }
+          : await reqJSON('POST', '/api/setup/rescan', {});
+        if (!res.ok) throw new Error((res.data && res.data.error) || `HTTP ${res.status}`);
+        s.rescanResult = res.data;
+        const added = res.data.models?.added?.length || 0;
+        const creds = res.data.credentials?.length || 0;
+        this.showToast(`扫描完成：新发现 ${added} 模型 / ${creds} 凭证`, 'ok');
+        if (!MOCK && added > 0) { s.reloadWanted = true; await this.loadConfig(); }
+      } catch (e) {
+        s.rescanError = `扫描失败：${e.message}`;
+      } finally {
+        s.rescanning = false;
+      }
+    },
+
+    // ---- 乐观锁冲突处理 ----
+    onConflict(serverDto) {
+      const s = this.settings;
+      if (!serverDto || !serverDto.version) {
+        this.showToast('配置已被外部修改，请重新加载', 'bad');
+        s.conflict = { fields: [] };
+        return;
+      }
+      s.conflict = { dto: serverDto, fields: this.conflictFields(serverDto) };
+    },
+    conflictFields(dto) {
+      const s = this.settings, out = [];
+      const g = dto.general || {};
+      for (const k of Object.keys(s.general)) {
+        if (String(s.general[k]) !== String(g[k])) out.push(k);
+      }
+      if (JSON.stringify(s.prefer) !== JSON.stringify(dto.prefer || [])) out.push('prefer');
+      return out;
+    },
+    reloadFromConflict() {
+      const s = this.settings;
+      if (s.conflict && s.conflict.dto) this.applyConfigDTO(s.conflict.dto);
+      else { s.reloadWanted = true; this.loadConfig(); }
+      s.conflict = null;
+      this.showToast('已加载最新配置，请复核后重新保存', 'ok');
+    },
+    dismissConflict() { this.settings.conflict = null; },
+
+    // ---- toast ----
+    showToast(msg, tone) {
+      this.toast = { msg, tone: tone || 'ok' };
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { this.toast = { msg: '', tone: 'ok' }; }, 3200);
+    },
+
+    fieldLabel(k) { return FIELD_LABELS[k] || k; },
+
     // ---- 通用文本工具（模板用）----
     preview(text, n = 90) {
       const t = escapeText(text || '');
@@ -375,7 +651,34 @@ async function postJSON(url, body) {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
+
+// 状态感知请求：不抛异常，返回 { ok, status, data }，供 PUT/PATCH 分支处理 409/404/400。
+// 写请求由浏览器天然带 Origin，过 server 的 Host+Origin 校验（同源、CORS 不开）。
+async function reqJSON(method, url, body) {
+  const opts = { method, headers: { Accept: 'application/json' } };
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(url, opts);
+  let data = null;
+  try { data = await r.json(); } catch { /* 空 body */ }
+  return { ok: r.ok, status: r.status, data };
+}
+
 function pad(n) { return String(n).padStart(2, '0'); }
+
+// mock rescan 摘要（?mock=1 走查用）。
+function mockRescan() {
+  return {
+    credentials: [
+      { provider: 'anthropic', status: 'valid', source: 'env' },
+      { provider: 'openai', status: 'refreshed', source: 'file' },
+      { provider: 'google', status: 'not_found', source: 'env' },
+    ],
+    models: { added: ['claude-haiku-4'], existing: ['claude-opus-4', 'gpt-4o'] },
+  };
+}
 
 function mockModels() {
   return [
