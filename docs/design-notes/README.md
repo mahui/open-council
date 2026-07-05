@@ -8,6 +8,7 @@
 |------|------|------|------|
 | [consensus-review-dataflow.md](./consensus-review-dataflow.md) | 共识判停 / 评审回灌 / 自评剔除 / 截断标记的接口与数据流设计 | 2026-07-04 | 设计定稿 |
 | [information-architecture-review.md](./information-architecture-review.md) | 全项目信息架构审阅：模块边界、类型归属、配置/文档/命名/导出面 | 2026-07-05 | 审阅定稿 |
+| [web-gui-design.md](./web-gui-design.md) | 本地 Web GUI（`council serve`）：HTTP/SSE 架构、WebRenderer、线协议、REST 契约、模块分层与工作项拆分 | 2026-07-05 | 设计定稿 |
 
 ## 约定
 
