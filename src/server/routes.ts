@@ -27,7 +27,9 @@ export interface RouteDeps {
 }
 
 const StartDebateSchema = z.object({
-  question: z.string().min(1),
+  // Upper bound keeps a runaway paste from flowing verbatim into every
+  // agent prompt (cost guard); generous enough for any real question.
+  question: z.string().min(1).max(8_000),
   mode: z.enum(['quick', 'compare', 'debate', 'auto']).optional(),
   models: z.array(z.string()).optional(),
   chairman: z.string().optional(),

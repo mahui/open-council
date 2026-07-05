@@ -169,10 +169,85 @@ describe('POST /api/debates', () => {
   });
 });
 
+describe('POST /api/debates — boundary inputs', () => {
+  it('rejects an empty-string question with 400', async () => {
+    const { app } = makeApp();
+    const res = await app.request('http://x/api/debates', {
+      method: 'POST',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify({ question: '', mode: 'debate' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects an illegal mode enum value with 400', async () => {
+    const { app } = makeApp();
+    const res = await app.request('http://x/api/debates', {
+      method: 'POST',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify({ question: 'Redis vs Memcached?', mode: 'debug-mode' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a non-string mode value with 400', async () => {
+    const { app } = makeApp();
+    const res = await app.request('http://x/api/debates', {
+      method: 'POST',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify({ question: 'Redis vs Memcached?', mode: 123 }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a malformed JSON body with 400', async () => {
+    const { app } = makeApp();
+    const res = await app.request('http://x/api/debates', {
+      method: 'POST',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      body: '{not valid json',
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a question exceeding the 8k cost-guard upper bound with 400', async () => {
+    const { app } = makeApp();
+    const longQuestion = 'x'.repeat(100_000);
+    const res = await app.request('http://x/api/debates', {
+      method: 'POST',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify({ question: longQuestion, mode: 'quick' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('accepts a question at exactly the 8k boundary', async () => {
+    const { app } = makeApp();
+    const res = await app.request('http://x/api/debates', {
+      method: 'POST',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify({ question: 'x'.repeat(8_000), mode: 'quick' }),
+    });
+    expect(res.status).toBe(202);
+  });
+});
+
 describe('SSE /api/debates/:id/events', () => {
   it('returns 404 for an unknown debateId', async () => {
     const { app } = makeApp();
     const res = await app.request('http://x/api/debates/does-not-exist/events', { headers: HEADERS });
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 for a debateId containing URL-encoded special characters', async () => {
+    const { app } = makeApp();
+    const res = await app.request('http://x/api/debates/%2e%2e%2fetc%2fpasswd/events', { headers: HEADERS });
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 (not a crash) for an extremely long debateId', async () => {
+    const { app } = makeApp();
+    const res = await app.request(`http://x/api/debates/${'a'.repeat(4000)}/events`, { headers: HEADERS });
     expect(res.status).toBe(404);
   });
 
