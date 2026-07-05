@@ -1665,7 +1665,12 @@ export class PlainRenderer implements Renderer {
 
 import React, { useState } from 'react';
 import { Box, Text, useApp } from 'ink';
-import Spinner from 'ink-spinner';
+
+// 纯文本 spinner：ink 无内置 spinner 组件，用一组 braille 帧按耗时轮转即可，
+// 避免额外依赖（示例自洽）。
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const spinnerFrame = (elapsedSec: number): string =>
+  SPINNER_FRAMES[Math.floor(elapsedSec * 10) % SPINNER_FRAMES.length];
 
 interface Props {
   question: string;
@@ -1725,7 +1730,7 @@ function AgentStatusLine({ agent }: { agent: AgentState }) {
     case 'running':
       return (
         <Text>
-          {'  '}<Spinner type="dots" /> {agent.name} ({agent.role}) [{modeTag}] {agent.elapsed}s
+          {'  '}{spinnerFrame(agent.elapsed)} {agent.name} ({agent.role}) [{modeTag}] {agent.elapsed}s
         </Text>
       );
     case 'done':
@@ -2121,7 +2126,7 @@ npx council "Redis vs Memcached 怎么选?"
 | 风险 | 缓解措施 |
 |------|---------|
 | 凭证文件被意外读取 | 凭证路径 hardcode，不接受用户任意路径输入；只读取已知格式 |
-| token 泄露到日志 | pino 日志中 redact `access_token`、`refresh_token` 字段 |
+| token 泄露到日志 | 结构化日志层统一 redact `access_token`、`refresh_token` 等敏感字段 |
 | `input_mode: arg` 进程列表暴露 | 启动时 warn；配置引导标注风险；推荐 stdin |
 | Session JSON 明文存储 | 文件权限 `0o600`；`--no-store` 模式不写盘 |
 | refresh_token 写回失败 | catch + 日志记录，不阻塞主流程；下次使用时重新刷新 |
