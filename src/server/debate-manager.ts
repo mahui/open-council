@@ -13,22 +13,21 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { InvocationAdapter } from '../types/provider.js';
-import type { ModelConfig, RoleSet } from '../types/config.js';
+import type { RoleSet } from '../types/config.js';
 import type { DebateMode, RunOptions } from '../types/session.js';
 import { Orchestrator } from '../core/orchestrator.js';
 import type { SessionStore } from '../storage/session-store.js';
 import { EventLog } from './event-log.js';
 import { WebRenderer } from './web-renderer.js';
+import type { RuntimeConfig } from './runtime-config.js';
 
 export interface DebateManagerDeps {
-  adapter: InvocationAdapter;
-  /** Full resolved model set available to orchestration. */
-  models: ModelConfig[];
-  /** Default chairman from config (overridable per debate). */
-  defaultChairman?: string;
-  /** Optional explicit role-panel designer model. */
-  roleGenModel?: ModelConfig;
+  /**
+   * Live config holder — adapter / models / chairman / role-gen model are read
+   * from its CURRENT snapshot at debate start (design §5), so config writes take
+   * effect on the next debate without reconstructing the manager.
+   */
+  runtime: RuntimeConfig;
   /** Persistence store (shared, long-lived connection). */
   store: SessionStore;
   /** Resolve an explicit role-set template by name (for `roleSet` input). */
@@ -78,15 +77,18 @@ export class DebateManager {
   /** Background orchestration: assemble → run → persist → emit terminal event. */
   private async runDebate(log: EventLog, input: StartDebateInput): Promise<void> {
     try {
+      // Capture the current snapshot once per debate — an in-flight debate keeps
+      // its models/adapter even if the config is rewritten mid-run (design §5).
+      const snapshot = this.deps.runtime.current;
       const explicitRoleSet = this.resolveRoleSet(input.roleSet);
       const renderer = new WebRenderer(log);
       const orchestrator = new Orchestrator(
-        this.deps.adapter,
+        snapshot.adapter,
         renderer,
-        this.deps.models,
-        input.chairman ?? this.deps.defaultChairman,
+        snapshot.models,
+        input.chairman ?? snapshot.defaultChairman,
         undefined,
-        this.deps.roleGenModel,
+        snapshot.roleGenModel,
         explicitRoleSet,
       );
 

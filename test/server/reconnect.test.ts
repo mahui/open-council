@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { tmpdir } from 'node:os';
 import { createApp } from '../../src/server/app.js';
+import { makeRuntime, makeConfigDeps } from './runtime-helpers.js';
 import { DebateManager } from '../../src/server/debate-manager.js';
 import type { InvocationAdapter, InvocationResult, HealthStatus, OnChunk } from '../../src/types/provider.js';
 import type { ModelConfig } from '../../src/types/config.js';
@@ -94,15 +95,15 @@ function makeApp(
     listSessions: vi.fn(async () => []),
   } as unknown as SessionStore;
 
+  const runtime = makeRuntime(opts.adapter ?? createMockAdapter(), createModels());
   const manager = new DebateManager({
-    adapter: opts.adapter ?? createMockAdapter(),
-    models: createModels(),
+    runtime,
     store,
     eventLogOptions: opts.eventLogOptions ?? { ttlMs: 60_000 },
   });
 
   const app = createApp({
-    manager, store, models: createModels(), defaultChairman: 'claude', port, webRoot: tmpdir(),
+    manager, store, runtime, ...makeConfigDeps(), port, webRoot: tmpdir(),
   });
   return { app, manager };
 }

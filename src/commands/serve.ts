@@ -16,6 +16,7 @@ import { ConfigLoader } from '../config/loader.js';
 import { SessionStore } from '../storage/session-store.js';
 import { createApp } from '../server/app.js';
 import { DebateManager } from '../server/debate-manager.js';
+import { RuntimeConfig } from '../server/runtime-config.js';
 import { discoverCredentials, buildAdapter, resolveModels } from './shared/assemble.js';
 
 const DEFAULT_PORT = 3720;
@@ -31,9 +32,7 @@ export async function runServe(options: ServeOptions): Promise<void> {
 
   // Assemble orchestration deps (server-side only; credentials never leave here).
   const credentialManager = await discoverCredentials();
-  const { models, chairman, roleGenModel } = resolveModels(credentialManager, {
-    loadGeneralConfig: true,
-  });
+  const { models, chairman, roleGenModel } = resolveModels(credentialManager, { loadGeneralConfig: true });
   if (models.length === 0) {
     process.stderr.write(
       'Error: No models available. Run "council setup" or set API keys ' +
@@ -44,17 +43,19 @@ export async function runServe(options: ServeOptions): Promise<void> {
 
   const store = new SessionStore(PATHS.sessionsDir);
   const loader = new ConfigLoader();
-  const manager = new DebateManager({
+
+  // Live config holder; GUI config writes call reloadRuntime() to swap it (design §5).
+  const runtime = new RuntimeConfig({
     adapter: buildAdapter(credentialManager),
     models,
-    defaultChairman: chairman,
+    allModels: loader.loadAllModelConfigs(),
+    defaultChairman: chairman ?? '',
     roleGenModel,
-    store,
-    loadRoleSet: (name) => loader.loadRoleSet(name),
   });
+  const manager = new DebateManager({ runtime, store, loadRoleSet: (name) => loader.loadRoleSet(name) });
 
   const webRoot = resolveWebRoot();
-  const app = createApp({ manager, store, models, defaultChairman: chairman, port, webRoot });
+  const app = createApp({ manager, store, runtime, loader, credentialManager, port, webRoot });
 
   const server = serve({ fetch: app.fetch, port, hostname: HOST }, () => {
     const url = `http://localhost:${port}`;

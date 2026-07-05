@@ -1,0 +1,89 @@
+/**
+ * RuntimeConfig — server-private holder of the live orchestration snapshot
+ * (design-notes/web-gui-config.md §5).
+ *
+ * `serve.ts` resolves models/chairman/adapter once at boot and hands them here.
+ * DebateManager and the routes read the CURRENT snapshot at request time (never
+ * a value captured at construction), so a config write followed by `reload*`
+ * takes effect on the next debate — while any in-flight debate keeps the older
+ * snapshot it already captured in its Orchestrator (correct: models must not
+ * change mid-debate).
+ *
+ * No core changes; depends only downward on config + providers layers.
+ */
+
+import type { InvocationAdapter } from '../types/provider.js';
+import type { ModelConfig } from '../types/config.js';
+import { AutoAdapter } from '../providers/adapter.js';
+import { ApiAdapter } from '../providers/api-adapter.js';
+import { CliAdapter } from '../providers/cli-adapter.js';
+import type { CredentialManager } from '../providers/credentials/discovery.js';
+import type { ConfigLoader } from '../config/loader.js';
+
+export interface RuntimeSnapshot {
+  /** Invocation adapter (API-first, CLI fallback). */
+  adapter: InvocationAdapter;
+  /** Enabled model set — feeds orchestration (disabled models never debate). */
+  models: ModelConfig[];
+  /** Full model set incl. disabled — feeds the /api/config projection. */
+  allModels: ModelConfig[];
+  /** Default chairman name from council.yaml ('' → orchestrator auto-picks). */
+  defaultChairman: string;
+  /** Optional role-panel designer model resolved from council.yaml. */
+  roleGenModel?: ModelConfig;
+}
+
+export class RuntimeConfig {
+  constructor(private snap: RuntimeSnapshot) {}
+
+  /** The current snapshot — read at request time, never cached by callers. */
+  get current(): RuntimeSnapshot {
+    return this.snap;
+  }
+
+  /** Atomically swap in a freshly-built snapshot after a config write. */
+  replace(next: RuntimeSnapshot): void {
+    this.snap = next;
+  }
+}
+
+/** Build the auto adapter (API-first with CLI fallback) from a credential set. */
+export function buildAutoAdapter(credentialManager: CredentialManager): InvocationAdapter {
+  return new AutoAdapter(new ApiAdapter(credentialManager), new CliAdapter());
+}
+
+/**
+ * Build a snapshot from the current on-disk config. Reuses `adapter` when given
+ * (PUT/PATCH/custom-endpoint writes don't touch credentials — custom keys are
+ * read from disk at invoke time), and rebuilds it from `credentialManager` only
+ * when the caller passes a fresh one (rescan may have picked up new creds).
+ */
+export function buildSnapshot(opts: {
+  loader: ConfigLoader;
+  credentialManager: CredentialManager;
+  adapter?: InvocationAdapter;
+}): RuntimeSnapshot {
+  const allModels = opts.loader.loadAllModelConfigs();
+  const models = allModels.filter(m => m.enabled);
+  const config = opts.loader.loadCouncilConfigSafe();
+  const defaultChairman = config?.general.default_chairman ?? '';
+  const roleGenName = config?.general.role_generator_model;
+  const roleGenModel = roleGenName ? models.find(m => m.name === roleGenName) : undefined;
+  const adapter = opts.adapter ?? buildAutoAdapter(opts.credentialManager);
+  return { adapter, models, allModels, defaultChairman, roleGenModel };
+}
+
+/**
+ * Rebuild the snapshot in place after a config write.
+ * `rebuildAdapter` is only set by rescan (new credentials may exist); ordinary
+ * config edits keep the existing adapter (SEC-02: custom keys re-read at invoke).
+ */
+export function reloadRuntime(
+  runtime: RuntimeConfig,
+  loader: ConfigLoader,
+  credentialManager: CredentialManager,
+  opts: { rebuildAdapter?: boolean } = {},
+): void {
+  const adapter = opts.rebuildAdapter ? buildAutoAdapter(credentialManager) : runtime.current.adapter;
+  runtime.replace(buildSnapshot({ loader, credentialManager, adapter }));
+}

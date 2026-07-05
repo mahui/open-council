@@ -8,12 +8,15 @@ import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { SSEStreamingApi } from 'hono/streaming';
 import { z } from 'zod';
-import type { ModelConfig } from '../types/config.js';
 import type { DebateMode, Session } from '../types/session.js';
 import type { SessionStore } from '../storage/session-store.js';
+import type { ConfigLoader } from '../config/loader.js';
+import type { CredentialManager } from '../providers/credentials/discovery.js';
 import type { DebateManager } from './debate-manager.js';
 import type { EventLog } from './event-log.js';
 import type { DebateEvent } from './protocol.js';
+import type { RuntimeConfig } from './runtime-config.js';
+import { createConfigRoutes } from './config-routes.js';
 
 const MODES: DebateMode[] = ['quick', 'compare', 'debate', 'auto'];
 const HEARTBEAT_MS = 15_000;
@@ -21,9 +24,12 @@ const HEARTBEAT_MS = 15_000;
 export interface RouteDeps {
   manager: DebateManager;
   store: SessionStore;
-  /** Resolved model set (server-side); only metadata is exposed via /api/models. */
-  models: ModelConfig[];
-  defaultChairman?: string;
+  /** Live config holder — /api/models and the config routes read its snapshot. */
+  runtime: RuntimeConfig;
+  /** Config persistence for the settings routes. */
+  loader: ConfigLoader;
+  /** Boot credential set (rescan replaces it). */
+  credentialManager: CredentialManager;
 }
 
 const StartDebateSchema = z.object({
@@ -97,17 +103,26 @@ export function createApiRoutes(deps: RouteDeps): Hono {
 
   // GET /api/models — model metadata + mode enum for the form (no credentials).
   api.get('/models', (c) => {
+    const snapshot = deps.runtime.current;
     return c.json({
-      models: deps.models.map((m) => ({
+      models: snapshot.models.map((m) => ({
         name: m.name,
         provider: m.provider,
         capabilities: m.capabilities,
         invocation: m.invocation,
       })),
       modes: MODES,
-      defaultChairman: deps.defaultChairman,
+      defaultChairman: snapshot.defaultChairman,
     });
   });
+
+  // Settings面 routes (design-notes/web-gui-config.md §4): GET/PUT /config,
+  // PATCH /models/:name, POST /providers/custom, POST /setup/rescan.
+  api.route('/', createConfigRoutes({
+    runtime: deps.runtime,
+    loader: deps.loader,
+    credentialManager: deps.credentialManager,
+  }));
 
   return api;
 }

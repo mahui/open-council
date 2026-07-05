@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { tmpdir } from 'node:os';
 import { createApp } from '../../src/server/app.js';
 import { DebateManager } from '../../src/server/debate-manager.js';
+import { makeRuntime, makeConfigDeps } from './runtime-helpers.js';
 import type { InvocationAdapter, InvocationResult, HealthStatus } from '../../src/types/provider.js';
 import type { ModelConfig } from '../../src/types/config.js';
 import type { Session } from '../../src/types/session.js';
@@ -76,9 +77,9 @@ function makeApp(): { app: ReturnType<typeof createApp>; save: ReturnType<typeof
     listSessions: vi.fn(async () => [sampleSession()]),
   } as unknown as SessionStore;
 
+  const runtime = makeRuntime(createMockAdapter(), createModels());
   const manager = new DebateManager({
-    adapter: createMockAdapter(),
-    models: createModels(),
+    runtime,
     store,
     eventLogOptions: { ttlMs: 60_000 },
   });
@@ -86,8 +87,8 @@ function makeApp(): { app: ReturnType<typeof createApp>; save: ReturnType<typeof
   const app = createApp({
     manager,
     store,
-    models: createModels(),
-    defaultChairman: 'claude',
+    runtime,
+    ...makeConfigDeps(),
     port: PORT,
     webRoot: tmpdir(),
   });

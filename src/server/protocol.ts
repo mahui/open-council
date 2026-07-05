@@ -76,6 +76,66 @@ export interface ErrorPayload {
   message: string;
 }
 
+// —— 配置读投影（脱敏，绝不含任何 secret）—— //
+// 见 design-notes/web-gui-config.md §4.1。不变量：任何字段都不得来源于
+// api_key_env 的值、api_credential_path 指向的文件内容、或 OAuth token。
+
+export interface GeneralSettingsDTO {
+  default_mode: 'quick' | 'compare' | 'debate' | 'auto';
+  default_chairman: string;
+  role_generator_model: string;
+  min_agents: number;
+  max_agents: number;
+  devil_advocate: 'auto' | 'always' | 'never';
+  language: 'auto' | 'zh' | 'en';
+}
+
+export interface ModelSettingDTO {
+  name: string;
+  provider?: string;
+  invocation: 'cli' | 'api' | 'auto';
+  capabilities: string[];
+  enabled: boolean;
+  isCustom: boolean; // provider 以 "custom:" 前缀
+  apiBaseUrl?: string; // 仅自定义端点展示
+  hasCredentialFile: boolean; // api_credential_path 是否存在 —— 绝不含 key
+}
+
+/** 只读段：仅供展示现值，无写路径。 */
+export interface ReadOnlyConfigDTO {
+  schema_version: number;
+  storage: { data_dir: string; checkpoint_dir: string; log_dir: string };
+  routing: { strategy: string };
+  concurrency: { global_resource_limit: number };
+  circuit_breaker: { enabled: boolean; failure_threshold: number; recovery_seconds: number };
+  storage_security: { session_retention_days: number };
+}
+
+export interface ConfigDTO {
+  version: string; // 乐观锁令牌（council.yaml 内容 sha256）
+  general: GeneralSettingsDTO;
+  prefer: string[]; // routing.default.prefer
+  models: ModelSettingDTO[]; // 含禁用模型
+  readOnly: ReadOnlyConfigDTO;
+}
+
+export interface UpdateConfigRequest {
+  general?: Partial<GeneralSettingsDTO>;
+  prefer?: string[];
+  version: string; // 必填：GET 拿到的令牌，用于乐观锁
+}
+
+/** rescan 结果摘要 —— 无任何 secret 出线。 */
+export interface RescanSummaryDTO {
+  credentials: Array<{
+    provider: string;
+    status: 'valid' | 'refreshed' | 'expired' | 'not_found' | 'parse_error';
+    source: 'env' | 'file';
+    // DiscoveryResult.path 被刻意剔除（泄露 home 目录结构，对 GUI 无价值）。
+  }>;
+  models: { added: string[]; existing: string[] }; // 名称
+}
+
 /** 判别联合，data 随 type 变化。 */
 export type DebateEvent =
   | { type: 'debate_start'; data: DebateStartPayload }
