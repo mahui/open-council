@@ -16,3 +16,7 @@
 
 > LLM 输出的 markdown 一律先 `marked.parse()` 再 `DOMPurify.sanitize()` 才写入 DOM。
 > 见 `web/md.js`。
+
+## 本地补丁
+
+- `petite-vue.es.js`（0.4.1）：任务调度 flush（原 `Ft`）加 try/catch/finally。上游实现中任一 effect 抛错会让 `queued` 标志永久卡死，整个应用的响应式静默冻结（表现为"页面卡在初始状态、无任何报错"）。补丁改为 console.error 上报并自愈。升级 vendored 版本时需重新应用（搜 `job flush error`）。

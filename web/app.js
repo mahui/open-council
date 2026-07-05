@@ -3,4 +3,7 @@
 import { createApp } from './vendor/petite-vue.es.js';
 import { createStore } from './store.js';
 
-createApp(createStore()).mount('#app');
+const store = createStore();
+// Debug handle: raw (non-reactive) store — read-only inspection in DevTools.
+window.__council = store;
+createApp(store).mount('#app');

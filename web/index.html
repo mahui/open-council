@@ -232,7 +232,9 @@
           </div>
         </div>
 
-        <template v-if="settings.loaded">
+        <!-- div (not template): petite-vue's v-if crashes on direct children of a
+             fragment root (parentElement is null), freezing the whole scheduler. -->
+        <div v-if="settings.loaded">
           <!-- ===== 分区一：通用设置 ===== -->
           <section class="set-section">
             <h2 class="set-title">通用设置</h2>
@@ -425,7 +427,7 @@
               </tbody>
             </table>
           </details>
-        </template>
+        </div>
       </section>
     </main>
 
