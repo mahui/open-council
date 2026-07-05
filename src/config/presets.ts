@@ -1,4 +1,9 @@
 import type { ModelConfig } from '../types/config.js';
+import { MODEL_CATALOG } from '../shared/model-catalog.js';
+
+const ANTHROPIC = MODEL_CATALOG.anthropic;
+const OPENAI = MODEL_CATALOG.openai;
+const GOOGLE = MODEL_CATALOG.google;
 
 export interface ModelPreset {
   name: string;
@@ -14,59 +19,62 @@ export interface ModelPreset {
   api_key_env?: string;
 }
 
+// Model IDs are drawn from the shared catalog (src/shared/model-catalog.ts) —
+// the single source of truth this file, discoverModelsFromEnv, and
+// providers/model-discovery all reference. No hardcoded model-ID literals here.
 export const MODEL_PRESETS: ModelPreset[] = [
   // Anthropic
   {
     name: 'claude-opus',
-    displayName: 'Claude Opus 4',
+    displayName: ANTHROPIC.flagship.displayName,
     provider: 'anthropic',
-    model: 'claude-opus-4-20250514',
+    model: ANTHROPIC.flagship.id,
     invocation: 'api',
-    api_key_env: 'ANTHROPIC_API_KEY',
+    api_key_env: ANTHROPIC.apiKeyEnv,
   },
   {
     name: 'claude-sonnet',
-    displayName: 'Claude Sonnet 4',
+    displayName: ANTHROPIC.balanced.displayName,
     provider: 'anthropic',
-    model: 'claude-sonnet-4-20250514',
+    model: ANTHROPIC.balanced.id,
     invocation: 'api',
-    api_key_env: 'ANTHROPIC_API_KEY',
+    api_key_env: ANTHROPIC.apiKeyEnv,
   },
   {
     name: 'claude-cli',
     displayName: 'Claude (CLI mode)',
     provider: 'anthropic',
-    model: 'claude-sonnet-4-20250514',
+    model: ANTHROPIC.balanced.id,
     invocation: 'cli',
-    binary: 'claude',
+    binary: ANTHROPIC.binary,
     args: ['-p'],
     input_mode: 'arg',
   },
 
   // OpenAI
   {
-    name: 'gpt-4o',
-    displayName: 'GPT-4o',
+    name: 'gpt-flagship',
+    displayName: OPENAI.flagship.displayName,
     provider: 'openai',
-    model: 'gpt-4o',
+    model: OPENAI.flagship.id,
     invocation: 'api',
-    api_key_env: 'OPENAI_API_KEY',
+    api_key_env: OPENAI.apiKeyEnv,
   },
   {
-    name: 'o4-mini',
-    displayName: 'o4-mini',
+    name: 'gpt-mini',
+    displayName: OPENAI.balanced.displayName,
     provider: 'openai',
-    model: 'o4-mini',
+    model: OPENAI.balanced.id,
     invocation: 'api',
-    api_key_env: 'OPENAI_API_KEY',
+    api_key_env: OPENAI.apiKeyEnv,
   },
   {
     name: 'codex-cli',
     displayName: 'Codex (CLI mode)',
     provider: 'openai',
-    model: 'o4-mini',
+    model: OPENAI.flagship.id,
     invocation: 'cli',
-    binary: 'codex',
+    binary: OPENAI.binary,
     args: ['-q'],
     input_mode: 'arg',
   },
@@ -74,19 +82,19 @@ export const MODEL_PRESETS: ModelPreset[] = [
   // Google
   {
     name: 'gemini-pro',
-    displayName: 'Gemini 2.0 Flash',
+    displayName: GOOGLE.flagship.displayName,
     provider: 'google',
-    model: 'gemini-2.0-flash',
+    model: GOOGLE.flagship.id,
     invocation: 'api',
-    api_key_env: 'GEMINI_API_KEY',
+    api_key_env: GOOGLE.apiKeyEnv,
   },
   {
     name: 'gemini-cli',
     displayName: 'Gemini (CLI mode)',
     provider: 'google',
-    model: 'gemini-2.0-flash',
+    model: GOOGLE.balanced.id,
     invocation: 'cli',
-    binary: 'gemini',
+    binary: GOOGLE.binary,
     args: ['-p'],
     input_mode: 'arg',
   },
@@ -97,10 +105,11 @@ import { hasBinary } from '../shared/env.js';
 /** Discover models from environment variables, OAuth credentials, and CLI tools (Phase 0 fallback). */
 export function discoverModelsFromEnv(credentialManager?: { hasCredential(provider: string): boolean }): ModelConfig[] {
   const models: ModelConfig[] = [];
+  // Balanced-tier defaults from the shared catalog (single source of truth).
   const envModels: Array<{ env: string; name: string; provider: ModelConfig['provider']; model: string; priority: number }> = [
-    { env: 'ANTHROPIC_API_KEY', name: 'claude-sonnet', provider: 'anthropic', model: 'claude-sonnet-4-20250514', priority: 100 },
-    { env: 'OPENAI_API_KEY', name: 'gpt-4o', provider: 'openai', model: 'gpt-4o', priority: 90 },
-    { env: 'GEMINI_API_KEY', name: 'gemini-pro', provider: 'google', model: 'gemini-2.0-flash', priority: 80 },
+    { env: ANTHROPIC.apiKeyEnv, name: 'claude-sonnet', provider: 'anthropic', model: ANTHROPIC.balanced.id, priority: 100 },
+    { env: OPENAI.apiKeyEnv, name: 'gpt-4o', provider: 'openai', model: OPENAI.balanced.id, priority: 90 },
+    { env: GOOGLE.apiKeyEnv, name: 'gemini-pro', provider: 'google', model: GOOGLE.balanced.id, priority: 80 },
   ];
 
   for (const em of envModels) {
@@ -118,22 +127,22 @@ export function discoverModelsFromEnv(credentialManager?: { hasCredential(provid
   if (credentialManager) {
     if (!models.some(m => m.provider === 'anthropic') && credentialManager.hasCredential('anthropic')) {
       // OAuth tokens can only call haiku via API; use CLI for better models
-      if (hasBinary('claude')) {
+      if (hasBinary(ANTHROPIC.binary)) {
         models.push({
           name: 'claude-sonnet', invocation: 'cli', provider: 'anthropic',
-          model: 'claude-sonnet-4-6',
-          binary: 'claude',
-          args: ['-p', '--model', 'claude-sonnet-4-6'],
+          model: ANTHROPIC.balanced.id,
+          binary: ANTHROPIC.binary,
+          args: ['-p', '--model', ANTHROPIC.balanced.id],
           input_mode: 'arg',
           timeout_seconds: 120, capabilities: ['general', 'code', 'analysis'],
           priority: 100, max_concurrent: 1, resource_weight: 1,
           enabled: true, streaming: false,
         });
       } else {
-        // No CLI available, fall back to haiku via API (only model that works with OAuth)
+        // No CLI available, fall back to the cheapest model (only tier that works with OAuth)
         models.push({
           name: 'claude-haiku', invocation: 'api', provider: 'anthropic',
-          model: 'claude-haiku-4-5-20251001',
+          model: ANTHROPIC.economy.id,
           timeout_seconds: 120, capabilities: ['general', 'code', 'analysis'],
           priority: 100, max_concurrent: 1, resource_weight: 1,
           enabled: true, streaming: true,
@@ -143,7 +152,7 @@ export function discoverModelsFromEnv(credentialManager?: { hasCredential(provid
     if (!models.some(m => m.provider === 'google') && credentialManager.hasCredential('google')) {
       models.push({
         name: 'gemini-pro', invocation: 'api', provider: 'google',
-        model: 'gemini-2.5-flash',  // Cloud Code Assist API supports 2.5 models
+        model: GOOGLE.balanced.id,  // Cloud Code Assist API supports 2.5 models
         timeout_seconds: 120, capabilities: ['general', 'code', 'analysis'],
         priority: 80, max_concurrent: 1, resource_weight: 1,
         enabled: true, streaming: true,
@@ -152,12 +161,12 @@ export function discoverModelsFromEnv(credentialManager?: { hasCredential(provid
   }
 
   // 3. CLI tool discovery — use local CLI tools as fallback
-  if (!models.some(m => m.provider === 'openai') && hasBinary('codex')) {
+  if (!models.some(m => m.provider === 'openai') && hasBinary(OPENAI.binary)) {
     models.push({
       name: 'codex', invocation: 'cli', provider: 'openai',
-      model: 'gpt-5.1-codex-max',
-      binary: 'codex',
-      args: ['exec', '-m', 'gpt-5.1-codex-max', '-c', 'approval_policy="never"', '--json'],
+      model: OPENAI.flagship.id,
+      binary: OPENAI.binary,
+      args: ['exec', '-m', OPENAI.flagship.id, '-c', 'approval_policy="never"', '--json'],
       input_mode: 'arg',
       timeout_seconds: 120, capabilities: ['general', 'code', 'analysis'],
       priority: 90, max_concurrent: 1, resource_weight: 1,

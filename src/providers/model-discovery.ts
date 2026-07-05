@@ -7,6 +7,7 @@ import type { Api, KnownProvider, Model } from '@mariozechner/pi-ai';
 import { getOAuthProvider } from '@mariozechner/pi-ai/oauth';
 import type { CredentialManager } from './credentials/discovery.js';
 import { hasBinary } from '../shared/env.js';
+import { MODEL_CATALOG } from '../shared/model-catalog.js';
 
 export interface DiscoveredModel {
   id: string;
@@ -102,25 +103,18 @@ export async function discoverModels(
 function discoverCliModels(): DiscoveredModel[] {
   const models: DiscoveredModel[] = [];
 
-  if (hasBinary('claude')) {
-    models.push(
-      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (CLI)', provider: 'anthropic', invocation: 'cli' },
-      { id: 'claude-opus-4-6', name: 'Claude Opus 4.6 (CLI)', provider: 'anthropic', invocation: 'cli' },
-    );
-  }
-
-  if (hasBinary('codex')) {
-    models.push(
-      { id: 'gpt-5.4', name: 'GPT-5.4 (CLI)', provider: 'openai', invocation: 'cli' },
-      { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini (CLI)', provider: 'openai', invocation: 'cli' },
-    );
-  }
-
-  if (hasBinary('gemini')) {
-    models.push(
-      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (CLI)', provider: 'google', invocation: 'cli' },
-      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (CLI)', provider: 'google', invocation: 'cli' },
-    );
+  // Model IDs come from the shared catalog (src/shared/model-catalog.ts) so CLI
+  // discovery, MODEL_PRESETS, and discoverModelsFromEnv can never drift apart.
+  for (const cat of Object.values(MODEL_CATALOG)) {
+    if (!hasBinary(cat.binary)) continue;
+    for (const m of cat.cliModels) {
+      models.push({
+        id: m.id,
+        name: `${m.displayName} (CLI)`,
+        provider: cat.provider,
+        invocation: 'cli',
+      });
+    }
   }
 
   return models;

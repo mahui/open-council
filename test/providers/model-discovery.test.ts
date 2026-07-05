@@ -23,6 +23,7 @@ vi.mock('node:child_process', () => ({
 }));
 
 import { discoverModels } from '../../src/providers/model-discovery.js';
+import { MODEL_CATALOG } from '../../src/shared/model-catalog.js';
 import type { CredentialManager } from '../../src/providers/credentials/discovery.js';
 import { getModels } from '@mariozechner/pi-ai';
 import { getOAuthProvider } from '@mariozechner/pi-ai/oauth';
@@ -208,6 +209,21 @@ describe('discoverModels — CLI binary discovery', () => {
     const models = await discoverModels(credManager);
 
     expect(models).toEqual([]);
+  });
+
+  it('CLI model IDs are sourced from the shared catalog, not hardcoded (drift guard)', async () => {
+    const credManager = makeFakeCredentialManager({ getAvailableProviders: vi.fn().mockReturnValue([]) });
+    // All three CLI binaries present.
+    vi.mocked(execFileSync).mockImplementation(() => Buffer.from('/usr/local/bin/found'));
+
+    const models = await discoverModels(credManager);
+    const cliIds = models.filter(m => m.invocation === 'cli').map(m => m.id).sort();
+
+    const catalogCliIds = Object.values(MODEL_CATALOG)
+      .flatMap(c => c.cliModels.map(m => m.id))
+      .sort();
+
+    expect(cliIds).toEqual(catalogCliIds);
   });
 
   it('API credential and CLI binary for the same underlying provider both appear (different invocation modes)', async () => {
