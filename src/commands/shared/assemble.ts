@@ -11,6 +11,8 @@ import { CliAdapter } from '../../providers/cli-adapter.js';
 import { CredentialManager } from '../../providers/credentials/discovery.js';
 import { ConfigLoader } from '../../config/loader.js';
 import { discoverModelsFromEnv } from '../../config/presets.js';
+import { formatConfigError } from '../../shared/config-errors.js';
+import { PATHS } from '../../config/paths.js';
 
 export interface ResolvedModels {
   models: ModelConfig[];
@@ -73,8 +75,10 @@ export function resolveModels(
         tuiMode = config.output.tui_mode;
       } catch (err) {
         process.stderr.write(
-          `Warning: config error, falling back to env discovery: ${err instanceof Error ? err.message : err}\n`,
+          '⚠ 配置无法加载，已回落到环境变量发现的模型（可能与你配置的模型不同）。\n',
         );
+        process.stderr.write(formatConfigError(err, PATHS.config) + '\n');
+        process.stderr.write('  运行 "council setup" 修复配置。\n');
         models = discoverModelsFromEnv(credentialManager);
       }
     } else {

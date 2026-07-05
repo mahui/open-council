@@ -7,6 +7,9 @@ import { AutoAdapter } from '../providers/adapter.js';
 import { ApiAdapter } from '../providers/api-adapter.js';
 import { CliAdapter } from '../providers/cli-adapter.js';
 import { getHealthSummary, resetCircuitBreaker } from '../providers/health.js';
+import { formatModelLine } from '../shared/format-model.js';
+import { formatConfigError } from '../shared/config-errors.js';
+import type { ModelConfig } from '../types/config.js';
 
 export async function runModelsList(): Promise<void> {
   if (!existsSync(PATHS.config)) {
@@ -15,7 +18,16 @@ export async function runModelsList(): Promise<void> {
   }
 
   const loader = new ConfigLoader();
-  const models = loader.loadAllModels();
+  let models: ModelConfig[];
+  let chairman: string | undefined;
+  try {
+    models = loader.loadAllModels();
+    chairman = loader.loadCouncilConfig().general.default_chairman;
+  } catch (err) {
+    process.stderr.write(formatConfigError(err, PATHS.config) + '\n');
+    process.stderr.write('运行 "council setup" 修复配置。\n');
+    process.exit(1);
+  }
 
   if (models.length === 0) {
     process.stderr.write('No models configured. Run "council setup" to add models.\n');
@@ -26,16 +38,15 @@ export async function runModelsList(): Promise<void> {
   process.stdout.write('─'.repeat(60) + '\n');
 
   for (const model of models) {
-    const mode = model.invocation.toUpperCase();
     const status = model.enabled ? '✓' : '✗';
-    const provider = model.provider ?? 'custom';
-    process.stdout.write(
-      `  ${status} ${model.name.padEnd(20)} ${provider.padEnd(12)} [${mode}] ` +
-      `priority=${model.priority}\n`,
-    );
+    const line = formatModelLine(model, { chairman: model.name === chairman, nameWidth: 20 });
+    process.stdout.write(`  ${status} ${line}\n`);
   }
 
   process.stdout.write('\n');
+  if (chairman) {
+    process.stdout.write(`Default chairman: ${chairman}\n\n`);
+  }
 }
 
 export async function runModelsCheck(): Promise<void> {

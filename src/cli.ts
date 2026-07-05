@@ -39,7 +39,8 @@ program
       return;
     }
 
-    // Auto-redirect to setup when nothing is configured and no env credentials
+    // Nothing configured and no env credentials → offer the setup wizard inline
+    // (interactive TTY) or point at `council setup` (piped/non-TTY).
     if (!options.models && !options.chairman) {
       const { ConfigLoader } = await import('./config/loader.js');
       const { CredentialManager } = await import('./providers/credentials/discovery.js');
@@ -49,17 +50,43 @@ program
         await credManager.discoverAll();
         const hasAny = credManager.getAvailableProviders().length > 0;
         if (!hasAny) {
-          if (process.stderr.isTTY) {
-            process.stderr.write(
-              '\n\x1b[33m⚠  No models configured and no API credentials found.\x1b[0m\n' +
-              '   Run \x1b[1mcouncil setup\x1b[0m to get started.\n\n',
-            );
-          } else {
+          if (!process.stderr.isTTY) {
             process.stderr.write(
               'Error: No models configured. Run "council setup" to get started.\n',
             );
+            process.exit(1);
           }
-          process.exit(1);
+
+          process.stderr.write(
+            '\n\x1b[33m⚠  未检测到任何配置或可用凭证。\x1b[0m\n',
+          );
+          const { confirm } = await import('@inquirer/prompts');
+          const proceed = await confirm({
+            message: '现在进入设置向导？',
+            default: true,
+          });
+          if (!proceed) {
+            process.stderr.write(
+              '\n已取消。稍后可运行 \x1b[1mcouncil setup\x1b[0m 完成配置。\n\n',
+            );
+            process.exit(1);
+          }
+
+          const { runFirstRunWizard } = await import('./ui/wizard/first-run.js');
+          await runFirstRunWizard();
+
+          if (!loader.isConfigured()) {
+            // Wizard cancelled or left config incomplete — nothing to run.
+            process.exit(0);
+          }
+          if (!question) {
+            process.stderr.write(
+              '\n\x1b[32m✓\x1b[0m 配置完成。运行 \x1b[1mcouncil "你的问题"\x1b[0m 开始一场辩论。\n\n',
+            );
+            process.exit(0);
+          }
+          // Configured now — seamlessly continue with the original question.
+          process.stderr.write('\n\x1b[32m✓\x1b[0m 配置完成，继续执行你的问题…\n\n');
         }
       }
     }

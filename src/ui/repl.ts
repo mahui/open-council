@@ -15,6 +15,8 @@ import { LiveRenderer } from './live-renderer.js';
 import { SessionStore } from '../storage/session-store.js';
 import { PATHS } from '../config/paths.js';
 import { showSlashPicker, type SlashCommand } from './slash-picker.js';
+import { formatConfigError } from '../shared/config-errors.js';
+import { formatModelLine } from '../shared/format-model.js';
 import { startInput, type InputController } from './input.js';
 import type { ModelConfig } from '../types/config.js';
 import type { DebateMode, RunOptions } from '../types/session.js';
@@ -68,7 +70,9 @@ export async function startRepl(): Promise<void> {
       models = loader.loadAllModels();
       chairman = config.general.default_chairman;
     } catch (err) {
-      process.stderr.write(`Warning: config error, falling back to env discovery: ${err instanceof Error ? err.message : err}\n`);
+      process.stderr.write(`\r${YELLOW}⚠ 配置无法加载，已回落到环境变量发现的模型（可能与你配置的模型不同）。${RESET}\n`);
+      process.stderr.write(formatConfigError(err, PATHS.config) + '\n');
+      process.stderr.write(`  ${DIM}运行 ${CYAN}council setup${RESET}${DIM} 修复配置。${RESET}\n`);
       models = discoverModelsFromEnv(credentialManager);
     }
   } else {
@@ -77,9 +81,30 @@ export async function startRepl(): Promise<void> {
 
   if (models.length === 0) {
     process.stderr.write(`\r${YELLOW}⚠ No models available.${RESET}\n`);
-    process.stderr.write(`  Set API keys or install CLI tools (claude, codex, gemini).\n`);
-    process.stderr.write(`  Type ${CYAN}/${RESET} then select ${CYAN}/setup${RESET} for guided configuration.\n\n`);
-  } else {
+    if (process.stderr.isTTY) {
+      const { confirm } = await import('@inquirer/prompts');
+      const proceed = await confirm({ message: '未检测到可用模型，现在进入设置向导？', default: true });
+      if (proceed) {
+        const { runFirstRunWizard } = await import('./wizard/first-run.js');
+        await runFirstRunWizard();
+        if (loader.isConfigured()) {
+          try {
+            const config = loader.loadCouncilConfig();
+            models = loader.loadAllModels();
+            chairman = config.general.default_chairman;
+          } catch (err) {
+            process.stderr.write(formatConfigError(err, PATHS.config) + '\n');
+          }
+        }
+      }
+    }
+    if (models.length === 0) {
+      process.stderr.write(`  Set API keys or install CLI tools (claude, codex, gemini).\n`);
+      process.stderr.write(`  Type ${CYAN}/${RESET} then select ${CYAN}/setup${RESET} for guided configuration.\n\n`);
+    }
+  }
+
+  if (models.length > 0) {
     const modelList = models.map(m => `${m.name}${m.invocation === 'cli' ? ' (CLI)' : ''}`).join(', ');
     process.stderr.write(`\r${GREEN}✓${RESET} ${models.length} model(s): ${DIM}${modelList}${RESET}\n`);
   }
@@ -154,8 +179,8 @@ async function handleCommand(input: string, state: ReplState): Promise<void> {
     case 'models':
       process.stderr.write(`\n  ${BOLD}Available Models${RESET}\n`);
       for (const m of state.models) {
-        const inv = m.invocation === 'cli' ? ' (CLI)' : '';
-        process.stderr.write(`  • ${m.name}${inv} ${DIM}[${m.provider}] ${m.model}${RESET}\n`);
+        const line = formatModelLine(m, { chairman: m.name === state.chairman });
+        process.stderr.write(`  • ${line}\n`);
       }
       process.stderr.write('\n');
       break;
