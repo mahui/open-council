@@ -117,7 +117,7 @@ export OPENAI_API_KEY="sk-..."           # openai 协议官方端点
 
 可通过 `base_url` 接入任意 anthropic / openai 兼容服务（DeepSeek、Moonshot、ollama、vLLM、LM Studio、OneAPI、自建网关等），无需改代码。
 
-首次运行向导的 Step 6（可选）会引导添加。也可手动写入 `~/.council/config/models/custom-ollama.yaml`：
+首次运行向导的 Step 6（可选）或 `council models add` 会引导添加：填入 `base_url` 后可直接从端点的 `/models` 列表**发现并勾选**模型（端点不支持时回退手输 id）。向导默认会**并发测试每个已选模型的真实连通性**（可跳过；失败的模型默认剔除、可逐项保留）。也可手动写入 `~/.council/config/models/custom-ollama.yaml`：
 
 ```yaml
 name: Ollama Llama 3.2
@@ -210,21 +210,22 @@ council serve --no-open
 ## 模型管理
 
 ```bash
-# 查看已配置的模型及状态
+# 查看已配置的模型及状态（含已禁用模型，✓/✗ 标注启用态）
 council models
 
-# 添加新模型（引导式）
+# 增量添加模型（交互式）：从官方 /models 发现勾选，或添加自定义端点
 council models add
 
-# 快捷添加（从官方 /models 列表选择）
-council models add --quick openai --model o3
+# 移除 / 启用 / 禁用指定模型（按名称）
+council models remove <name>
+council models enable <name>
+council models disable <name>
 
-# 校验凭证（本地）
+# 本地健康检查（可用性 + 熔断状态）
 council models check
-
-# 重新探测 API key（env + key 文件）
-council models scan
 ```
+
+> `council models add` 需要交互式终端。移除模型不会删除同端点多个模型共用的 `custom-<name>.key`（防误伤）；删除某端点上最后一个模型时其 key 文件会作为孤儿残留，需手动清理。
 
 ## 历史与分析
 
@@ -285,8 +286,8 @@ TypeScript · Node.js ≥ 20 · better-sqlite3 · @anthropic-ai/sdk · openai ·
 
 | 文档 | 说明 |
 |------|------|
-| [PRD](docs/PRD.md) | 产品需求文档 v8.0 |
-| [TDD](docs/TDD.md) | 技术设计文档 v3.0 |
+| [PRD](docs/PRD.md) | 产品需求文档 v8.1 |
+| [TDD](docs/TDD.md) | 技术设计文档 v3.1 |
 | [CONTRIBUTING](CONTRIBUTING.md) | 开发规范（架构约束、编码规范、安全、测试、Git） |
 
 ## 开发路线图

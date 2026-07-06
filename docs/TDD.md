@@ -1,13 +1,13 @@
 # Open Council — 技术设计文档 (TDD)
 
-**Technical Design Document v3.0**
+**Technical Design Document v3.1**
 
 | 项目 | 内容 |
 |------|------|
 | 文档状态 | Draft |
-| 版本 | 3.0 |
+| 版本 | 3.1 |
 | 日期 | 2026-07-06 |
-| 对应 PRD | docs/PRD.md v8.0 |
+| 对应 PRD | docs/PRD.md v8.1 |
 | 主语言 | TypeScript (Node.js ≥ 20) |
 | 包管理 | pnpm |
 | 分发方式 | npm 全局包 (`npm install -g open-council`) |
@@ -16,6 +16,7 @@
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| 3.1 | 2026-07-06 | 模型配置流程改进（§2、§3.4、§7.1）：`discoverModels(credentials)` 走 CredentialManager，新增 `discoverEndpointModels`（自定义端点发现）、`CredentialManager.resolveOfficialKey(protocol)`、`ConfigLoader.deleteModelConfig(name)`；`rateModelCapability` 及 flagship/推荐规则（`MODEL_TIER_RULES`/`flagshipRank`/`isRecommendedModel`）归位 `shared/model-catalog.ts`，消除 providers/ui→core 反向边；`commands/models.ts` 拆分为 `commands/models/`。设计依据：`design-notes/model-config-flow.md` |
 | 3.0 | 2026-07-06 | **标准 API 收敛**：移除 `@mariozechner/pi-ai`，改用官方 `@anthropic-ai/sdk` + `openai`；删除 CLI/Auto 适配器、OAuth 凭证发现、provider 家族映射；新增 `providers/protocol/`（ProtocolClient 双 SDK）与 `config/migrate.ts`；ModelConfig 升 v2（`protocol` 取代 `invocation`+`provider`）。设计依据：`design-notes/standard-api-convergence.md` |
 | 2.3 | 2026-07-05 | §8.4 增设置面五条 REST 路由（`config-routes.ts`）与 `RuntimeConfig` 热换快照；`ConfigLoader` 增 `loadAllModelConfigs`，纯函数下沉至 `config/assemble-council.ts` + `providers/model-assembly.ts`。详见设计笔记 `docs/design-notes/web-gui-config.md` |
 | 2.2 | 2026-07-05 | 新增 `src/server/` 层与 `web/` 零构建前端（`council serve` 本地 Web GUI，见 §8.4）；新增依赖 `hono` + `@hono/node-server`；`WebRenderer` 为 `Renderer` 第三实现。详见设计笔记 `docs/design-notes/web-gui-design.md` |
@@ -101,7 +102,13 @@ council/
 │   ├── commands/                   # CLI 命令实现（每个文件对应一个子命令）
 │   │   ├── council.ts                # 主命令 council "question"
 │   │   ├── setup.ts                  # council setup
-│   │   ├── models.ts                 # council models / models add / models check
+│   │   ├── models/                   # council models 子命令族（各文件一命令 + 纯 mutation）
+│   │   │   ├── list.ts                 # models（默认）/ list：含已禁用模型（✓/✗）
+│   │   │   ├── check.ts                # models check：健康检查 + 熔断重置
+│   │   │   ├── add.ts                  # models add：官方发现 / 自定义端点（交互，需 TTY）
+│   │   │   ├── manage.ts               # models remove / enable / disable 处理器（提示 + 退出码）
+│   │   │   ├── mutations.ts            # 纯注册表变更（add/remove/setEnabled，注入 ConfigLoader）
+│   │   │   └── shared.ts               # requireConfiguredLoader 等命令共用工具
 │   │   ├── benchmark.ts              # council benchmark
 │   │   ├── history.ts                # council history / show / recall / thread
 │   │   ├── stats.ts                  # council stats
@@ -172,6 +179,14 @@ council/
 │   │   ├── protocol.ts               # SSE 线协议 TS 类型（server 私有，纯类型 ARCH-04）
 │   │   └── security.ts               # Host/Origin 校验中间件（DNS-rebinding / CSRF 防护）
 │   │
+│   ├── shared/                     # 跨层、领域无关的纯工具（零 I/O；core 可安全依赖）
+│   │   ├── model-catalog.ts          # 离线目录 + 模型家族知识：rateModelCapability / MODEL_TIER_RULES / flagshipRank / isRecommendedModel
+│   │   ├── format-model.ts           # 模型行格式化（list / 向导共用）
+│   │   ├── config-errors.ts          # 配置错误信息格式化
+│   │   ├── match.ts                  # 通用匹配工具
+│   │   ├── paths.ts                  # 共享路径辅助
+│   │   └── resources.ts              # 内置资源加载
+│   │
 │   └── types/                      # 共享类型定义
 │       ├── session.ts                # Session, Stage, Invocation, Agent
 │       ├── config.ts                 # ModelConfig, CouncilConfig, RouteRule
@@ -221,6 +236,7 @@ council/
 **关键设计决策**：
 
 - `core/` 是**纯逻辑层**，不依赖 I/O、CLI、UI。它接收抽象的 `InvocationAdapter` 接口，可独立单元测试。
+- `shared/` 是跨层、领域无关的纯工具（零 I/O、零编排语义），可被 core / providers / ui / commands 任意层安全依赖（`shared` 仅依赖 `types/`）。模型家族知识（`rateModelCapability` + `MODEL_TIER_RULES` + `flagshipRank` + `isRecommendedModel` + 离线目录 `MODEL_CATALOG`）统一收敛于 `shared/model-catalog.ts`。此前 `rateModelCapability` 位于 `core/role-generator.ts`，被 `providers/model-assembly.ts` 与 `ui/wizard/first-run.ts` 导入，构成 providers→core、ui→core 反向依赖边；下沉至 `shared` 后**两条反向边消除**，`core` 改为 `core→shared`（合法）。
 - `providers/` 是唯一与外部系统交互的层（官方 SDK 的 HTTP API 调用、文件系统 key 读取）。无 subprocess 调用点。
 - `commands/` 薄层，只负责解析 CLI 参数 → 调用 `core/` → 通过 `ui/` 渲染结果。
 - `ui/` 分为 `tui/`（ink 组件，Phase 5）和 `plain-renderer.ts`（Phase 0-4 的纯文本输出），通过 `process.stdout.isTTY` 自动切换。
@@ -384,9 +400,33 @@ export class ApiAdapter implements InvocationAdapter {
 
 ### 3.4 模型发现与凭证管理
 
-**模型发现**（`model-discovery.ts` + `model-assembly.ts`）：`ANTHROPIC_API_KEY` 存在 → `anthropicClient.models.list()`；`OPENAI_API_KEY` 存在 → `openaiClient.models.list()`；离线/无 key → 回退硬编码目录（`shared/model-catalog.ts`）。发现结果形态 `{ id, name, protocol, source: 'official' }`，由 `model-assembly` 装配为 ModelConfig（官方持裸名，自定义端点后缀 source 标签，`-2/-3` 兜底唯一化；`modelDedupeKey` 从 `(name, provider)` 改为 `(name, base_url)`）。
+**模型发现**（`model-discovery.ts` + `model-assembly.ts`），两个入口：
+
+```typescript
+// 官方端点发现：凭证经 CredentialManager 解析（不再直读 process.env，消除凭证双真相源）
+export async function discoverModels(credentials: CredentialManager): Promise<DiscoveredModel[]>
+
+// 自定义 / 标准 API 端点发现（ollama / vLLM / 网关 / Google OpenAI-compat 等）
+export async function discoverEndpointModels(opts: {
+  protocol: Protocol;
+  baseUrl: string;
+  apiKey?: string;      // 缺省/空 → 传非空占位 'no-auth' 适配无鉴权端点，避免 SDK 回退读 env
+  sourceLabel: string;  // 命名来源标签，调用方已 sanitize
+}): Promise<DiscoveredModel[]>
+```
+
+- `discoverModels`：`credentials.resolveOfficialKey('anthropic'|'openai')` 有值 → 对应 `models.list()`；离线/无 key/失败 → stderr 警告 + 回退硬编码目录（`shared/model-catalog.ts`）。保留官方 OpenAI 的 `^(gpt-|o[0-9]|chatgpt)` 家族过滤。
+- `discoverEndpointModels`：best-effort，与 `discoverModels` 同形态吞错——失败/超时/空集 → stderr 警告 + 返回 `[]`（**无 catalog 兜底**，调用方回退手输 model id），绝不抛出。**不套用**官方 OpenAI 家族过滤（自定义端点可返回 `llama3.2`/`mistral` 等任意 id）；每条必带 `base_url`。复用 `DISCOVERY_TIMEOUT_MS=5s`、`maxRetries:0`。
+- 发现结果形态 `{ id, name, protocol, base_url?, source }`，由 `model-assembly` 装配为 ModelConfig（官方持裸名，自定义端点后缀 source 标签，`-2/-3` 兜底唯一化；`modelDedupeKey` 为 `(name, base_url)`）。
 
 **凭证管理**（`credentials/discovery.ts`）：`CredentialManager` 收敛为薄壳，只保留「env var 探测（ANTHROPIC_API_KEY / OPENAI_API_KEY）+ key 文件存在性」，供向导 / GUI 报告用。
+
+```typescript
+// 「官方协议 key」的唯一解析器（当前即协议默认 env var）；SEC-02：绝不将 key 材料写入日志/DTO
+resolveOfficialKey(protocol: Protocol): string | null
+```
+
+> 自定义端点的 `custom-<name>.key` 绑定某个具体 `base_url`、不属任何协议的官方端点，故**不在 `resolveOfficialKey` 内解析**——它由 `getApiKey` 按 ModelConfig（`api_key_env` / `api_key_path`）逐个解析。这使「官方端点凭证只来自 env」成为语义正确而非取巧。
 
 ```typescript
 // src/types/provider.ts
@@ -1124,6 +1164,21 @@ export class ConfigLoader {
       .filter(m => m.enabled);
   }
 
+  // 单模型 CRUD —— 支撑 commands/models/mutations.ts 的增量管理（含已禁用模型）：
+  //   loadModelConfig(name) / loadAllModelConfigs()（不 filter enabled）/ saveModelConfig(config)
+  //   已存在；deleteModelConfig 为增量删除新增。
+
+  /**
+   * 按名称删除单个模型 YAML。删除成功返回 true，文件不存在返回 false
+   * （供调用方给出 "not found" 错误）。safePath 阻断经构造 `name` 的路径穿越。
+   */
+  deleteModelConfig(name: string): boolean {
+    const path = safePath(join(this.configDir, 'models'), `${name}.yaml`);
+    if (!existsSync(path)) return false;
+    unlinkSync(path);
+    return true;
+  }
+
   loadRoleSet(name: string): RoleSet {
     // 先查用户自定义，再查内置默认
     const userPath = join(this.configDir, 'roles', `${name}.yaml`);
@@ -1232,14 +1287,14 @@ program.command('setup').description('完整配置向导').action(async (opts) =
   await runSetup(opts);
 });
 
-program.command('models').description('模型管理')
-  .addCommand(new Command('list').description('列出所有模型').action(/* ... */))
-  .addCommand(new Command('add').description('添加模型').action(/* ... */))
-  .addCommand(new Command('check').description('健康检查').action(/* ... */))
-  .addCommand(new Command('enable').argument('<id>').action(/* ... */))
-  .addCommand(new Command('disable').argument('<id>').action(/* ... */))
-  .addCommand(new Command('reset').argument('<id>').action(/* ... */))
-  .addCommand(new Command('scan').action(/* ... */));
+const modelsCmd = program.command('models').description('模型管理');
+modelsCmd.command('list').description('列出所有模型（含已禁用）').action(/* ... */);
+modelsCmd.command('check').description('健康检查').action(/* ... */);
+modelsCmd.command('add').description('添加模型（官方发现 / 自定义端点）').action(/* ... */);
+modelsCmd.command('remove <name>').description('按名称删除模型').action(/* ... */);
+modelsCmd.command('enable <name>').description('启用模型').action(/* ... */);
+modelsCmd.command('disable <name>').description('禁用模型').action(/* ... */);
+modelsCmd.action(/* 无子命令 → 等价 list */);
 
 program.command('benchmark').description('运行基准测试').action(async (opts) => {
   const { runBenchmark } = await import('./commands/benchmark.js');

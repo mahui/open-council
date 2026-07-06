@@ -2,12 +2,12 @@
 
 **基于标准 API 的多模型辩论编排系统**
 
-**产品需求文档 (PRD) v8.0**
+**产品需求文档 (PRD) v8.1**
 
 | 项目 | 内容 |
 |------|------|
 | 文档状态 | Draft |
-| 版本 | 8.0 |
+| 版本 | 8.1 |
 | 日期 | 2026-07-06 |
 | 作者 | Henry |
 | 重点模块 | 辩论流程编排 / 过程数据持久化 / 模型工具配置 / 用户交互体验 |
@@ -16,6 +16,7 @@
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| 8.1 | 2026-07-06 | 模型配置流程改进：§4.3.3 更正为**增量模型管理**命令（`council models add/remove/enable/disable` 的实际交互流程，替换从未实现的 `--quick`/`--id` 等参数化路径）；§4.3.1 Setup Wizard 同步三处可见行为（连通性默认测试所有已选模型、自定义端点从 `/models` 发现、模型列表 show-all 不再静默截断）；§7.3 命令表按实际 CLI 收敛。设计依据：`design-notes/model-config-flow.md` |
 | 8.0 | 2026-07-06 | **范围变更**：收敛到「标准 API」双协议（anthropic / openai + 任意兼容端点），弃用 pi-ai 改用官方 SDK。删除 CLI 订阅调用模式、OAuth/keychain 凭证发现、多 provider 家族；凭证统一为 API key（env / 0o600 文件）+ 可选 base_url；配置 schema 升级到 v2（`protocol` 取代 `invocation`+`provider`）。设计依据：`design-notes/standard-api-convergence.md` |
 | 7.2 | 2026-07-05 | Web 界面新增设置页（§6.6）：日常配置调整 + 轻量接入（重扫凭证、自定义端点）；更新"明确不做"与凭证入线边界，范围裁定指针到设计笔记 `web-gui-config.md` |
 | 7.1 | 2026-07-05 | 新增本地 Web 界面（`council serve`，见 §6.6 / §7.5）：发起辩论 + 实时观看 + 历史只读，仅本地环回绑定 |
@@ -925,15 +926,18 @@ Step 2/6 — 选择模型
 
   已选择 3 个模型: claude-opus, claude-sonnet, openai-o4mini  ✓
 
-Step 3/6 — 验证凭证
+Step 3/6 — 验证连通性
 ──────────────────────────────────────────────────────
-  正在本地校验各模型凭证是否可解析...
+  Skip connectivity testing for 3 model(s)? [y/N]  n
+  正在并发测试每个已选模型的真实连通性（非仅 Chairman）...
 
-  ✓ claude-opus       ANTHROPIC_API_KEY 有值
-  ✓ claude-sonnet     ANTHROPIC_API_KEY 有值
-  ✓ openai-o4mini     OPENAI_API_KEY 有值
+  ✓ claude-opus       ready
+  ✓ claude-sonnet     ready
+  ✗ openai-o4mini     FAILED — 401 Unauthorized
+      Keep openai-o4mini despite the failed connectivity test? [y/N]  n
 
-  全部通过 ✓（真实连通性在首次辩论调用时验证）
+  2 个模型通过；未通过者默认剔除，可逐项选择保留
+  （选择 Skip 则跳过测试、原样写入；全部失败时中止并提示修复凭证）
 
 Step 4/6 — 配置推理深度 (Reasoning Effort)
 ──────────────────────────────────────────────────────
@@ -983,11 +987,14 @@ Step 6 (可选) — 添加自定义端点
   Protocol (anthropic / openai) [openai]:  openai
   Provider name (lowercase, a-z 0-9 -):  ollama
   Base URL (e.g. http://localhost:11434/v1):  http://localhost:11434/v1
-  Model identifier (e.g. llama3.2, gpt-4o):  llama3.2
-  API key (leave empty for no auth, e.g. local ollama):  ********
-
-  → 写入凭证 ~/.council/credentials/custom-ollama.key (mode 0o600)
-  → 本地校验 custom:ollama (llama3.2) ... ✓
+  API key (leave empty for no auth, e.g. local ollama):  (empty)
+  How to add model ids?
+    > Discover from the endpoint (query its /models list)
+      Enter model id(s) manually (comma-separated)
+  → 发现 3 个模型，勾选要启用的（端点无 /models 或返回空 → 自动回退手输）
+  → 连通性测试（同 Step 3）→ 保留通过者
+  → 若填了 key：写入 ~/.council/credentials/custom-ollama.key (mode 0o600)
+     （key 文件延迟到至少保留 1 个模型后才落盘；同端点多模型共用该文件）
   Add another custom endpoint? [y/N]  n
 
 ══════════════════════════════════════════════════════
@@ -1016,6 +1023,7 @@ Step 6 (可选) — 添加自定义端点
 **首次引导的设计原则**：
 - 主流程 5 步，2 分钟内完成；Step 6（自定义端点）可选，默认跳过
 - 自动扫描工具 + 展示可选模型列表，推荐最佳组合
+- 模型列表默认按推荐度排序展示；发现结果较多时折叠为按协议分组的 `showing N of M`，并提供 `⋯ Show all` 展开项——**不再静默截断**隐藏模型（展开时保留已勾选项）
 - 同一工具可选多个模型变体（如 opus + sonnet 协作）
 - 跳过高级配置（超时、并发、路由规则等），全部使用默认值
 - 引导完成后立即可用，不强制要求进一步配置
@@ -1182,26 +1190,22 @@ $ council setup → 3. 路由规则
     ○ 自定义规则
 ```
 
-#### 4.3.3 快捷添加 (`council models add`)
+#### 4.3.3 增量模型管理 (`council models add/remove/enable/disable`)
 
-`council models add` 是 `council setup → 模型管理 → 添加新模型` 的快捷入口，直接进入 Step 1/6 的添加流程（同 4.3.2 模块 1 的 "添加新模型" 部分）。
+无需重跑完整向导即可增量维护模型注册表。四个子命令均直接操作 `config/models/` 下的 YAML 文件：
 
-也支持参数跳过引导直接添加（高级用户）：
+| 命令 | 行为 |
+|------|------|
+| `council models add` | **交互式**添加（需 TTY，非交互终端退出码 1）。二选一路径：① 从官方 `/models` 发现——读 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` 列出模型，勾选加入；② 添加自定义 / 标准 API 端点——输入 provider 名 + 协议 + `base_url` + model id（逗号分隔多条）+ 可选 key。已存在同名模型时**不覆盖**（跳过并提示，改动已有模型走 remove + add 或 enable/disable） |
+| `council models remove {name}` | 按名称删除模型 YAML；不存在 → 退出码 1。**刻意不删共享的 `custom-<name>.key`**——同一自定义端点的多个模型共用该 key 文件，一并删除会误伤其余模型 |
+| `council models enable {name}` | 置 `enabled: true`（已启用 → noop 提示，不写盘） |
+| `council models disable {name}` | 置 `enabled: false`，临时停用而不删除配置（已禁用 → noop 提示，不写盘） |
 
-```bash
-# 引导式（默认）
-council models add
+> **`council models`（无子命令，等价 list）现在同时列出已禁用模型**，以 `✓`（启用）/ `✗`（禁用）标注启用态，便于确认 enable/disable / 迁移禁用的结果。编排调用另行以「仅启用」集合过滤，禁用模型不参与辩论。
 
-# 快捷模式 — 从官方 /models 列表选择模型（需已设 ANTHROPIC_API_KEY / OPENAI_API_KEY）
-council models add --quick anthropic
+> **孤儿 key 文件（已知可接受行为）**：因 `remove` 不触碰共享的 `custom-<name>.key`，删除某端点上**最后一个**模型时，其 `0o600` key 文件会作为孤儿残留在 `~/.council/credentials/`。当前需用户手动清理；后续可能引入 `council models prune-keys`（清理无任何 ModelConfig 引用的孤儿 key）自动化此步——尚未实现。
 
-# 直接指定协议+模型（官方端点，凭证走对应 env）
-council models add --quick openai --model o3
-
-# 完整参数（跳过引导）— 兼容端点
-council models add --id deepseek-chat --protocol openai --model deepseek-chat \
-  --base-url https://api.deepseek.com --api-key-env DEEPSEEK_API_KEY --capabilities code,general
-```
+> 这四个命令是纯增量入口，不进入 `council setup` 的分模块向导；调整优先级、能力、reasoning 等字段仍走 `council setup → 模型管理` 或直接编辑 YAML。
 
 #### 4.3.4 内置目录与端点预设（Built-in Presets）
 
@@ -1993,15 +1997,12 @@ Council > _
 
 | 命令 | 说明 |
 |------|------|
-| `council models` | 列出所有配置的模型及其状态（协议、凭证状态、熔断状态；含被迁移禁用的模型及原因） |
-| `council models check` | 本地校验各模型凭证是否可解析 |
-| `council models add` | 引导式添加新模型（6 步向导，选协议 + 端点 + 凭证） |
-| `council models add --quick {protocol}` | 快捷添加：从官方 `/models` 列表选择模型 |
-| `council models add --quick {protocol} --model {model}` | 直接添加指定协议的指定模型 |
-| `council models edit {id}` | 引导式编辑已有模型配置 |
-| `council models enable/disable {id}` | 启用/禁用模型 |
-| `council models reset {id}` | 重置某个模型的熔断状态 |
-| `council models scan` | 重新探测 API key（env + key 文件），刷新官方 `/models` 列表 |
+| `council models` | 列出所有配置的模型及状态（`✓`/`✗` 启用态、协议、凭证/熔断状态；含被迁移禁用的模型及原因） |
+| `council models check` | 本地健康检查（各模型可用性 + 熔断状态；可提示重置熔断器） |
+| `council models add` | 交互式增量添加：从官方 `/models` 发现勾选，或添加自定义端点（协议 + `base_url` + model id + 可选 key）。详见 §4.3.3 |
+| `council models remove {name}` | 按名称删除模型（保留共享的 `custom-<name>.key`，见 §4.3.3） |
+| `council models enable {name}` | 启用模型（置 `enabled: true`） |
+| `council models disable {name}` | 禁用模型（置 `enabled: false`，不删配置） |
 
 ### 7.4 查询与分析命令
 
