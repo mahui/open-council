@@ -1,121 +1,108 @@
 /**
- * Dynamic model discovery — uses pi-ai for API models, detects CLI binaries.
+ * Dynamic model discovery — queries each provider's official `/models` endpoint
+ * via the vendor SDK when an API key is present (standard-API convergence,
+ * design-notes/standard-api-convergence.md §1.5).
+ *
+ * `ANTHROPIC_API_KEY` present → `@anthropic-ai/sdk` `models.list()`.
+ * `OPENAI_API_KEY` present    → `openai` `models.list()`.
+ *
+ * The live listing reflects the account's actually-accessible models, which is
+ * more accurate than any static table. On offline / transient failure we fall
+ * back to the hand-maintained static catalog and warn on stderr. Custom
+ * OpenAI-compatible endpoints are handled at configuration time (the user types
+ * the model id), not here.
  */
 
-import { getModels } from '@mariozechner/pi-ai';
-import type { Api, KnownProvider, Model } from '@mariozechner/pi-ai';
-import { getOAuthProvider } from '@mariozechner/pi-ai/oauth';
-import type { CredentialManager } from './credentials/discovery.js';
-import { hasBinary } from '../shared/env.js';
+import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
+import type { Protocol } from '../types/config.js';
 import { MODEL_CATALOG } from '../shared/model-catalog.js';
+
+/** Short timeout for discovery — we never want `/models` to hang startup. */
+const DISCOVERY_TIMEOUT_MS = 5_000;
 
 export interface DiscoveredModel {
   id: string;
   name: string;
-  provider: string;
-  /** 'api' = call via pi-ai with credential, 'cli' = call via local binary */
-  invocation: 'api' | 'cli';
+  protocol: Protocol;
+  /** Custom endpoint URL; omitted → the protocol's official endpoint. */
+  base_url?: string;
+  /** Provenance label used for collision-safe naming (e.g. 'official'). */
+  source: string;
 }
 
 /**
- * Map from OAuth provider IDs to the generic providers whose models should also
- * be listed. E.g. a google-gemini-cli credential can also call models listed
- * under the 'google' provider.
+ * Discover models from every protocol whose official API key is set in the env.
+ * No credentials → empty list (callers fall back to presets/catalog).
  */
-export const OAUTH_ALSO_TRY: Record<string, string[]> = {
-  'google-gemini-cli': ['google'],
-  'google-antigravity': ['google', 'google-vertex'],
-  'openai-codex': ['openai'],
-  'github-copilot': ['github-copilot'],  // already specific
-};
-
-/**
- * Discover available models from all providers with valid credentials.
- * @param enabledProviders Optional whitelist of pi-ai provider IDs (post-expansion).
- *                         Models from providers outside this set are excluded.
- */
-export async function discoverModels(
-  credentialManager: CredentialManager,
-  enabledProviders?: Set<string>,
-): Promise<DiscoveredModel[]> {
+export async function discoverModels(): Promise<DiscoveredModel[]> {
   const models: DiscoveredModel[] = [];
-  const seenIds = new Set<string>();
 
-  // 1. API models from pi-ai — for providers with credentials
-  const allAvailable = credentialManager.getAvailableProviders();
-
-  // Apply user filter at the credential-source level; expansion below preserves
-  // the OAuth-cred → callable-provider mapping for whatever the user kept.
-  const availableProviders = enabledProviders
-    ? allAvailable.filter(p => enabledProviders.has(p))
-    : allAvailable;
-
-  // Expand OAuth-specific providers to also include generic providers
-  const allProviders = new Set<string>(availableProviders);
-  for (const p of availableProviders) {
-    const also = OAUTH_ALSO_TRY[p];
-    if (also) {
-      for (const a of also) allProviders.add(a);
-    }
+  const anthropicKey = process.env['ANTHROPIC_API_KEY'];
+  if (anthropicKey) {
+    models.push(...(await discoverAnthropic(anthropicKey)));
   }
 
-  for (const piaiProvider of allProviders) {
-    try {
-      let providerModels = getModels(piaiProvider as KnownProvider) as Model<Api>[];
-
-      // Apply OAuth provider's modifyModels if available (e.g. GitHub Copilot sets baseUrl)
-      const oauthCreds = credentialManager.getOAuthCredentials(piaiProvider);
-      if (oauthCreds) {
-        const oauthProvider = getOAuthProvider(piaiProvider);
-        if (oauthProvider?.modifyModels) {
-          providerModels = oauthProvider.modifyModels(providerModels, oauthCreds);
-        }
-      }
-
-      for (const m of providerModels) {
-        const key = `${m.provider}:${m.id}:api`;
-        if (seenIds.has(key)) continue;
-        seenIds.add(key);
-        models.push({
-          id: m.id,
-          name: m.name,
-          provider: m.provider,
-          invocation: 'api',
-        });
-      }
-    } catch {
-      // Provider not recognized by pi-ai — skip
-    }
-  }
-
-  // 2. CLI binary discovery (supplementary)
-  const cliModels = discoverCliModels();
-  for (const m of cliModels) {
-    const key = `${m.provider}:${m.id}:cli`;
-    if (seenIds.has(key)) continue;
-    seenIds.add(key);
-    models.push(m);
+  const openaiKey = process.env['OPENAI_API_KEY'];
+  if (openaiKey) {
+    models.push(...(await discoverOpenAI(openaiKey)));
   }
 
   return models;
 }
 
-function discoverCliModels(): DiscoveredModel[] {
-  const models: DiscoveredModel[] = [];
+async function discoverAnthropic(apiKey: string): Promise<DiscoveredModel[]> {
+  try {
+    const client = new Anthropic({ apiKey, maxRetries: 0, timeout: DISCOVERY_TIMEOUT_MS });
+    const page = await client.models.list({ limit: 1000 });
+    const out: DiscoveredModel[] = page.data.map(m => ({
+      id: m.id,
+      name: m.display_name ?? m.id,
+      protocol: 'anthropic' as const,
+      source: 'official',
+    }));
+    return out.length > 0 ? out : staticCatalog('anthropic');
+  } catch (err) {
+    warnFallback('anthropic', err);
+    return staticCatalog('anthropic');
+  }
+}
 
-  // Model IDs come from the shared catalog (src/shared/model-catalog.ts) so CLI
-  // discovery, MODEL_PRESETS, and discoverModelsFromEnv can never drift apart.
-  for (const cat of Object.values(MODEL_CATALOG)) {
-    if (!hasBinary(cat.binary)) continue;
-    for (const m of cat.cliModels) {
-      models.push({
+async function discoverOpenAI(apiKey: string): Promise<DiscoveredModel[]> {
+  try {
+    const client = new OpenAI({ apiKey, maxRetries: 0, timeout: DISCOVERY_TIMEOUT_MS });
+    const page = await client.models.list();
+    // `/models` lists embeddings, TTS, moderation, etc. — keep only chat-capable
+    // families (gpt-*, o1/o3/o4 reasoning, chatgpt-*) to avoid flooding the panel.
+    const out: DiscoveredModel[] = page.data
+      .filter(m => /^(gpt-|o[0-9]|chatgpt)/i.test(m.id))
+      .map(m => ({
         id: m.id,
-        name: `${m.displayName} (CLI)`,
-        provider: cat.provider,
-        invocation: 'cli',
-      });
-    }
+        name: m.id,
+        protocol: 'openai' as const,
+        source: 'official',
+      }));
+    return out.length > 0 ? out : staticCatalog('openai');
+  } catch (err) {
+    warnFallback('openai', err);
+    return staticCatalog('openai');
   }
+}
 
-  return models;
+/** Fallback suggestion set from the hand-maintained catalog (no live key path). */
+function staticCatalog(protocol: Protocol): DiscoveredModel[] {
+  const cat = MODEL_CATALOG[protocol];
+  return [cat.flagship, cat.balanced, cat.economy].map(m => ({
+    id: m.id,
+    name: m.displayName,
+    protocol,
+    source: 'official',
+  }));
+}
+
+function warnFallback(protocol: Protocol, err: unknown): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  process.stderr.write(
+    `[model-discovery] ${protocol} /models unavailable, using static catalog: ${msg}\n`,
+  );
 }

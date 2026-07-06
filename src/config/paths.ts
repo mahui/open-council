@@ -15,9 +15,3 @@ export const PATHS = {
   credentials:  join(COUNCIL_HOME, 'credentials'),
   logs:         join(COUNCIL_HOME, 'logs'),
 } as const;
-
-export const KNOWN_CREDENTIALS = {
-  openai:  join(homedir(), '.codex', 'auth.json'),
-  google:  join(homedir(), '.gemini', 'oauth_creds.json'),
-  'google-vertex': join(homedir(), '.config', 'gcloud', 'application_default_credentials.json'),
-} as const;

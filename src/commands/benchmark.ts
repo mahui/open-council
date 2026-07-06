@@ -9,7 +9,7 @@ import type { ModelConfig } from '../types/config.js';
 import type { BenchmarkReport } from '../types/benchmark.js';
 import { Orchestrator } from '../core/orchestrator.js';
 import { resolveDefaultsDir } from '../shared/resources.js';
-import { discoverCredentials, buildAdapter, resolveModels } from './shared/assemble.js';
+import { buildAdapter, resolveModels } from './shared/assemble.js';
 import { loadBenchmarkSuite } from './benchmark/suite.js';
 import { runExperiments } from './benchmark/runner.js';
 import {
@@ -47,8 +47,7 @@ export async function runBenchmark(options: BenchmarkOptions): Promise<void> {
   }
 
   // --- Model discovery ---
-  const credentialManager = await discoverCredentials();
-  const { models: allModels } = resolveModels(credentialManager);
+  const { models: allModels } = resolveModels();
 
   if (allModels.length === 0) {
     process.stderr.write(
@@ -60,7 +59,7 @@ export async function runBenchmark(options: BenchmarkOptions): Promise<void> {
   // Best model = highest priority (sort descending, take first)
   const bestModel: ModelConfig = [...allModels].sort((a, b) => b.priority - a.priority)[0]!;
 
-  const adapter = buildAdapter(credentialManager);
+  const adapter = buildAdapter();
   // Single orchestrator; model filtering is handled per run via RunOptions.models
   const orchestrator = new Orchestrator(adapter, new SilentRenderer(), allModels);
 

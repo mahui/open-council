@@ -6,7 +6,7 @@ import { createRenderer } from '../ui/renderer-factory.js';
 import { offerViewer } from '../ui/interactive.js';
 import { PATHS } from '../config/paths.js';
 import { SessionStore } from '../storage/session-store.js';
-import { discoverCredentials, buildAdapter, resolveModels } from './shared/assemble.js';
+import { buildAdapter, resolveModels } from './shared/assemble.js';
 import { resolveHistoricalContext } from './shared/history-context.js';
 import type { DebateMode, RunOptions } from '../types/session.js';
 
@@ -41,9 +41,8 @@ export async function runCouncil(question: string | undefined, options: CouncilO
     return;
   }
 
-  // Discover credentials + resolve models from config or env
-  const credentialManager = await discoverCredentials();
-  const { models, chairman: configChairman, roleGenModel, minAgents, maxAgents, prefer, tuiMode } = resolveModels(credentialManager, { loadGeneralConfig: true });
+  // Resolve models from config or env (credentials resolved at invoke time)
+  const { models, chairman: configChairman, roleGenModel, minAgents, maxAgents, prefer, tuiMode } = resolveModels({ loadGeneralConfig: true });
   const chairman = options.chairman ?? configChairman;
 
   if (models.length === 0) {
@@ -67,7 +66,7 @@ export async function runCouncil(question: string | undefined, options: CouncilO
     );
   }
 
-  const adapter = buildAdapter(credentialManager);
+  const adapter = buildAdapter();
   const renderer = await createRenderer({ question, mode: options.mode, json: options.json, tuiMode });
   const orchestrator = new Orchestrator(adapter, renderer, models, chairman, { min: minAgents, max: maxAgents }, roleGenModel, explicitRoleSet, prefer);
 
@@ -111,7 +110,7 @@ export async function runCouncil(question: string | undefined, options: CouncilO
 
 /** Print the active-models banner to stderr (TTY-aware formatting). */
 function printModelBanner(models: ModelConfig[]): void {
-  const modelList = models.map(m => `${m.name}${m.invocation === 'cli' ? ' (CLI)' : ''}`).join(', ');
+  const modelList = models.map(m => m.name).join(', ');
   process.stderr.write(
     process.stderr.isTTY
       ? `\x1b[1m🏛️  Council\x1b[0m \x1b[2m${models.length} model(s): ${modelList}\x1b[0m\n`

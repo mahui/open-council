@@ -111,7 +111,7 @@ export function createApiRoutes(deps: RouteDeps): Hono {
         name: m.name,
         provider: m.provider,
         capabilities: m.capabilities,
-        invocation: m.invocation,
+        protocol: m.protocol,
       })),
       modes: MODES,
       defaultChairman: snapshot.defaultChairman,

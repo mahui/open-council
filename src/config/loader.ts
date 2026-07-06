@@ -1,5 +1,5 @@
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync, renameSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync, renameSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ModelConfigSchema, CouncilConfigSchema } from './schema.js';
 import type { CouncilConfig, ModelConfig, RoleSet } from '../types/config.js';
@@ -7,6 +7,7 @@ import { ConfigNotFoundError, RoleSetNotFoundError } from '../types/errors.js';
 import { PATHS } from './paths.js';
 import { safePath } from '../shared/paths.js';
 import { resolveDefaultsDir } from '../shared/resources.js';
+import { migrateModelConfigRaw, migrateCouncilConfigRaw } from './migrate.js';
 
 export class ConfigLoader {
   constructor(private configDir: string = PATHS.config) {}
@@ -16,7 +17,33 @@ export class ConfigLoader {
     if (!existsSync(path)) throw new ConfigNotFoundError(path);
 
     const raw = parseYaml(readFileSync(path, 'utf-8')) as unknown;
-    return CouncilConfigSchema.parse(raw) as unknown as CouncilConfig;
+    return this.migrateCouncilIfNeeded(path, raw);
+  }
+
+  /**
+   * Run the schema_version 1→2 council migration. When conversion happens, the
+   * original file is backed up to `council.yaml.v1.bak` (once) and the canonical
+   * v2 form is written back. Already-v2 files parse with zero rewrite.
+   */
+  private migrateCouncilIfNeeded(path: string, raw: unknown): CouncilConfig {
+    const result = migrateCouncilConfigRaw(raw);
+    const source = result.status === 'ok' || !result.config ? raw : result.config;
+    const config = CouncilConfigSchema.parse(source) as unknown as CouncilConfig;
+    if (result.status === 'converted') this.persistMigrated(path, config);
+    return config;
+  }
+
+  /**
+   * Back up the pre-migration file to `<path>.v1.bak` (only if no backup exists
+   * yet) then overwrite with the canonical migrated form. Best-effort: migration
+   * is idempotent, so a failed write is simply retried on the next load.
+   */
+  private persistMigrated(path: string, value: unknown): void {
+    try {
+      const backup = `${path}.v1.bak`;
+      if (existsSync(path) && !existsSync(backup)) copyFileSync(path, backup);
+      writeFileSync(path, stringifyYaml(value), { mode: 0o600 });
+    } catch { /* best-effort */ }
   }
 
   /**
@@ -30,7 +57,7 @@ export class ConfigLoader {
     if (!existsSync(path)) return null;
     try {
       const raw = parseYaml(readFileSync(path, 'utf-8')) as unknown;
-      return CouncilConfigSchema.parse(raw) as unknown as CouncilConfig;
+      return this.migrateCouncilIfNeeded(path, raw);
     } catch {
       try { renameSync(path, `${path}.bak`); } catch { /* best-effort */ }
       return null;
@@ -62,10 +89,22 @@ export class ConfigLoader {
 
     return readdirSync(modelsDir)
       .filter(f => f.endsWith('.yaml'))
-      .map(f => {
-        const raw = parseYaml(readFileSync(join(modelsDir, f), 'utf-8')) as unknown;
-        return ModelConfigSchema.parse(raw) as unknown as ModelConfig;
-      });
+      .map(f => this.loadAndMigrateModel(join(modelsDir, f)));
+  }
+
+  /**
+   * Read one model YAML, migrating it to schema_version 2 on the fly. A v1 model
+   * is classified (converted or disabled+annotated — never dropped), its original
+   * form backed up to `<file>.v1.bak`, and the canonical v2 form written back.
+   * Already-v2 files parse with zero rewrite. See {@link migrateModelConfigRaw}.
+   */
+  private loadAndMigrateModel(path: string): ModelConfig {
+    const raw = parseYaml(readFileSync(path, 'utf-8')) as unknown;
+    const result = migrateModelConfigRaw(raw);
+    const source = result.status === 'ok' || !result.config ? raw : result.config;
+    const config = ModelConfigSchema.parse(source) as unknown as ModelConfig;
+    if (result.status !== 'ok') this.persistMigrated(path, config);
+    return config;
   }
 
   /**
@@ -76,8 +115,7 @@ export class ConfigLoader {
     const modelsDir = join(this.configDir, 'models');
     const path = safePath(modelsDir, `${name}.yaml`);
     if (!existsSync(path)) return null;
-    const raw = parseYaml(readFileSync(path, 'utf-8')) as unknown;
-    return ModelConfigSchema.parse(raw) as unknown as ModelConfig;
+    return this.loadAndMigrateModel(path);
   }
 
   /** Raw council.yaml bytes (utf-8) for version hashing, or null when absent. */

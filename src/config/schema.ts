@@ -1,51 +1,49 @@
 import { z } from 'zod';
 
+/**
+ * Official line-protocol endpoints. Omitting `base_url` on a ModelConfig means
+ * "use the official endpoint for the selected protocol".
+ */
+export const OFFICIAL_BASE_URL = {
+  anthropic: 'https://api.anthropic.com',
+  openai: 'https://api.openai.com/v1',
+} as const;
+
+/**
+ * ModelConfig v2 (standard-API convergence, schema_version 2).
+ * A model is fully described by: which SDK (`protocol`), the wire `model` id,
+ * an optional `base_url` (→ official endpoint when omitted), and an API key
+ * sourced from an env var or a 0o600 key file. All CLI/OAuth fields are gone.
+ */
 export const ModelConfigSchema = z.object({
   name: z.string(),
-  invocation: z.enum(['cli', 'api', 'auto']).default('auto'),
-  provider: z.string().optional(),  // pi-ai provider ID (dynamic, 20+ providers)
-  model: z.string().optional(),
+  protocol: z.enum(['anthropic', 'openai']),  // selects the SDK client
+  model: z.string(),                           // wire model id passed to the endpoint
+  base_url: z.string().url().optional(),       // omitted → OFFICIAL_BASE_URL[protocol]
+
+  api_key_env: z.string().optional(),
+  api_key_path: z.string().optional(),
+  provider: z.string().optional(),             // display / circuit-breaker key label (derived by default)
+
+  reasoning_effort: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']).optional(),
+  temperature: z.number().optional(),
+  max_tokens: z.number().int().positive().optional(),
+
   timeout_seconds: z.number().int().positive().default(120),
   capabilities: z.array(z.string()).default(['general']),
   priority: z.number().int().nonnegative().default(100),
   max_concurrent: z.number().int().positive().default(1),
   resource_weight: z.number().int().positive().default(1),
   enabled: z.boolean().default(true),
-
-  // CLI-specific
-  binary: z.string().optional(),
-  model_args: z.array(z.string()).optional(),
-  args: z.array(z.string()).optional(),
-  input_mode: z.enum(['stdin', 'arg', 'file']).optional(),
-  output_mode: z.enum(['stdout', 'file', 'json_field']).optional(),
-  output_json_field: z.string().optional(),
-  env: z.record(z.string()).optional(),
-  health_check: z.object({
-    command: z.array(z.string()),
-    expect_exit_code: z.number().int().default(0),
-    cache_seconds: z.number().int().default(300),
-    timeout_seconds: z.number().int().default(10),
-  }).optional(),
-
-  // API-specific
-  api_credential_path: z.string().optional(),
-  api_base_url: z.string().url().optional(),
-  api_key_env: z.string().optional(),
   streaming: z.boolean().default(true),
-}).refine(
-  (data) => {
-    if (data.invocation === 'cli') {
-      return !!data.binary && !!data.args && !!data.input_mode;
-    }
-    return true;
-  },
-  { message: 'CLI mode requires binary, args, and input_mode' },
-);
+
+  legacy_disabled_reason: z.string().optional(),
+});
 
 export type ModelConfigFromSchema = z.infer<typeof ModelConfigSchema>;
 
 export const CouncilConfigSchema = z.object({
-  schema_version: z.number().int().default(1),
+  schema_version: z.number().int().default(2),
 
   general: z.object({
     default_mode: z.enum(['quick', 'compare', 'debate', 'auto']).default('auto'),

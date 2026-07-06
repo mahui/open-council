@@ -7,9 +7,7 @@ import { CredentialManager } from '../providers/credentials/discovery.js';
 import { discoverModelsFromEnv } from '../config/presets.js';
 import { ConfigLoader } from '../config/loader.js';
 import { Orchestrator } from '../core/orchestrator.js';
-import { AutoAdapter } from '../providers/adapter.js';
 import { ApiAdapter } from '../providers/api-adapter.js';
-import { CliAdapter } from '../providers/cli-adapter.js';
 import { PlainRenderer } from './plain-renderer.js';
 import { LiveRenderer } from './live-renderer.js';
 import { SessionStore } from '../storage/session-store.js';
@@ -53,7 +51,7 @@ interface ReplState {
   /** Ordered model preference from council.yaml (routing.default.prefer). */
   prefer?: string[];
   credentialManager: CredentialManager;
-  adapter: AutoAdapter;
+  adapter: ApiAdapter;
   sessionCount: number;
   input?: InputController;
 }
@@ -93,10 +91,10 @@ export async function startRepl(): Promise<void> {
       process.stderr.write(`\r${YELLOW}⚠ 配置无法加载，已回落到环境变量发现的模型（可能与你配置的模型不同）。${RESET}\n`);
       process.stderr.write(formatConfigError(err, PATHS.config) + '\n');
       process.stderr.write(`  ${DIM}运行 ${CYAN}council setup${RESET}${DIM} 修复配置。${RESET}\n`);
-      models = discoverModelsFromEnv(credentialManager);
+      models = discoverModelsFromEnv();
     }
   } else {
-    models = discoverModelsFromEnv(credentialManager);
+    models = discoverModelsFromEnv();
   }
 
   if (models.length === 0) {
@@ -123,22 +121,20 @@ export async function startRepl(): Promise<void> {
       }
     }
     if (models.length === 0) {
-      process.stderr.write(`  Set API keys or install CLI tools (claude, codex, gemini).\n`);
+      process.stderr.write(`  Set ${CYAN}ANTHROPIC_API_KEY${RESET} or ${CYAN}OPENAI_API_KEY${RESET}, or add a custom endpoint.\n`);
       process.stderr.write(`  Type ${CYAN}/${RESET} then select ${CYAN}/setup${RESET} for guided configuration.\n\n`);
     }
   }
 
   if (models.length > 0) {
-    const modelList = models.map(m => `${m.name}${m.invocation === 'cli' ? ' (CLI)' : ''}`).join(', ');
+    const modelList = models.map(m => m.name).join(', ');
     process.stderr.write(`\r${GREEN}✓${RESET} ${models.length} model(s): ${DIM}${modelList}${RESET}\n`);
   }
 
   process.stderr.write(`\n  Type a question to start a debate.\n`);
   process.stderr.write(`  ${DIM}Press ${CYAN}/${RESET}${DIM} for commands, Ctrl-C to exit${RESET}\n\n`);
 
-  const apiAdapter = new ApiAdapter(credentialManager);
-  const cliAdapter = new CliAdapter();
-  const adapter = new AutoAdapter(apiAdapter, cliAdapter);
+  const adapter = new ApiAdapter(credentialManager);
 
   const state: ReplState = {
     mode: 'auto',

@@ -1,5 +1,5 @@
 /**
- * Single source of truth for CLI / fallback default model IDs.
+ * Single source of truth for fallback default model IDs.
  *
  * Historically three places hardcoded their own model IDs
  * (providers/model-discovery.ts, config/presets.ts MODEL_PRESETS, and
@@ -11,18 +11,18 @@
  * and `src/providers/` can import it without reintroducing the config→providers
  * reverse dependency that was previously removed.
  *
- * The IDs are *derived from* @mariozechner/pi-ai's authoritative model catalog:
- * for each tier we list preferred candidate IDs (newest first) and pick the
- * first one pi-ai actually ships, taking pi-ai's own display name. If pi-ai is
- * unavailable (e.g. mocked in a test) we fall back to the first candidate as a
- * static literal so the table is always populated. A guard test asserts every
- * resolved ID is a real pi-ai model ID, so the table can't drift from reality.
+ * The IDs are a plain, hand-maintained literal table (standard-API convergence,
+ * design-notes/standard-api-convergence.md §1.7). It is used only as an offline
+ * / no-key fallback suggestion; **when an API key is present, the live
+ * `/models` endpoint (see providers/model-discovery.ts) is authoritative** and
+ * this table is not consulted. When a vendor ships new flagship IDs, edit the
+ * literals below by hand.
  */
 
-import { getModels } from '@mariozechner/pi-ai';
-import type { Api, KnownProvider, Model } from '@mariozechner/pi-ai';
+import type { Protocol } from '../types/config.js';
 
-export type CatalogProvider = 'anthropic' | 'openai' | 'google';
+/** The two line protocols we ship a fallback catalog for. */
+export type CatalogProvider = Protocol;
 
 export interface CatalogModel {
   readonly id: string;
@@ -30,126 +30,41 @@ export interface CatalogModel {
 }
 
 export interface ProviderCatalog {
-  readonly provider: CatalogProvider;
-  /** Local CLI binary that serves this provider's models. */
-  readonly binary: string;
-  /** Environment variable carrying this provider's API key. */
+  /** Line protocol / SDK client this catalog entry targets. */
+  readonly protocol: Protocol;
+  /** Environment variable carrying this protocol's official API key. */
   readonly apiKeyEnv: string;
-  /** Top-tier model (opus / flagship gpt / gemini pro). */
+  /** Top-tier model (opus / flagship gpt). */
   readonly flagship: CatalogModel;
-  /** Balanced default model (sonnet / mini / flash). */
+  /** Balanced default model (sonnet / mini). */
   readonly balanced: CatalogModel;
-  /** Cheapest/fastest model (haiku / nano / flash-lite). */
+  /** Cheapest/fastest model (haiku / nano). */
   readonly economy: CatalogModel;
-  /** Models exposed via CLI discovery, in listing order. */
-  readonly cliModels: readonly CatalogModel[];
 }
 
-type Tier = 'flagship' | 'balanced' | 'economy';
-
-interface TierSpec {
-  /** Candidate pi-ai IDs, most-preferred first. */
-  readonly candidates: readonly string[];
-  /** Display name used only when pi-ai can't resolve the candidate. */
-  readonly fallbackName: string;
-}
-
-interface ProviderSpec {
-  readonly provider: CatalogProvider;
-  readonly piaiProvider: KnownProvider;
-  readonly binary: string;
-  readonly apiKeyEnv: string;
-  readonly flagship: TierSpec;
-  readonly balanced: TierSpec;
-  readonly economy: TierSpec;
-  /** Which tiers appear (in order) as CLI-discoverable models. */
-  readonly cliOrder: readonly Tier[];
-}
-
-const PROVIDER_SPECS: readonly ProviderSpec[] = [
-  {
-    provider: 'anthropic',
-    piaiProvider: 'anthropic',
-    binary: 'claude',
+/**
+ * Hardcoded fallback catalog. Hand-maintained; see the file header. Only the two
+ * official line protocols appear — custom OpenAI-compatible endpoints supply
+ * their own model ids at configuration time.
+ */
+export const MODEL_CATALOG: Record<CatalogProvider, ProviderCatalog> = {
+  anthropic: {
+    protocol: 'anthropic',
     apiKeyEnv: 'ANTHROPIC_API_KEY',
-    flagship: { candidates: ['claude-opus-4-6', 'claude-opus-4-5', 'claude-opus-4-1'], fallbackName: 'Claude Opus 4.6' },
-    balanced: { candidates: ['claude-sonnet-4-6', 'claude-sonnet-4-5', 'claude-sonnet-4-0'], fallbackName: 'Claude Sonnet 4.6' },
-    economy: { candidates: ['claude-haiku-4-5', 'claude-haiku-4-5-20251001'], fallbackName: 'Claude Haiku 4.5' },
-    cliOrder: ['balanced', 'flagship'],
+    flagship: { id: 'claude-opus-4-6', displayName: 'Claude Opus 4.6' },
+    balanced: { id: 'claude-sonnet-4-6', displayName: 'Claude Sonnet 4.6' },
+    economy: { id: 'claude-haiku-4-5', displayName: 'Claude Haiku 4.5' },
   },
-  {
-    provider: 'openai',
-    piaiProvider: 'openai',
-    binary: 'codex',
+  openai: {
+    protocol: 'openai',
     apiKeyEnv: 'OPENAI_API_KEY',
-    flagship: { candidates: ['gpt-5.4', 'gpt-5.2', 'gpt-5.1', 'gpt-5'], fallbackName: 'GPT-5.4' },
-    balanced: { candidates: ['gpt-5.4-mini', 'gpt-5-mini'], fallbackName: 'GPT-5.4 mini' },
-    economy: { candidates: ['gpt-5.4-nano', 'gpt-5-nano'], fallbackName: 'GPT-5.4 nano' },
-    cliOrder: ['flagship', 'balanced'],
+    flagship: { id: 'gpt-5.4', displayName: 'GPT-5.4' },
+    balanced: { id: 'gpt-5.4-mini', displayName: 'GPT-5.4 mini' },
+    economy: { id: 'gpt-5.4-nano', displayName: 'GPT-5.4 nano' },
   },
-  {
-    provider: 'google',
-    piaiProvider: 'google',
-    binary: 'gemini',
-    apiKeyEnv: 'GEMINI_API_KEY',
-    flagship: { candidates: ['gemini-2.5-pro'], fallbackName: 'Gemini 2.5 Pro' },
-    balanced: { candidates: ['gemini-2.5-flash'], fallbackName: 'Gemini 2.5 Flash' },
-    economy: { candidates: ['gemini-2.5-flash-lite'], fallbackName: 'Gemini 2.5 Flash Lite' },
-    cliOrder: ['flagship', 'balanced'],
-  },
-];
+};
 
-function safeGetModels(provider: KnownProvider): Model<Api>[] {
-  try {
-    const models = getModels(provider);
-    return Array.isArray(models) ? (models as Model<Api>[]) : [];
-  } catch {
-    // pi-ai doesn't recognize the provider (or is mocked) — resolve statically.
-    return [];
-  }
-}
-
-function resolveTier(models: Model<Api>[], spec: TierSpec): CatalogModel {
-  for (const id of spec.candidates) {
-    const match = models.find(m => m.id === id);
-    if (match) return { id: match.id, displayName: match.name };
-  }
-  // pi-ai couldn't resolve any candidate — fall back to the most-preferred literal.
-  const fallbackId = spec.candidates[0] ?? '';
-  return { id: fallbackId, displayName: spec.fallbackName };
-}
-
-function buildCatalog(): Record<CatalogProvider, ProviderCatalog> {
-  const out: Partial<Record<CatalogProvider, ProviderCatalog>> = {};
-  for (const spec of PROVIDER_SPECS) {
-    const models = safeGetModels(spec.piaiProvider);
-    const tiers: Record<Tier, CatalogModel> = {
-      flagship: resolveTier(models, spec.flagship),
-      balanced: resolveTier(models, spec.balanced),
-      economy: resolveTier(models, spec.economy),
-    };
-    out[spec.provider] = {
-      provider: spec.provider,
-      binary: spec.binary,
-      apiKeyEnv: spec.apiKeyEnv,
-      flagship: tiers.flagship,
-      balanced: tiers.balanced,
-      economy: tiers.economy,
-      cliModels: spec.cliOrder.map(t => tiers[t]),
-    };
-  }
-  return out as Record<CatalogProvider, ProviderCatalog>;
-}
-
-/** Resolved catalog, computed once from pi-ai at module load. */
-export const MODEL_CATALOG: Record<CatalogProvider, ProviderCatalog> = buildCatalog();
-
-/** Look up a provider catalog entry by its CLI binary name. */
-export function catalogForBinary(binary: string): ProviderCatalog | undefined {
-  return Object.values(MODEL_CATALOG).find(c => c.binary === binary);
-}
-
-/** Every model ID referenced by the catalog (all tiers, all providers). */
+/** Every model ID referenced by the catalog (all tiers, all protocols). */
 export function catalogModelIds(): Set<string> {
   const ids = new Set<string>();
   for (const cat of Object.values(MODEL_CATALOG)) {

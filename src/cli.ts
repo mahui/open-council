@@ -47,8 +47,7 @@ program
       const loader = new ConfigLoader();
       if (!loader.isConfigured()) {
         const credManager = new CredentialManager();
-        await credManager.discoverAll();
-        const hasAny = credManager.getAvailableProviders().length > 0;
+        const hasAny = Object.keys(credManager.discoverAll()).length > 0;
         if (!hasAny) {
           if (!process.stderr.isTTY) {
             process.stderr.write(

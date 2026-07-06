@@ -78,14 +78,24 @@ export function calculateConsensus(
   };
 }
 
+/**
+ * Diversity key used to judge how "different" two models are for consensus
+ * weighting. Standard-API convergence removed CLI binaries, so the key now
+ * derives from the explicit provider label, else the protocol combined with the
+ * custom endpoint host (two custom gateways on different hosts count as distinct;
+ * the same host collapses together). Official endpoints (no base_url) key on
+ * their protocol.
+ */
 export function getProviderFamily(config: ModelConfig): string {
   if (config.provider) return config.provider;
-  const binary = config.binary ?? '';
-  if (binary.includes('claude')) return 'anthropic';
-  if (binary.includes('codex')) return 'openai';
-  if (binary.includes('gemini')) return 'google';
-  if (binary.includes('ollama')) return 'ollama';
-  return binary;
+  if (config.base_url) {
+    try {
+      return `${config.protocol}:${new URL(config.base_url).host}`;
+    } catch {
+      return `${config.protocol}:${config.base_url}`;
+    }
+  }
+  return config.protocol;
 }
 
 // --- Statistical helpers ---

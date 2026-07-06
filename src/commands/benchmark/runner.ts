@@ -7,7 +7,7 @@ import type { BenchmarkQuestion, BenchmarkResult } from '../../types/benchmark.j
 import type { ModelConfig } from '../../types/config.js';
 import type { DebateMode, RunOptions } from '../../types/session.js';
 import type { Orchestrator } from '../../core/orchestrator.js';
-import type { AutoAdapter } from '../../providers/adapter.js';
+import type { InvocationAdapter } from '../../types/provider.js';
 import { evaluateCoverage, evaluateErrors } from '../../core/evaluator.js';
 import { extractResponse } from './report.js';
 
@@ -32,7 +32,7 @@ function fmt(n: number, decimals = 0): string {
 export async function runExperiments(
   questions: BenchmarkQuestion[],
   orchestrator: Orchestrator,
-  adapter: AutoAdapter,
+  adapter: InvocationAdapter,
   bestModel: ModelConfig,
 ): Promise<BenchmarkResult[]> {
   const allResults: BenchmarkResult[] = [];
@@ -63,7 +63,7 @@ async function runGroup(
   q: BenchmarkQuestion,
   group: GroupConfig,
   orchestrator: Orchestrator,
-  adapter: AutoAdapter,
+  adapter: InvocationAdapter,
   bestModel: ModelConfig,
 ): Promise<BenchmarkResult> {
   const t0 = Date.now();

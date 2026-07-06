@@ -1,18 +1,21 @@
 /**
  * Error classification for API invocations.
  *
- * pi-ai rarely re-throws the raw SDK error object; instead it catches the underlying
- * error and surfaces it as an AssistantMessage with `stopReason: 'error'` and an
- * `errorMessage` string (see providers/anthropic.js etc.). By the time api-adapter's
- * catch runs, the failure is usually an InvocationError whose message embeds that text —
- * e.g. "... failed: 429 {...rate_limit...}" or "Cloud Code Assist API error (503): ...".
- *
- * So classification is primarily string-driven, but we first try to pull a structured
- * HTTP status off the error object in case a raw SDK error (with `.status`/`.statusCode`)
- * ever reaches us — that path is more reliable than substring matching.
+ * The official SDKs throw structured error objects: `Anthropic.APIError` / `OpenAI.APIError`
+ * carry a numeric `.status`, and `RateLimitError` is a dedicated 429 subclass. So status-driven
+ * classification is the *primary* path — we match `instanceof APIError` first and read `.status`.
+ * Free-form string/keyword matching is kept only as a fallback for non-APIError failures (a bare
+ * text error from some compatibility gateway, or a raw network error object).
  */
+import { APIError as AnthropicAPIError, RateLimitError as AnthropicRateLimitError } from '@anthropic-ai/sdk';
+import { APIError as OpenAIAPIError, RateLimitError as OpenAIRateLimitError } from 'openai';
 import type { ApiErrorClass } from '../types/provider.js';
 import { InvocationTimeoutError } from '../types/errors.js';
+
+/** Whether an error is a structured SDK APIError (either SDK). */
+function isApiError(err: unknown): err is AnthropicAPIError | OpenAIAPIError {
+  return err instanceof AnthropicAPIError || err instanceof OpenAIAPIError;
+}
 
 /** Network-level error codes that indicate a transient, retryable connection problem. */
 const RETRYABLE_NETWORK_CODES = new Set([
@@ -47,8 +50,9 @@ export function extractStatus(err: unknown): number | undefined {
 }
 
 /**
- * Best-effort status extraction from a free-form error message. Matches the two shapes pi-ai
- * emits: a bare leading code ("429 {...}") and a parenthesised code ("... error (503): ...").
+ * Best-effort status extraction from a free-form error message. Fallback only, for gateways
+ * that throw a bare text error: a bare leading code ("429 {...}") or a parenthesised code
+ * ("... error (503): ...").
  */
 function statusFromMessage(message: string): number | undefined {
   // Parenthesised: "(503)"
@@ -112,16 +116,29 @@ const PERMANENT_KEYWORDS = [
  *
  * Order of precedence:
  *  1. InvocationTimeoutError → 'timeout' (never retried — already burned the deadline).
- *  2. Structured status code off the error object.
- *  3. Status code parsed out of the message.
- *  4. Network error code (err.code).
- *  5. Keyword matching on the message.
- *  6. Default → 'permanent' (don't amplify load by retrying something we don't understand).
+ *  2. Structured SDK APIError status (primary path).
+ *  3. Status code off any other error object (`.status`/`.statusCode`/`.response.status`).
+ *  4. Status code parsed out of the message (bare-text gateway fallback).
+ *  5. Network error code (err.code).
+ *  6. Keyword matching on the message.
+ *  7. Default → 'permanent' (don't amplify load by retrying something we don't understand).
  */
 export function classifyError(err: unknown): ApiErrorClass {
   if (err instanceof InvocationTimeoutError) return 'timeout';
 
-  // 2. Structured status
+  // 2. Structured SDK APIError — status is authoritative. A statusless APIError
+  // (APIConnectionError / APIConnectionTimeoutError) is a transient network fault → retryable.
+  if (isApiError(err)) {
+    const status = typeof err.status === 'number' ? err.status : undefined;
+    if (status !== undefined) {
+      const byStatus = classifyStatus(status);
+      if (byStatus) return byStatus;
+    } else {
+      return 'retryable';
+    }
+  }
+
+  // 3. Structured status off any other error shape
   const structured = extractStatus(err);
   if (structured !== undefined) {
     const byStatus = classifyStatus(structured);
@@ -130,25 +147,25 @@ export function classifyError(err: unknown): ApiErrorClass {
 
   const message = (err instanceof Error ? err.message : String(err)).toLowerCase();
 
-  // 3. Status parsed from message
+  // 4. Status parsed from message (bare-text gateway fallback)
   const parsed = statusFromMessage(message);
   if (parsed !== undefined) {
     const byStatus = classifyStatus(parsed);
     if (byStatus) return byStatus;
   }
 
-  // 4. Network error code
+  // 5. Network error code
   if (typeof err === 'object' && err !== null) {
     const code = (err as Record<string, unknown>)['code'];
     if (typeof code === 'string' && RETRYABLE_NETWORK_CODES.has(code)) return 'retryable';
   }
 
-  // 5. Keyword matching — permanent auth/request errors win over generic retryable words
+  // 6. Keyword matching — permanent auth/request errors win over generic retryable words
   // to avoid retrying a doomed call (e.g. "unauthorized" should not be retried).
   if (PERMANENT_KEYWORDS.some(k => message.includes(k))) return 'permanent';
   if (RETRYABLE_KEYWORDS.some(k => message.includes(k))) return 'retryable';
 
-  // 6. Unknown → permanent (fail fast to CLI fallback rather than retry-storm).
+  // 7. Unknown → permanent (fail fast rather than retry-storm).
   return 'permanent';
 }
 
@@ -158,6 +175,7 @@ export function classifyError(err: unknown): ApiErrorClass {
  * the retry decision.
  */
 export function isRateLimit(err: unknown): boolean {
+  if (err instanceof AnthropicRateLimitError || err instanceof OpenAIRateLimitError) return true;
   const status = extractStatus(err);
   if (status === 429) return true;
   const message = (err instanceof Error ? err.message : String(err)).toLowerCase();

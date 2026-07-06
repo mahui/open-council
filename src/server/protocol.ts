@@ -1,5 +1,6 @@
 // src/server/protocol.ts — 线协议（server 私有契约）。纯类型，无运行时代码（ARCH-04）。
 import type { DebatePhase, DegradationEvent, ConsensusResult, Session } from '../types/session.js';
+import type { Protocol } from '../types/config.js';
 
 /** SSE 事件类型枚举（与 Renderer 方法一一映射 + 生命周期）。 */
 export type DebateEventType =
@@ -93,12 +94,14 @@ export interface GeneralSettingsDTO {
 export interface ModelSettingDTO {
   name: string;
   provider?: string;
-  invocation: 'cli' | 'api' | 'auto';
+  protocol: Protocol; // 'anthropic' | 'openai' —— 选用的 SDK 客户端
   capabilities: string[];
   enabled: boolean;
-  isCustom: boolean; // provider 以 "custom:" 前缀
-  apiBaseUrl?: string; // 仅自定义端点展示
-  hasCredentialFile: boolean; // api_credential_path 是否存在 —— 绝不含 key
+  isCustom: boolean; // 自定义端点（base_url 存在）
+  apiBaseUrl?: string; // 仅自定义端点展示（base_url）
+  hasCredentialFile: boolean; // api_key_path 是否存在 —— 绝不含 key
+  // 迁移（schema_version 1→2）无法自动转换时的禁用原因，前端以小字/tooltip 展示。
+  legacy_disabled_reason?: string;
   version: string; // 该模型 yaml 字节的 sha256 —— PATCH 乐观锁令牌（§4.3，独立于 council.yaml）
 }
 

@@ -32,7 +32,7 @@ export async function runServe(options: ServeOptions): Promise<void> {
 
   // Assemble orchestration deps (server-side only; credentials never leave here).
   const credentialManager = await discoverCredentials();
-  const { models, chairman, roleGenModel, minAgents, maxAgents, prefer } = resolveModels(credentialManager, { loadGeneralConfig: true });
+  const { models, chairman, roleGenModel, minAgents, maxAgents, prefer } = resolveModels({ loadGeneralConfig: true });
   if (models.length === 0) {
     process.stderr.write(
       'Error: No models available. Run "council setup" or set API keys ' +
@@ -46,7 +46,7 @@ export async function runServe(options: ServeOptions): Promise<void> {
 
   // Live config holder; GUI config writes call reloadRuntime() to swap it (design §5).
   const runtime = new RuntimeConfig({
-    adapter: buildAdapter(credentialManager),
+    adapter: buildAdapter(),
     models,
     allModels: loader.loadAllModelConfigs(),
     defaultChairman: chairman ?? '',

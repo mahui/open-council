@@ -98,7 +98,7 @@ export class TuiRenderer implements Renderer {
         agent_id: agent.agent_id,
         role: agent.role,
         model_name: agent.config.name,
-        invocation_mode: agent.config.invocation === 'cli' ? 'cli' : 'api',
+        invocation_mode: 'api',
         status: 'running',
       });
     }

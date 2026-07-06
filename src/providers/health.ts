@@ -16,7 +16,7 @@ interface ProviderHealthRow {
  * Provider health manager — circuit breaker + adaptive throttle.
  *
  * Tracks per-provider failure history and adapts:
- * - Circuit breaker: after N consecutive failures, skip API → go straight to CLI
+ * - Circuit breaker: after N consecutive failures, open the circuit and fail the model fast
  * - Adaptive throttle: increase wait time after 429s, decrease after successes
  */
 
@@ -38,7 +38,6 @@ const CIRCUIT_RECOVERY_MS = 60_000;
 const MAX_THROTTLE_MS = 30_000;
 
 const BASE_THROTTLE: Record<string, number> = {
-  google: 12_000,
   anthropic: 500,
   openai: 500,
 };
@@ -114,7 +113,7 @@ function saveState(provider: string, state: ProviderState) {
   }
 }
 
-/** Check circuit breaker status. 'open' = skip API, go straight to CLI. */
+/** Check circuit breaker status. 'open' = skip this model and fail fast. */
 export function getProviderStatus(provider: string): ProviderStatus {
   const state = getState(provider);
   if (state.circuitOpenedAt > 0) {
@@ -157,7 +156,7 @@ export function recordSuccess(provider: string): void {
  *    (retries are consumed at the adapter layer, not accumulated as consecutive failures).
  *  - `timeout` and `permanent` (auth/param) failures are reported immediately.
  * All three count toward the consecutive-failure threshold: after CIRCUIT_BREAKER_THRESHOLD
- * genuine failures in a row we open the circuit and fall back to CLI. `CIRCUIT_BREAKER_THRESHOLD`
+ * genuine failures in a row we open the circuit and fail the model fast. `CIRCUIT_BREAKER_THRESHOLD`
  * (3) is now measured in fully-retried invocations, which keeps it conservative but meaningful.
  *
  * `rateLimited` (a subset of `retryable`) additionally widens the adaptive throttle so we back

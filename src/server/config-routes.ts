@@ -81,6 +81,8 @@ const CustomProviderSchema = z.object({
   baseUrl: z.string().url(),
   modelIds: z.array(z.string().min(1)).min(1),
   apiKey: z.string().optional(),
+  // Which SDK the endpoint speaks — defaults to the broadest-compatible openai.
+  protocol: z.enum(['anthropic', 'openai']).optional(),
 });
 
 /** Build the config router (mounted under `/api` by routes.ts). */
@@ -200,7 +202,8 @@ export function createConfigRoutes(deps: ConfigRouteDeps): Hono {
         sanitizedName: sanitized,
         modelId,
         baseUrl: parsed.data.baseUrl,
-        credentialPath: credPath,
+        ...(parsed.data.protocol ? { protocol: parsed.data.protocol } : {}),
+        ...(credPath ? { credentialPath: credPath } : {}),
       });
       deps.loader.saveModelConfig(cfg);
       added.push(cfg.name);
@@ -214,8 +217,8 @@ export function createConfigRoutes(deps: ConfigRouteDeps): Hono {
   // POST /api/setup/rescan — discover credentials + models, non-destructive upsert.
   api.post('/setup/rescan', async (c) => {
     const credentialManager = new CredentialManager();
-    const report = await credentialManager.discoverAll();
-    const discovered = await discoverModels(credentialManager);
+    const report = credentialManager.discoverAll();
+    const discovered = await discoverModels();
 
     const existingNames = new Set(deps.loader.loadAllModelConfigs().map((m) => m.name));
     const added: string[] = [];
@@ -269,19 +272,20 @@ export function createConfigRoutes(deps: ConfigRouteDeps): Hono {
  * optimistic-lock token, echoed by PATCH; §4.3).
  */
 function toModelDTO(m: ModelConfig, version: string): ModelSettingDTO {
-  const isCustom = (m.provider ?? '').startsWith('custom:');
+  const isCustom = m.base_url !== undefined;
   const dto: ModelSettingDTO = {
     name: m.name,
     provider: m.provider,
-    invocation: m.invocation,
+    protocol: m.protocol,
     capabilities: m.capabilities,
     enabled: m.enabled,
     isCustom,
     // Existence only — never the file's contents (SEC-02).
-    hasCredentialFile: !!m.api_credential_path && existsSync(m.api_credential_path),
+    hasCredentialFile: !!m.api_key_path && existsSync(m.api_key_path),
     version,
   };
-  if (isCustom && m.api_base_url) dto.apiBaseUrl = m.api_base_url;
+  if (isCustom && m.base_url) dto.apiBaseUrl = m.base_url;
+  if (m.legacy_disabled_reason) dto.legacy_disabled_reason = m.legacy_disabled_reason;
   return dto;
 }
 

@@ -5,47 +5,36 @@
  * NOTE: These must stay in sync with the zod schemas.
  */
 
-export type InvocationMode = 'cli' | 'api' | 'auto';
+export type Protocol = 'anthropic' | 'openai';
 
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
 export interface ModelConfig {
   name: string;
-  invocation: InvocationMode;
-  provider?: string;  // pi-ai provider ID (dynamic, not a fixed enum)
-  model?: string;
-  timeout_seconds: number;
-  capabilities: string[];
-  priority: number;
-  max_concurrent: number;
-  resource_weight: number;
-  enabled: boolean;
+  protocol: Protocol;   // selects the SDK client (anthropic | openai)
+  model: string;        // wire model id passed to the endpoint
+  base_url?: string;    // omitted → official endpoint for the protocol
+
+  api_key_env?: string;
+  api_key_path?: string;
+  provider?: string;    // display / circuit-breaker key label (derived by default)
 
   // Reasoning & generation params
   reasoning_effort?: ReasoningEffort;
   temperature?: number;
   max_tokens?: number;
 
-  // CLI-specific
-  binary?: string;
-  model_args?: string[];
-  args?: string[];
-  input_mode?: 'stdin' | 'arg' | 'file';
-  output_mode?: 'stdout' | 'file' | 'json_field';
-  output_json_field?: string;
-  env?: Record<string, string>;
-  health_check?: {
-    command: string[];
-    expect_exit_code: number;
-    cache_seconds: number;
-    timeout_seconds: number;
-  };
-
-  // API-specific
-  api_credential_path?: string;
-  api_base_url?: string;
-  api_key_env?: string;
+  timeout_seconds: number;
+  capabilities: string[];
+  priority: number;
+  max_concurrent: number;
+  resource_weight: number;
+  enabled: boolean;
   streaming: boolean;
+
+  // Set by the schema_version 1→2 migration when a legacy model could not be
+  // auto-converted; the model stays visible but disabled with this reason.
+  legacy_disabled_reason?: string;
 }
 
 export interface CouncilConfig {

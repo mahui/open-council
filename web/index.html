@@ -53,7 +53,7 @@
               <button v-for="m in models" :key="m.name" type="button"
                 :class="{on: form.models.includes(m.name)}" @click="toggleModel(m.name)">
                 <span class="chip-name" v-text="m.name"></span>
-                <span class="chip-tag" v-if="m.invocation" v-text="m.invocation"></span>
+                <span class="chip-tag" v-if="m.protocol" v-text="m.protocol"></span>
               </button>
             </div>
           </div>
@@ -314,9 +314,10 @@
                 </div>
                 <div class="mr-meta">
                   <span v-if="m.provider" class="mr-provider" v-text="m.provider"></span>
-                  <span class="chip-tag" v-if="m.invocation" v-text="m.invocation"></span>
+                  <span class="chip-tag" v-if="m.protocol" v-text="m.protocol"></span>
                   <span v-if="m.apiBaseUrl" class="mr-url mono" v-text="m.apiBaseUrl"></span>
                   <span v-if="m.hasCredentialFile" class="mr-cred" title="已保存凭证文件">🔑 已保存凭证 ✓</span>
+                  <span v-if="m.legacy_disabled_reason" class="mr-legacy muted sm" :title="m.legacy_disabled_reason">⚠ 迁移禁用</span>
                 </div>
                 <label class="toggle" :title="m.enabled ? '点击禁用' : '点击启用'">
                   <input type="checkbox" :checked="m.enabled" :disabled="m._patching" @change="toggleModel(m)" />
@@ -350,7 +351,7 @@
 
           <!-- ===== 分区四：自定义端点 ===== -->
           <section class="set-section">
-            <h2 class="set-title">添加自定义端点 <span class="muted sm">（OpenAI 兼容）</span></h2>
+            <h2 class="set-title">添加自定义端点 <span class="muted sm">（标准 API：openai / anthropic 兼容）</span></h2>
             <div class="set-grid">
               <div class="field">
                 <label class="field-label">名称</label>
@@ -359,6 +360,13 @@
               <div class="field">
                 <label class="field-label">Base URL</label>
                 <input class="txt-input" type="text" v-model="settings.custom.baseUrl" placeholder="https://api.example.com/v1" />
+              </div>
+              <div class="field">
+                <label class="field-label">协议 <span class="hint">（端点使用的线协议）</span></label>
+                <select class="txt-input" v-model="settings.custom.protocol">
+                  <option value="openai">openai（OpenAI 兼容，默认）</option>
+                  <option value="anthropic">anthropic（Anthropic 兼容）</option>
+                </select>
               </div>
               <div class="field span-2">
                 <label class="field-label">模型 ID <span class="hint">（多个用逗号或换行分隔）</span></label>

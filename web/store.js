@@ -39,7 +39,7 @@ function freshSettings() {
     },
     base: null, prefer: [], models: [], readOnly: null,
     savingGeneral: false, savingPrefer: false,
-    custom: { name: '', baseUrl: '', modelIds: '', apiKey: '', saving: false, error: '', result: null },
+    custom: { name: '', baseUrl: '', modelIds: '', apiKey: '', protocol: 'openai', saving: false, error: '', result: null },
     rescanning: false, rescanError: '', rescanResult: null,
     conflict: null,
     _mock409Fired: false,
@@ -525,7 +525,7 @@ export function createStore() {
       if (!this.customValid() || c.saving) return;
       c.saving = true; c.error = ''; c.result = null;
       const modelIds = c.modelIds.split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
-      const body = { name: c.name.trim(), baseUrl: c.baseUrl.trim(), modelIds };
+      const body = { name: c.name.trim(), baseUrl: c.baseUrl.trim(), modelIds, protocol: c.protocol || 'openai' };
       if (c.apiKey) body.apiKey = c.apiKey;
       try {
         const res = MOCK
@@ -689,10 +689,10 @@ function mockRescan() {
 
 function mockModels() {
   return [
-    { name: 'claude-opus-4', provider: 'anthropic', invocation: 'api', capabilities: ['reasoning'] },
-    { name: 'claude-sonnet-4', provider: 'anthropic', invocation: 'api', capabilities: ['reasoning'] },
-    { name: 'gpt-4o', provider: 'openai', invocation: 'api', capabilities: ['reasoning'] },
-    { name: 'gemini-1.5-pro', provider: 'google', invocation: 'api', capabilities: ['long-context'] },
-    { name: 'deepseek-chat', provider: 'deepseek', invocation: 'cli', capabilities: ['reasoning'] },
+    { name: 'claude-opus-4', provider: 'anthropic', protocol: 'anthropic', capabilities: ['reasoning'] },
+    { name: 'claude-sonnet-4', provider: 'anthropic', protocol: 'anthropic', capabilities: ['reasoning'] },
+    { name: 'gpt-4o', provider: 'openai', protocol: 'openai', capabilities: ['reasoning'] },
+    { name: 'gemini-1.5-pro', provider: 'custom:gemini', protocol: 'openai', capabilities: ['long-context'] },
+    { name: 'deepseek-chat', provider: 'custom:deepseek', protocol: 'openai', capabilities: ['reasoning'] },
   ];
 }

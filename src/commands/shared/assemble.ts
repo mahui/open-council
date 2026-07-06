@@ -5,9 +5,7 @@
  */
 
 import type { ModelConfig } from '../../types/config.js';
-import { AutoAdapter } from '../../providers/adapter.js';
 import { ApiAdapter } from '../../providers/api-adapter.js';
-import { CliAdapter } from '../../providers/cli-adapter.js';
 import { CredentialManager } from '../../providers/credentials/discovery.js';
 import { ConfigLoader } from '../../config/loader.js';
 import { discoverModelsFromEnv } from '../../config/presets.js';
@@ -43,15 +41,17 @@ export interface ResolveModelsOptions {
 /** Discover all available provider credentials. */
 export async function discoverCredentials(): Promise<CredentialManager> {
   const credentialManager = new CredentialManager();
-  await credentialManager.discoverAll();
+  credentialManager.discoverAll();
   return credentialManager;
 }
 
-/** Build the auto adapter (API-first with CLI fallback) from discovered credentials. */
-export function buildAdapter(credentialManager: CredentialManager): AutoAdapter {
-  const apiAdapter = new ApiAdapter(credentialManager);
-  const cliAdapter = new CliAdapter();
-  return new AutoAdapter(apiAdapter, cliAdapter);
+/**
+ * Build the standard-API adapter. Key resolution is centralised in
+ * CredentialManager (env var / 0o600 key file, read at invoke time); the adapter
+ * delegates to it, so a fresh manager is all it needs.
+ */
+export function buildAdapter(): ApiAdapter {
+  return new ApiAdapter(new CredentialManager());
 }
 
 /**
@@ -59,7 +59,6 @@ export function buildAdapter(credentialManager: CredentialManager): AutoAdapter 
  * environment credential discovery.
  */
 export function resolveModels(
-  credentialManager: CredentialManager,
   options: ResolveModelsOptions = {},
 ): ResolvedModels {
   const loader = new ConfigLoader();
@@ -91,17 +90,17 @@ export function resolveModels(
         );
         process.stderr.write(formatConfigError(err, PATHS.config) + '\n');
         process.stderr.write('  运行 "council setup" 修复配置。\n');
-        models = discoverModelsFromEnv(credentialManager);
+        models = discoverModelsFromEnv();
       }
     } else {
       try {
         models = loader.loadAllModels();
       } catch {
-        models = discoverModelsFromEnv(credentialManager);
+        models = discoverModelsFromEnv();
       }
     }
   } else {
-    models = discoverModelsFromEnv(credentialManager);
+    models = discoverModelsFromEnv();
   }
 
   return { models, chairman, roleGenModel, minAgents, maxAgents, prefer, tuiMode };

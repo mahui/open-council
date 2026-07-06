@@ -49,15 +49,6 @@ export interface InvocationAdapter {
   healthCheck(config: ModelConfig): Promise<HealthStatus>;
 }
 
-export interface ProviderCredential {
-  access_token: string;
-  refresh_token?: string;
-  account_id?: string;
-  expires_at?: number;
-  project_id?: string;
-  source: 'env' | 'file';
-}
-
 export type CredentialStatus = 'valid' | 'refreshed' | 'expired' | 'not_found' | 'parse_error';
 
 export interface DiscoveryResult {

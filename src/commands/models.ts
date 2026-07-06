@@ -2,10 +2,8 @@ import { existsSync } from 'node:fs';
 import { confirm } from '@inquirer/prompts';
 import { PATHS } from '../config/paths.js';
 import { ConfigLoader } from '../config/loader.js';
-import { CredentialManager } from '../providers/credentials/discovery.js';
-import { AutoAdapter } from '../providers/adapter.js';
 import { ApiAdapter } from '../providers/api-adapter.js';
-import { CliAdapter } from '../providers/cli-adapter.js';
+import { CredentialManager } from '../providers/credentials/discovery.js';
 import { getHealthSummary, resetCircuitBreaker } from '../providers/health.js';
 import { formatModelLine } from '../shared/format-model.js';
 import { formatConfigError } from '../shared/config-errors.js';
@@ -57,12 +55,7 @@ export async function runModelsCheck(): Promise<void> {
 
   const loader = new ConfigLoader();
   const models = loader.loadAllModels();
-  const credManager = new CredentialManager();
-  await credManager.discoverAll();
-
-  const apiAdapter = new ApiAdapter(credManager);
-  const cliAdapter = new CliAdapter();
-  const adapter = new AutoAdapter(apiAdapter, cliAdapter);
+  const adapter = new ApiAdapter(new CredentialManager());
 
   process.stderr.write('\nChecking model health...\n');
 

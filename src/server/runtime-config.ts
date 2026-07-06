@@ -14,14 +14,12 @@
 
 import type { InvocationAdapter } from '../types/provider.js';
 import type { ModelConfig } from '../types/config.js';
-import { AutoAdapter } from '../providers/adapter.js';
 import { ApiAdapter } from '../providers/api-adapter.js';
-import { CliAdapter } from '../providers/cli-adapter.js';
-import type { CredentialManager } from '../providers/credentials/discovery.js';
+import { CredentialManager } from '../providers/credentials/discovery.js';
 import type { ConfigLoader } from '../config/loader.js';
 
 export interface RuntimeSnapshot {
-  /** Invocation adapter (API-first, CLI fallback). */
+  /** Standard-API invocation adapter. */
   adapter: InvocationAdapter;
   /** Enabled model set — feeds orchestration (disabled models never debate). */
   models: ModelConfig[];
@@ -53,9 +51,13 @@ export class RuntimeConfig {
   }
 }
 
-/** Build the auto adapter (API-first with CLI fallback) from a credential set. */
-export function buildAutoAdapter(credentialManager: CredentialManager): InvocationAdapter {
-  return new AutoAdapter(new ApiAdapter(credentialManager), new CliAdapter());
+/**
+ * Build the standard-API adapter. Key resolution is centralised in
+ * CredentialManager (env var / 0o600 key file, read at invoke time); the adapter
+ * delegates to it, so a fresh manager is all it needs.
+ */
+export function buildAutoAdapter(): InvocationAdapter {
+  return new ApiAdapter(new CredentialManager());
 }
 
 /**
@@ -78,7 +80,7 @@ export function buildSnapshot(opts: {
   const minAgents = config?.general.min_agents ?? 2;
   const maxAgents = config?.general.max_agents ?? 5;
   const preferOrder = config?.routing.default.prefer ?? [];
-  const adapter = opts.adapter ?? buildAutoAdapter(opts.credentialManager);
+  const adapter = opts.adapter ?? buildAutoAdapter();
   return { adapter, models, allModels, defaultChairman, roleGenModel, minAgents, maxAgents, preferOrder };
 }
 
@@ -93,6 +95,6 @@ export function reloadRuntime(
   credentialManager: CredentialManager,
   opts: { rebuildAdapter?: boolean } = {},
 ): void {
-  const adapter = opts.rebuildAdapter ? buildAutoAdapter(credentialManager) : runtime.current.adapter;
+  const adapter = opts.rebuildAdapter ? buildAutoAdapter() : runtime.current.adapter;
   runtime.replace(buildSnapshot({ loader, credentialManager, adapter }));
 }

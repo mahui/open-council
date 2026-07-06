@@ -2,7 +2,7 @@
  * Unified model-line formatting shared across `council models`, the REPL and the
  * setup wizard so every surface presents a model the same way:
  *
- *   name  provider/model-id  [invocation]  (chairman⭐)
+ *   name  provider/model-id  [protocol]  (chairman⭐)
  *
  * Keeping a single formatter avoids the three divergent layouts we had before.
  */
@@ -19,7 +19,7 @@ export interface FormatModelOptions {
 export function formatModelLine(m: ModelConfig, options: FormatModelOptions = {}): string {
   const name = options.nameWidth ? m.name.padEnd(options.nameWidth) : m.name;
   const providerModel = `${m.provider ?? 'custom'}/${m.model ?? '—'}`;
-  const parts = [name, providerModel, `[${m.invocation}]`];
+  const parts = [name, providerModel, `[${m.protocol}]`];
   if (options.chairman) parts.push('(chairman⭐)');
   return parts.join('  ');
 }

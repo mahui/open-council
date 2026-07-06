@@ -43,10 +43,7 @@ function buildModelDescription(m: ModelConfig): string {
   const id = m.model ?? m.name;
 
   // Provider
-  traits.push(`provider: ${m.provider}`);
-
-  // Invocation
-  traits.push(m.invocation === 'cli' ? 'CLI mode' : 'API mode');
+  traits.push(`provider: ${m.provider ?? m.protocol}`);
 
   // Infer capability tier from model name (shared heuristic)
   traits.push(CAPABILITY_TRAIT[rateModelCapability(m)]!);
@@ -217,7 +214,7 @@ function pickFastestModel(models: ModelConfig[]): ModelConfig | null {
   const priorities = [
     (m: ModelConfig) => m.model?.includes('haiku'),
     (m: ModelConfig) => m.model?.includes('flash'),
-    (m: ModelConfig) => m.invocation === 'api',
+    (m: ModelConfig) => m.model?.includes('mini') || m.model?.includes('nano'),
     (_m: ModelConfig) => true,
   ];
   for (const check of priorities) {
