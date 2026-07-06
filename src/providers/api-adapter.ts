@@ -15,16 +15,30 @@ import { throttle, recordSuccess, recordFailure, getProviderStatus } from './hea
 import { classifyError, isRateLimit } from './error-classifier.js';
 
 /**
+ * Every Google-family provider that may hold a callable credential or list a model.
+ * A model discovered under any one of these (e.g. `google-vertex` via the discovery
+ * OAUTH_ALSO_TRY table) must be resolvable against the shared Google OAuth credential
+ * at call time — so all four keys map to this same candidate set. `resolveModel`
+ * re-sorts by credential strength, so the list order here is not significant.
+ */
+const GOOGLE_FAMILY = ['google-antigravity', 'google-gemini-cli', 'google', 'google-vertex'];
+
+/**
  * Map from provider names (legacy or pi-ai) to all related pi-ai providers.
  * Used to expand a single provider into all places a model might live.
+ *
+ * INVARIANT (asserted by test/providers/table-symmetry.test.ts): every provider that
+ * the discovery-time OAUTH_ALSO_TRY table can attach to a discovered model must have a
+ * key here, or that model would be undiscoverable-then-uncallable (the google-vertex bug).
  */
-const RELATED_PROVIDERS: Record<string, string[]> = {
+export const RELATED_PROVIDERS: Record<string, string[]> = {
   'anthropic': ['anthropic'],
   'openai': ['openai', 'openai-codex'],
   'openai-codex': ['openai-codex', 'openai'],
-  'google': ['google-antigravity', 'google-gemini-cli', 'google'],
-  'google-gemini-cli': ['google-antigravity', 'google-gemini-cli', 'google'],
-  'google-antigravity': ['google-antigravity', 'google-gemini-cli', 'google'],
+  'google': GOOGLE_FAMILY,
+  'google-gemini-cli': GOOGLE_FAMILY,
+  'google-antigravity': GOOGLE_FAMILY,
+  'google-vertex': GOOGLE_FAMILY,
   'github-copilot': ['github-copilot'],
 };
 

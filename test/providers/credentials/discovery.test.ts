@@ -88,6 +88,20 @@ describe('CredentialManager.discoverAll — env vars', () => {
     expect(mgr.hasCredential('openai')).toBe(false);
     await expect(mgr.getApiKey('openai')).rejects.toThrow(CredentialNotFoundError);
   });
+
+  it('a google-vertex model resolves onto the shared Google credential (no dedicated Vertex cred)', async () => {
+    // Real user env: gemini-2.5-pro.yaml saved with provider google-vertex, but only the
+    // Google credential is present. LEGACY_TO_PIAI['google-vertex'] must fall back to it.
+    vi.mocked(getEnvApiKey).mockImplementation((provider: unknown) => (provider === 'google' ? 'sk-env-google' : undefined));
+
+    const mgr = new CredentialManager();
+    await mgr.discoverAll();
+
+    expect(mgr.hasCredential('google-vertex')).toBe(true);
+    await expect(mgr.getApiKey('google-vertex')).resolves.toBe('sk-env-google');
+    // getPiaiProvider redirects the orphan Vertex name onto a callable, credentialed provider.
+    expect(mgr.getPiaiProvider('google-vertex')).toBe('google');
+  });
 });
 
 describe('CredentialManager.discoverAll — legacy codex auth.json (~/.codex/auth.json)', () => {

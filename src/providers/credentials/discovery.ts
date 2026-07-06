@@ -13,11 +13,18 @@ import type { DiscoveryReport } from '../../types/provider.js';
 import { CredentialNotFoundError } from '../../types/errors.js';
 import { PATHS, KNOWN_CREDENTIALS } from '../../config/paths.js';
 
-/** Maps legacy provider names (used in ModelConfig) to pi-ai provider IDs. */
-const LEGACY_TO_PIAI: Record<string, string[]> = {
+/**
+ * Maps legacy/config provider names to the pi-ai provider IDs whose cached credentials
+ * can serve them. `google-vertex` is listed both as a member of the `google` family and
+ * as its own key so a model saved with `provider: google-vertex` resolves onto the shared
+ * Google OAuth credential (Vertex ships no dedicated cred here). Keep in sync with the
+ * call-time RELATED_PROVIDERS table in api-adapter.ts.
+ */
+export const LEGACY_TO_PIAI: Record<string, string[]> = {
   'anthropic': ['anthropic'],
   'openai': ['openai', 'openai-codex'],
-  'google': ['google', 'google-gemini-cli', 'google-antigravity'],
+  'google': ['google', 'google-gemini-cli', 'google-antigravity', 'google-vertex'],
+  'google-vertex': ['google-vertex', 'google', 'google-gemini-cli', 'google-antigravity'],
 };
 
 /** Reverse: pi-ai provider → legacy provider name */
@@ -28,6 +35,7 @@ const PIAI_TO_LEGACY: Record<string, string> = {
   'google': 'google',
   'google-gemini-cli': 'google',
   'google-antigravity': 'google',
+  'google-vertex': 'google',
   'github-copilot': 'github-copilot',
 };
 

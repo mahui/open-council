@@ -22,7 +22,7 @@ export interface DiscoveredModel {
  * be listed. E.g. a google-gemini-cli credential can also call models listed
  * under the 'google' provider.
  */
-const OAUTH_ALSO_TRY: Record<string, string[]> = {
+export const OAUTH_ALSO_TRY: Record<string, string[]> = {
   'google-gemini-cli': ['google'],
   'google-antigravity': ['google', 'google-vertex'],
   'openai-codex': ['openai'],
