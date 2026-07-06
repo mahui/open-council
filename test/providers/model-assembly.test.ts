@@ -19,7 +19,7 @@ import {
 } from '../../src/providers/model-assembly.js';
 import type { DiscoveredModel } from '../../src/providers/model-discovery.js';
 import type { ModelConfig } from '../../src/types/config.js';
-import { MODEL_CATALOG } from '../../src/shared/model-catalog.js';
+import { MODEL_CATALOG, MODEL_TIER_RULES } from '../../src/shared/model-catalog.js';
 import { PATHS } from '../../src/config/paths.js';
 
 /** An official model (no base_url) — the default shape most tests want. */
@@ -199,6 +199,33 @@ describe('selectBestChairman', () => {
 
   it('an empty config list returns undefined', () => {
     expect(selectBestChairman([])).toBeUndefined();
+  });
+
+  // Tightest possible tier-boundary case: the highest flagshipRank a model can
+  // carry while STAYING in capability tier 2 is 8 (gpt-5 family — rank 9 belongs
+  // to /opus/, which is itself tier 3, so no tier-2 model can reach it). That
+  // gives tier 2 its maximum possible score (2*10+8=28). A tier-3 model with the
+  // *minimum* bonus (rank 0, score 3*10+0=30) still wins by exactly 2 — proving
+  // the doc comment's claim ("the ×10 gap between tiers can never be closed by
+  // the bonus") holds even at its narrowest margin, not just in the wide-margin
+  // cases covered above.
+  it('narrowest possible tier boundary: tier-2 model at its maximum in-tier bonus (gpt-5 family, rank 8) still loses to a tier-3 model with zero bonus (margin of exactly 2)', () => {
+    const tier2MaxBonus = makeModel({ name: 'gpt-5-turbo', model: 'gpt-5-turbo', protocol: 'openai' }); // tier 2, rank 8 → score 28
+    const tier3ZeroBonus = makeModel({
+      name: 'gemini-compat', model: 'gemini-2.5-pro', protocol: 'openai', base_url: 'https://x.example.com/v1',
+    }); // tier 3 ("pro"), rank 0 → score 30
+
+    expect(selectBestChairman([tier2MaxBonus, tier3ZeroBonus])?.name).toBe('gemini-compat');
+  });
+
+  // Structural invariant behind the boundary test above: if a future rule were
+  // added with rank >= 10, the family bonus alone could vault a tier-2 model
+  // (score up to 2*10+rank) past a tier-3 model with zero bonus (score 30),
+  // silently breaking the "×10 gap can never be closed" guarantee documented on
+  // selectBestChairman. Pin the invariant down structurally, not just by example.
+  it('MODEL_TIER_RULES: every rank stays below 10 (the bonus can never close a full capability-tier gap)', () => {
+    const maxRank = Math.max(...MODEL_TIER_RULES.map(r => r.rank));
+    expect(maxRank).toBeLessThan(10);
   });
 });
 

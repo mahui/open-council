@@ -115,6 +115,15 @@ describe('models: removeModelConfig', () => {
     expect(loader.deleteModelConfig('gpt-4o')).toBe(true);
     expect(loader.deleteModelConfig('gpt-4o')).toBe(false);
   });
+
+  // Regression pin: a `:name` crafted with path-traversal segments must never
+  // resolve outside the models directory. Current behaviour is `safePath`
+  // throwing a plain Error synchronously (not a typed/friendly error) — this
+  // test only pins that defense down, not the error's shape/friendliness.
+  // Friendlier error handling for this path is tracked separately (backlog #13).
+  it('deleteModelConfig rejects a path-traversal name instead of deleting/reading outside the models dir', () => {
+    expect(() => loader.deleteModelConfig('../../evil')).toThrow(/Path traversal/i);
+  });
 });
 
 describe('models: setModelEnabled', () => {

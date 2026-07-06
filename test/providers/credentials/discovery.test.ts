@@ -242,8 +242,20 @@ describe('CredentialManager.resolveOfficialKey — official-endpoint key resolut
   });
 
   it('reads ONLY the env var — never a custom-<name>.key file (those bind to a base_url, not a protocol)', () => {
-    // No env set; even with custom key files on disk, official resolution stays null.
-    expect(new CredentialManager().resolveOfficialKey('anthropic')).toBeNull();
+    // Real file on disk under a tmpdir PATHS.credentials, no env set: if
+    // resolveOfficialKey consulted key files at all it would find this one and
+    // return its contents. It must stay null, proving the method truly never
+    // looks at the filesystem.
+    const originalCredentialsDir = PATHS.credentials;
+    const dir = mkdtempSync(join(tmpdir(), 'oc-cred-official-'));
+    (PATHS as { credentials: string }).credentials = dir;
+    try {
+      writeFileSync(join(dir, 'custom-anthropic.key'), 'sk-file-should-be-ignored', { mode: 0o600 });
+      expect(new CredentialManager().resolveOfficialKey('anthropic')).toBeNull();
+    } finally {
+      (PATHS as { credentials: string }).credentials = originalCredentialsDir;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
