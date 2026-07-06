@@ -88,3 +88,40 @@ export function rateModelCapability(m: ModelConfig): number {
   if (/haiku|mini|lite|spark/i.test(id)) return 1;
   return 2;
 }
+
+/**
+ * Ordered model-family tier rules matched against a lowercased model id
+ * (family-level regex, NOT exact id — so newly-released ids in a known family,
+ * e.g. a future `claude-opus-4-7`, still rank without a catalog edit). First
+ * matching rule wins. Single source of truth for BOTH {@link flagshipRank}
+ * (chairman tie-break strength) and {@link isRecommendedModel} (default debate
+ * participant), so the two never drift apart.
+ */
+export interface ModelTierRule {
+  readonly pattern: RegExp; // family matcher against a lowercased id
+  readonly rank: number; // flagship strength (chairman tie-break); higher = stronger
+  readonly recommended: boolean; // default debate participant? (excludes mini/nano/lite)
+}
+
+export const MODEL_TIER_RULES: readonly ModelTierRule[] = [
+  { pattern: /opus/, rank: 9, recommended: true },
+  { pattern: /gpt-5(?!.*(mini|nano))/, rank: 8, recommended: true },
+  { pattern: /^o3$/, rank: 7, recommended: true },
+  { pattern: /claude-sonnet-4|claude-3-5-sonnet/, rank: 5, recommended: true },
+  { pattern: /^o4$/, rank: 5, recommended: true },
+  { pattern: /gpt-4o$/, rank: 4, recommended: true },
+];
+
+/** Flagship strength of a model id (0 = no known flagship family). */
+export function flagshipRank(id: string): number {
+  const lower = id.toLowerCase();
+  for (const r of MODEL_TIER_RULES) if (r.pattern.test(lower)) return r.rank;
+  return 0;
+}
+
+/** Is this id a recommended default debate participant? */
+export function isRecommendedModel(id: string): boolean {
+  const lower = id.toLowerCase();
+  for (const r of MODEL_TIER_RULES) if (r.pattern.test(lower)) return r.recommended;
+  return false;
+}

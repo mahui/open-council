@@ -19,9 +19,8 @@
 import { join } from 'node:path';
 import type { DiscoveredModel } from './model-discovery.js';
 import type { ModelConfig, Protocol } from '../types/config.js';
-import { rateModelCapability } from '../shared/model-catalog.js';
+import { rateModelCapability, flagshipRank, MODEL_CATALOG } from '../shared/model-catalog.js';
 import { PATHS } from '../config/paths.js';
-import { MODEL_CATALOG } from '../shared/model-catalog.js';
 
 /** A discovered model paired with the (collision-resolved) name it will be saved under. */
 export interface NamedModel {
@@ -114,24 +113,19 @@ export function modelDedupeKey(m: { name: string; base_url?: string }): string {
 
 /**
  * Pick the strongest model to act as Chairman. The base tier reuses the shared
- * core heuristic ({@link rateModelCapability}); a flagship-id bonus only breaks
- * ties within a tier, so the coarse capability judgement stays in one place.
+ * capability heuristic ({@link rateModelCapability}, ×10); the family-level
+ * {@link flagshipRank} (0–9) only breaks ties *within* a tier — the ×10 gap
+ * between tiers can never be closed by the bonus. Both the coarse capability
+ * judgement and the flagship ranking now live in the shared catalog, so no
+ * model-family knowledge is duplicated here. The former hardcoded flagship-bonus
+ * table (including its dead Google-OpenAI-compat proxy entries) is gone: those
+ * ids are not valid official-protocol ids, and a proxied `*-pro` flagship still
+ * ranks tier 3 via `rateModelCapability`'s `pro` match (see the compat case in
+ * test/providers/model-assembly.test.ts).
  */
 export function selectBestChairman(configs: ModelConfig[]): ModelConfig | undefined {
-  const flagshipBonus = (id: string): number => {
-    if (/opus/.test(id)) return 9;
-    if (/gpt-5/.test(id)) return 8;
-    if (/^o3$/.test(id)) return 7;
-    if (/gemini-2\.5-pro/.test(id)) return 6;
-    if (/claude-sonnet-4|claude-3-5-sonnet/.test(id)) return 5;
-    if (/gpt-4o$/.test(id)) return 4;
-    if (/gemini-pro/.test(id)) return 3;
-    return 0;
-  };
-  const score = (m: ModelConfig): number => {
-    const id = (m.model ?? m.name).toLowerCase();
-    return rateModelCapability(m) * 10 + flagshipBonus(id);
-  };
+  const score = (m: ModelConfig): number =>
+    rateModelCapability(m) * 10 + flagshipRank(m.model ?? m.name);
   return [...configs].sort((a, b) => score(b) - score(a))[0];
 }
 

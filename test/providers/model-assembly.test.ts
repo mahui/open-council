@@ -188,6 +188,15 @@ describe('selectBestChairman', () => {
     expect(selectBestChairman([genericGpt4o, geminiViaCompat])?.name).toBe('gemini-compat');
   });
 
+  it('gpt-5-mini no longer out-ranks a genuine same-tier flagship (gpt-4o) — old /gpt-5/ bonus bug fixed', () => {
+    // Both are capability tier 2; the flagship tie-break must go to gpt-4o (rank 4)
+    // now that gpt-5-mini is excluded from the gpt-5 flagship family (rank 0).
+    const mini = makeModel({ name: 'gpt-5-mini', model: 'gpt-5-mini', protocol: 'openai' });
+    const gpt4o = makeModel({ name: 'gpt-4o', model: 'gpt-4o', protocol: 'openai' });
+
+    expect(selectBestChairman([mini, gpt4o])?.name).toBe('gpt-4o');
+  });
+
   it('an empty config list returns undefined', () => {
     expect(selectBestChairman([])).toBeUndefined();
   });
