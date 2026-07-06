@@ -139,6 +139,19 @@ export class ConfigLoader {
     writeFileSync(path, stringifyYaml(config), { mode: 0o600 });
   }
 
+  /**
+   * Delete a single model YAML by name. Returns true when a file was removed,
+   * false when no such model existed (so callers can surface a "not found"
+   * error). `safePath` blocks path traversal via a crafted `:name`.
+   */
+  deleteModelConfig(name: string): boolean {
+    const modelsDir = join(this.configDir, 'models');
+    const path = safePath(modelsDir, `${name}.yaml`);
+    if (!existsSync(path)) return false;
+    unlinkSync(path);
+    return true;
+  }
+
   /** Whether any model YAML files exist in the models directory (ignores the enabled flag). */
   hasModelConfigs(): boolean {
     const modelsDir = join(this.configDir, 'models');

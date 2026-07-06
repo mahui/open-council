@@ -114,6 +114,26 @@ modelsCmd.command('check').description('Health check all models').action(async (
   await runModelsCheck();
 });
 
+modelsCmd.command('add').description('Add a model (discover official or add a custom endpoint)').action(async () => {
+  const { runModelsAdd } = await import('./commands/models.js');
+  await runModelsAdd();
+});
+
+modelsCmd.command('remove <name>').description('Remove a model by name').action(async (name: string) => {
+  const { runModelsRemove } = await import('./commands/models.js');
+  runModelsRemove(name);
+});
+
+modelsCmd.command('enable <name>').description('Enable a model by name').action(async (name: string) => {
+  const { runModelsEnable } = await import('./commands/models.js');
+  runModelsEnable(name);
+});
+
+modelsCmd.command('disable <name>').description('Disable a model by name').action(async (name: string) => {
+  const { runModelsDisable } = await import('./commands/models.js');
+  runModelsDisable(name);
+});
+
 // Default action for `council models` (no subcommand)
 modelsCmd.action(async () => {
   const { runModelsList } = await import('./commands/models.js');
