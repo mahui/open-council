@@ -90,6 +90,7 @@ export class DebateManager {
         { min: snapshot.minAgents, max: snapshot.maxAgents },
         snapshot.roleGenModel,
         explicitRoleSet,
+        snapshot.preferOrder,
       );
 
       const runOptions: RunOptions = {

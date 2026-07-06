@@ -35,6 +35,8 @@ export interface RuntimeSnapshot {
   minAgents: number;
   /** Maximum agent seats for all multi-agent modes (config general.max_agents). */
   maxAgents: number;
+  /** Ordered model preference (config routing.default.prefer) — drives role-gen candidate ordering. */
+  preferOrder: string[];
 }
 
 export class RuntimeConfig {
@@ -75,8 +77,9 @@ export function buildSnapshot(opts: {
   const roleGenModel = roleGenName ? models.find(m => m.name === roleGenName) : undefined;
   const minAgents = config?.general.min_agents ?? 2;
   const maxAgents = config?.general.max_agents ?? 5;
+  const preferOrder = config?.routing.default.prefer ?? [];
   const adapter = opts.adapter ?? buildAutoAdapter(opts.credentialManager);
-  return { adapter, models, allModels, defaultChairman, roleGenModel, minAgents, maxAgents };
+  return { adapter, models, allModels, defaultChairman, roleGenModel, minAgents, maxAgents, preferOrder };
 }
 
 /**

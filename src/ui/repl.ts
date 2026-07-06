@@ -50,6 +50,8 @@ interface ReplState {
   /** Agent-seat bounds from council.yaml (general.min_agents / max_agents). */
   minAgents?: number;
   maxAgents?: number;
+  /** Ordered model preference from council.yaml (routing.default.prefer). */
+  prefer?: string[];
   credentialManager: CredentialManager;
   adapter: AutoAdapter;
   sessionCount: number;
@@ -75,6 +77,7 @@ export async function startRepl(): Promise<void> {
   let roleGenModel: ModelConfig | undefined;
   let minAgents: number | undefined;
   let maxAgents: number | undefined;
+  let prefer: string[] | undefined;
   const loader = new ConfigLoader();
 
   if (loader.isConfigured()) {
@@ -85,6 +88,7 @@ export async function startRepl(): Promise<void> {
       roleGenModel = resolveRoleGenModel(config.general.role_generator_model, models);
       minAgents = config.general.min_agents;
       maxAgents = config.general.max_agents;
+      prefer = config.routing.default.prefer;
     } catch (err) {
       process.stderr.write(`\r${YELLOW}⚠ 配置无法加载，已回落到环境变量发现的模型（可能与你配置的模型不同）。${RESET}\n`);
       process.stderr.write(formatConfigError(err, PATHS.config) + '\n');
@@ -111,6 +115,7 @@ export async function startRepl(): Promise<void> {
             roleGenModel = resolveRoleGenModel(config.general.role_generator_model, models);
             minAgents = config.general.min_agents;
             maxAgents = config.general.max_agents;
+            prefer = config.routing.default.prefer;
           } catch (err) {
             process.stderr.write(formatConfigError(err, PATHS.config) + '\n');
           }
@@ -142,6 +147,7 @@ export async function startRepl(): Promise<void> {
     roleGenModel,
     minAgents,
     maxAgents,
+    prefer,
     credentialManager,
     adapter,
     sessionCount: 0,
@@ -238,6 +244,7 @@ async function handleCommand(input: string, state: ReplState): Promise<void> {
             state.roleGenModel = resolveRoleGenModel(config.general.role_generator_model, state.models);
             state.minAgents = config.general.min_agents;
             state.maxAgents = config.general.max_agents;
+            state.prefer = config.routing.default.prefer;
             process.stderr.write(`  ${GREEN}✓${RESET} Configuration reloaded.\n`);
           } catch (err) {
             process.stderr.write(`  ${YELLOW}⚠ Config reload failed: ${err instanceof Error ? err.message : err}${RESET}\n`);
@@ -316,6 +323,8 @@ async function handleQuestion(question: string, state: ReplState): Promise<void>
     state.chairman,
     { min: state.minAgents, max: state.maxAgents },
     state.roleGenModel,
+    undefined,
+    state.prefer,
   );
 
   const runOptions: RunOptions = {

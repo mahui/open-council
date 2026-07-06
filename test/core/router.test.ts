@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { resolveMode, classifyQuestion, allocateSeats } from '../../src/core/router.js';
-import type { ModelConfig, CouncilConfig, RoleSet } from '../../src/types/config.js';
+import { resolveMode, classifyQuestion, effectiveLength } from '../../src/core/router.js';
+import type { ModelConfig, CouncilConfig } from '../../src/types/config.js';
 
 function makeModel(name: string, provider: string, caps: string[] = ['general'], priority = 100): ModelConfig {
   return {
@@ -18,7 +18,7 @@ function makeModel(name: string, provider: string, caps: string[] = ['general'],
   };
 }
 
-/** Minimal but complete `general` config block, with sensible defaults, for allocateSeats(). */
+/** Minimal but complete `general` config block, with sensible defaults, for resolveMode(). */
 function makeGeneralConfig(overrides: Partial<CouncilConfig['general']> = {}): Pick<CouncilConfig, 'general'> {
   return {
     general: {
@@ -102,6 +102,18 @@ describe('resolveMode', () => {
     expect(decision.reason).toBe('Short general question');
   });
 
+  // CJK weighting (effectiveLength): a compact Chinese architecture question
+  // carries enough information density to clear the >50 debate threshold, where
+  // its raw char count (< 50) previously never would.
+  it('routes an information-dense Chinese architecture question to debate', () => {
+    const decision = resolveMode(
+      '请详细分析如何设计一个高可用的分布式缓存系统的整体架构与容错方案',
+      models,
+    );
+    expect(decision.questionType).toBe('architecture');
+    expect(decision.mode).toBe('debate');
+  });
+
   it('respects the configured max_agents when estimating calls for a debate', () => {
     const three = [...models, makeModel('gpt', 'openai')];
     const decision = resolveMode(
@@ -174,184 +186,50 @@ describe('classifyQuestion', () => {
   });
 });
 
-describe('allocateSeats', () => {
-  it('should allocate agents for available models', () => {
-    const models = [
-      makeModel('claude', 'anthropic'),
-      makeModel('gemini', 'google'),
-    ];
-
-    const result = allocateSeats({
-      models,
-      options: { mode: 'compare' },
-      questionType: 'general',
-      resolvedMode: 'compare',
-    });
-
-    expect(result.agents.length).toBeGreaterThan(0);
-    expect(result.chairmanId).toBeDefined();
+describe('effectiveLength', () => {
+  it('counts each Latin character as 1 (equivalent to raw length)', () => {
+    expect(effectiveLength('hello world')).toBe('hello world'.length);
   });
 
-  it('should return empty for no models', () => {
-    const result = allocateSeats({
-      models: [],
-      options: { mode: 'compare' },
-      questionType: 'general',
-      resolvedMode: 'compare',
-    });
-
-    expect(result.agents).toHaveLength(0);
+  it('trims surrounding whitespace before measuring', () => {
+    expect(effectiveLength('   hi   ')).toBe(2);
   });
 
-  it('caps seats at the model count in quick mode', () => {
-    const models = [makeModel('claude', 'anthropic'), makeModel('gemini', 'google'), makeModel('gpt', 'openai')];
-    const result = allocateSeats({
-      models,
-      options: { mode: 'quick' },
-      questionType: 'general',
-      resolvedMode: 'quick',
-      config: makeGeneralConfig({ max_agents: 2 }),
-    });
-    // Quick mode: min(models.length, maxAgents) = min(3, 2) = 2 seats.
-    expect(result.agents).toHaveLength(2);
+  it('weights each CJK character as 2.5', () => {
+    // 2 ideographs × 2.5 = 5
+    expect(effectiveLength('架构')).toBe(5);
   });
 
-  it('reuses models round-robin to reach min_agents when a single model is available', () => {
-    const models = [makeModel('claude', 'anthropic')];
-    const result = allocateSeats({
-      models,
-      options: { mode: 'quick' },
-      questionType: 'general',
-      resolvedMode: 'quick',
-      config: makeGeneralConfig({ min_agents: 3, max_agents: 5 }),
-    });
-    // Quick mode allocates 1 seat initially, then the min-seats loop tops up to 3.
-    expect(result.agents).toHaveLength(3);
-    expect(result.agents.every(a => a.config.name === 'claude')).toBe(true);
+  it('floors the weighted total to an integer', () => {
+    // 1 ideograph × 2.5 = 2.5 → floor 2
+    expect(effectiveLength('架')).toBe(2);
   });
 
-  it('stops allocating once models run out when same-model reuse is disallowed', () => {
-    const models = [makeModel('claude', 'anthropic'), makeModel('gemini', 'google')];
-    const result = allocateSeats({
-      models,
-      options: { mode: 'compare' },
-      questionType: 'general',
-      resolvedMode: 'compare',
-      config: makeGeneralConfig({ min_agents: 2, max_agents: 5, allow_same_model_agents: false }),
-    });
-    // 5 default roles requested but only 2 distinct models exist and reuse is disallowed.
-    expect(result.agents).toHaveLength(2);
+  it('mixes CJK and Latin weights', () => {
+    // 2 CJK × 2.5 + 3 Latin = 8
+    expect(effectiveLength('中文abc')).toBe(8);
   });
 
-  it('prefers a model whose capabilities match the question type over the round-robin default', () => {
-    const models = [
-      makeModel('generalist', 'anthropic', ['general'], 10),
-      makeModel('coder', 'openai', ['code'], 90),
-    ];
-    const result = allocateSeats({
-      models,
-      options: { mode: 'compare' },
-      questionType: 'code',
-      resolvedMode: 'compare',
-      config: makeGeneralConfig({ min_agents: 2, max_agents: 2 }),
-    });
-    // Seat 0 would default to 'generalist' (index 0), but 'coder' has the
-    // required 'code' capability and is unused, so it should be preferred.
-    expect(result.agents[0]!.config.name).toBe('coder');
+  it('makes a Chinese architecture question outweigh its raw char count', () => {
+    const q = '如何设计一个高可用的分布式缓存系统架构方案';
+    expect(effectiveLength(q)).toBeGreaterThan(q.length);
+  });
+});
+
+describe('resolveMode — CJK architecture questions clear the lowered gate', () => {
+  const models = [
+    { name: 'a', invocation: 'api', provider: 'anthropic', timeout_seconds: 120, capabilities: ['general'], priority: 100, max_concurrent: 1, resource_weight: 1, enabled: true, streaming: true },
+    { name: 'b', invocation: 'api', provider: 'openai', timeout_seconds: 120, capabilities: ['general'], priority: 90, max_concurrent: 1, resource_weight: 1, enabled: true, streaming: true },
+    { name: 'c', invocation: 'api', provider: 'google', timeout_seconds: 120, capabilities: ['general'], priority: 80, max_concurrent: 1, resource_weight: 1, enabled: true, streaming: true },
+  ] as never[];
+
+  it('典型 17 字中文架构问题（有效长度 ~43）进入 debate', () => {
+    const d = resolveMode('如何设计一个高可用的分布式缓存系统？', models);
+    expect(d.mode).toBe('debate');
   });
 
-  it('assigns the chairman by explicit name when provided', () => {
-    const models = [makeModel('claude', 'anthropic'), makeModel('gemini', 'google')];
-    const result = allocateSeats({
-      models,
-      options: { mode: 'compare', chairman: 'gemini' },
-      questionType: 'general',
-      resolvedMode: 'compare',
-    });
-    const chairman = result.agents.find(a => a.is_chairman);
-    expect(chairman?.config.name).toBe('gemini');
-  });
-
-  it('assigns a devil\'s advocate in debate mode with 3+ agents', () => {
-    const models = [makeModel('claude', 'anthropic'), makeModel('gemini', 'google'), makeModel('gpt', 'openai')];
-    const result = allocateSeats({
-      models,
-      options: { mode: 'debate' },
-      questionType: 'general',
-      resolvedMode: 'debate',
-      config: makeGeneralConfig({ min_agents: 3, max_agents: 3 }),
-    });
-    expect(result.agents.filter(a => a.is_devil_advocate)).toHaveLength(1);
-    // Devil's advocate must never be the chairman.
-    expect(result.agents.find(a => a.is_devil_advocate)?.is_chairman).toBe(false);
-  });
-
-  it('does not assign a devil\'s advocate outside debate mode', () => {
-    const models = [makeModel('claude', 'anthropic'), makeModel('gemini', 'google'), makeModel('gpt', 'openai')];
-    const result = allocateSeats({
-      models,
-      options: { mode: 'compare' },
-      questionType: 'general',
-      resolvedMode: 'compare',
-      config: makeGeneralConfig({ min_agents: 3, max_agents: 3 }),
-    });
-    expect(result.agents.some(a => a.is_devil_advocate)).toBe(false);
-  });
-
-  it('uses role names and descriptions from a custom role set when provided', () => {
-    const roleSet: RoleSet = {
-      version: '1',
-      roles: {
-        custom_lead: { description: 'Leads the custom effort', system_prompt: 'You lead.', assign_to: [] },
-        custom_reviewer: { description: 'Reviews the custom effort', system_prompt: 'You review.', assign_to: [] },
-      },
-    };
-    const models = [makeModel('claude', 'anthropic'), makeModel('gemini', 'google')];
-    const result = allocateSeats({
-      models,
-      options: { mode: 'compare' },
-      questionType: 'general',
-      resolvedMode: 'compare',
-      roleSet,
-    });
-    expect(result.agents.map(a => a.role)).toEqual(expect.arrayContaining(['custom_lead', 'custom_reviewer']));
-    const lead = result.agents.find(a => a.role === 'custom_lead')!;
-    expect(lead.role_description).toBe('Leads the custom effort');
-    expect(lead.system_prompt).toBe('You lead.');
-  });
-
-  it('promotes the engineer role to the front for code questions (no role set)', () => {
-    const models = [makeModel('claude', 'anthropic'), makeModel('gemini', 'google')];
-    const result = allocateSeats({
-      models,
-      options: { mode: 'compare' },
-      questionType: 'code',
-      resolvedMode: 'compare',
-      config: makeGeneralConfig({ min_agents: 2, max_agents: 2 }),
-    });
-    expect(result.agents[0]!.role).toBe('engineer');
-  });
-
-  it('promotes the innovator role to the front for creative questions (no role set)', () => {
-    const models = [makeModel('claude', 'anthropic'), makeModel('gemini', 'google')];
-    const result = allocateSeats({
-      models,
-      options: { mode: 'compare' },
-      questionType: 'creative',
-      resolvedMode: 'compare',
-      config: makeGeneralConfig({ min_agents: 2, max_agents: 2 }),
-    });
-    expect(result.agents[0]!.role).toBe('innovator');
-  });
-
-  it('reports the suggested role set inferred from question type when no override given', () => {
-    const models = [makeModel('claude', 'anthropic'), makeModel('gemini', 'google')];
-    const result = allocateSeats({
-      models,
-      options: { mode: 'compare' },
-      questionType: 'code',
-      resolvedMode: 'compare',
-    });
-    expect(result.roleSetUsed).toBe('code-review');
+  it('过短的中文架构句（"架构好吗"）仍不触发 debate', () => {
+    const d = resolveMode('架构好吗', models);
+    expect(d.mode).not.toBe('debate');
   });
 });

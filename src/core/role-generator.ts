@@ -7,6 +7,7 @@
 import type { InvocationAdapter } from '../types/provider.js';
 import type { ModelConfig, RoleSet } from '../types/config.js';
 import { detectLanguage } from './language.js';
+import { isPrefixAtBoundary } from '../shared/match.js';
 
 export interface GeneratedRole {
   name: string;
@@ -156,23 +157,46 @@ export async function generateRoles(
 }
 
 /**
- * Resolve a GeneratedRole's assigned_model to a ModelConfig.
+ * Match an LLM-supplied model reference to a concrete ModelConfig.
+ *
+ * Precedence (deliberately strict — bare bidirectional `includes` used to let
+ * "gpt-5" resolve to "gpt-5-nano" and vice-versa):
+ *   1. Exact name or id.
+ *   2. Prefix-*boundary* match on name or id (either direction), i.e. one is a
+ *      version/variant-separated prefix of the other. Never mid-token, so
+ *      "gpt-5" cannot swallow "gpt-50". On multiple candidates the shortest id
+ *      wins (the closest / least-specialized family member).
+ *   3. No match → undefined (callers apply round-robin).
  */
-export function resolveModel(role: GeneratedRole, models: ModelConfig[]): ModelConfig {
-  // Exact match
-  const exact = models.find(m => m.name === role.assigned_model);
+function matchAssignedModel(query: string, models: ModelConfig[]): ModelConfig | undefined {
+  if (!query) return undefined;
+
+  const exact = models.find(m => m.name === query || m.model === query);
   if (exact) return exact;
 
-  // Fuzzy match (model ID or partial name)
-  const fuzzy = models.find(m =>
-    m.model === role.assigned_model ||
-    m.name.includes(role.assigned_model) ||
-    role.assigned_model.includes(m.name),
-  );
-  if (fuzzy) return fuzzy;
+  const idOf = (m: ModelConfig): string => m.model ?? m.name;
+  const boundaryHit = (m: ModelConfig): boolean => {
+    const id = idOf(m);
+    return (
+      isPrefixAtBoundary(id, query) || isPrefixAtBoundary(query, id) ||
+      (m.name !== id && (isPrefixAtBoundary(m.name, query) || isPrefixAtBoundary(query, m.name)))
+    );
+  };
 
-  // Fallback: round-robin
-  return models[0]!;
+  const candidates = models.filter(boundaryHit);
+  if (candidates.length > 0) {
+    return [...candidates].sort((a, b) => idOf(a).length - idOf(b).length)[0]!;
+  }
+
+  return undefined;
+}
+
+/**
+ * Resolve a GeneratedRole's assigned_model to a ModelConfig. Exact → prefix
+ * boundary (shortest id) → round-robin fallback (first model).
+ */
+export function resolveModel(role: GeneratedRole, models: ModelConfig[]): ModelConfig {
+  return matchAssignedModel(role.assigned_model, models) ?? models[0]!;
 }
 
 /**
@@ -211,21 +235,16 @@ function parseRoleResponse(raw: string, models: ModelConfig[]): GeneratedRole[] 
     const sanitized = jsonMatch[0].replace(/,(\s*[}\]])/g, '$1');
     const parsed = JSON.parse(sanitized) as unknown[];
     const roles: GeneratedRole[] = [];
-    const modelNames = models.map(m => m.name);
 
     for (const item of parsed) {
       const r = item as Record<string, unknown>;
       if (!r['name'] || !r['system_prompt']) continue;
 
-      let assignedModel = String(r['assigned_model'] ?? '');
-      // Validate model name exists
-      if (!modelNames.includes(assignedModel)) {
-        // Try fuzzy match
-        const fuzzy = modelNames.find(n =>
-          n.includes(assignedModel) || assignedModel.includes(n),
-        );
-        assignedModel = fuzzy ?? modelNames[roles.length % modelNames.length]!;
-      }
+      // Normalize the LLM's model reference to a canonical model name via the
+      // same boundary matcher resolveModel uses: exact → prefix boundary →
+      // round-robin (so "gpt-5" never silently becomes "gpt-5-nano").
+      const matched = matchAssignedModel(String(r['assigned_model'] ?? ''), models);
+      const assignedModel = matched?.name ?? models[roles.length % models.length]!.name;
 
       roles.push({
         name: String(r['name']),

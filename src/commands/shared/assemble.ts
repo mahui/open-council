@@ -24,6 +24,8 @@ export interface ResolvedModels {
   minAgents?: number;
   /** Maximum agent seats from council.yaml (only when loadGeneralConfig is set). */
   maxAgents?: number;
+  /** Ordered model preference from council.yaml routing.default.prefer (only when loadGeneralConfig is set). */
+  prefer?: string[];
   /** TUI mode from council.yaml, defaults to 'auto'. */
   tuiMode: 'auto' | 'always' | 'never';
 }
@@ -66,6 +68,7 @@ export function resolveModels(
   let roleGenModel: ModelConfig | undefined;
   let minAgents: number | undefined;
   let maxAgents: number | undefined;
+  let prefer: string[] | undefined;
   let tuiMode: 'auto' | 'always' | 'never' = 'auto';
 
   if (loader.isConfigured()) {
@@ -80,6 +83,7 @@ export function resolveModels(
         }
         minAgents = config.general.min_agents;
         maxAgents = config.general.max_agents;
+        prefer = config.routing.default.prefer;
         tuiMode = config.output.tui_mode;
       } catch (err) {
         process.stderr.write(
@@ -100,5 +104,5 @@ export function resolveModels(
     models = discoverModelsFromEnv(credentialManager);
   }
 
-  return { models, chairman, roleGenModel, minAgents, maxAgents, tuiMode };
+  return { models, chairman, roleGenModel, minAgents, maxAgents, prefer, tuiMode };
 }

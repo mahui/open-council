@@ -137,16 +137,66 @@ describe('resolveModel', () => {
     expect(resolveModel(role('gemini'), models).name).toBe('gemini');
   });
 
-  it('fuzzy-resolves via the model id field', () => {
+  it('resolves via the model id field (exact)', () => {
     const withId = [{ ...model('assistant'), model: 'claude-sonnet-4' }];
     expect(resolveModel(role('claude-sonnet-4'), withId).name).toBe('assistant');
   });
 
-  it('fuzzy-resolves when the assigned_model is a substring of the model name', () => {
-    expect(resolveModel(role('gem'), models).name).toBe('gemini');
+  it('matches a boundary-prefix on the id field', () => {
+    // "gpt-5" is a version-boundary prefix of the id "gpt-5-mini".
+    const withId = [{ ...model('assistant'), model: 'gpt-5-mini' }];
+    expect(resolveModel(role('gpt-5'), withId).name).toBe('assistant');
+  });
+
+  it('no longer matches a mid-token substring (was bare includes)', () => {
+    // "gem" is a mid-token substring of "gemini", not a boundary prefix, so it
+    // must NOT resolve to gemini; it falls back to the first model.
+    expect(resolveModel(role('gem'), models).name).toBe('claude');
   });
 
   it('falls back to the first model when nothing matches at all', () => {
     expect(resolveModel(role('nonexistent-xyz'), models).name).toBe('claude');
+  });
+});
+
+describe('resolveModel — gpt-5 family boundary matching', () => {
+  const gpt5Family = [
+    model('gpt-5'),
+    model('gpt-5-mini'),
+    model('gpt-5-nano'),
+    model('gpt-5-codex'),
+    model('gpt-50'),
+    model('claude'),
+  ];
+
+  function role(assigned_model: string): GeneratedRole {
+    return { name: 'Analyst', icon: '🔍', description: 'd', system_prompt: 'p', assigned_model };
+  }
+
+  // [assigned_model, expected resolved name]
+  const cases: Array<[string, string]> = [
+    // Exact wins over any boundary sibling — the core "gpt-5 must not become gpt-5-nano".
+    ['gpt-5', 'gpt-5'],
+    ['gpt-5-mini', 'gpt-5-mini'],
+    ['gpt-5-nano', 'gpt-5-nano'],
+    // Digit→digit run is the same number: gpt-5 must NOT swallow gpt-50.
+    ['gpt-50', 'gpt-50'],
+  ];
+
+  for (const [assigned, expected] of cases) {
+    it(`resolves "${assigned}" → ${expected}`, () => {
+      expect(resolveModel(role(assigned), gpt5Family).name).toBe(expected);
+    });
+  }
+
+  it('picks the shortest-id sibling when no exact match exists', () => {
+    // No exact "gpt-5"; boundary candidates are the -mini/-nano/-codex siblings.
+    const siblings = [model('gpt-5-codex'), model('gpt-5-mini'), model('gpt-5-turbo-preview')];
+    expect(resolveModel(role('gpt-5'), siblings).name).toBe('gpt-5-mini');
+  });
+
+  it('does not treat gpt-5 as gpt-50 (digit boundary), falling back instead', () => {
+    const noFamily = [model('claude'), model('gpt-50')];
+    expect(resolveModel(role('gpt-5'), noFamily).name).toBe('claude');
   });
 });

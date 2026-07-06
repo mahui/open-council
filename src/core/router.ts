@@ -1,13 +1,11 @@
 /**
- * Route engine: auto mode determination + keyword strategy + Agent seat allocation.
+ * Route engine: auto mode determination + keyword-strategy classification.
  * Pure logic — no I/O dependencies (ARCH-01).
  * No imports from providers, storage, ui, commands (ARCH-02).
  */
 
-import type { ModelConfig, CouncilConfig, RoleSet } from '../types/config.js';
-import type { DebateMode, Agent, RunOptions } from '../types/session.js';
-// Use globalThis.crypto to avoid importing node:crypto in core/ (ARCH-01)
-const randomUUID = (): string => globalThis.crypto.randomUUID();
+import type { ModelConfig, CouncilConfig } from '../types/config.js';
+import type { DebateMode } from '../types/session.js';
 
 // ---------------------------------------------------------------------------
 // Question type classification
@@ -25,8 +23,6 @@ export type QuestionType =
 interface KeywordRule {
   type: QuestionType;
   keywords: RegExp;
-  requiredCapabilities: string[];
-  suggestedRoleSet: string;
 }
 
 /**
@@ -44,8 +40,6 @@ interface KeywordRuleDef {
   type: QuestionType;
   en: readonly string[];
   zh: readonly string[];
-  requiredCapabilities: string[];
-  suggestedRoleSet: string;
 }
 
 /**
@@ -64,51 +58,37 @@ const KEYWORD_RULE_DEFS: readonly KeywordRuleDef[] = [
     type: 'code',
     en: ['code', 'coding', 'bug', 'debug', 'function', 'refactor', 'lint', 'compile', 'snippet', 'implementation'],
     zh: ['函数', '代码', '重构', '编译', '调试', '报错', '实现'],
-    requiredCapabilities: ['code'],
-    suggestedRoleSet: 'code-review',
   },
   {
     type: 'security',
     en: ['security', 'vulnerability', 'CVE', 'exploit', 'injection', 'XSS', 'CSRF', 'auth', 'encrypt'],
     zh: ['注入', '安全', '认证', '鉴权', '权限', '加密', '漏洞'],
-    requiredCapabilities: ['analysis'],
-    suggestedRoleSet: 'default',
   },
   {
     type: 'architecture',
     en: ['architecture', 'design', 'system', 'microservice', 'monolith', 'scalab', 'distributed'],
     zh: ['架构', '设计', '系统', '可扩展', '扩展性', '分布式', '微服务', '单体'],
-    requiredCapabilities: ['analysis'],
-    suggestedRoleSet: 'architecture',
   },
   {
     type: 'creative',
     en: ['creative', 'brainstorm', 'ideation', 'novel', 'unconventional'],
     zh: ['创意', '头脑风暴', '创新', '灵感'],
-    requiredCapabilities: ['creative'],
-    suggestedRoleSet: 'default',
   },
   {
     type: 'comparison',
     en: ['vs\\.?', 'versus', 'compare', 'choose', 'which\\s+is\\s+better', 'pros?\\s+and\\s+cons?'],
     zh: ['对比', '比较', '选择', '优劣', '区别', '相比', '哪个更好'],
-    requiredCapabilities: [],
-    suggestedRoleSet: 'default',
   },
   {
     type: 'math',
     en: ['math', 'calcul', 'proof', 'equation', 'theorem', 'algorithm'],
     zh: ['数学', '计算', '证明', '方程', '定理', '算法', '公式', '求解'],
-    requiredCapabilities: ['math'],
-    suggestedRoleSet: 'default',
   },
 ] as const;
 
 const KEYWORD_RULES: readonly KeywordRule[] = KEYWORD_RULE_DEFS.map(def => ({
   type: def.type,
   keywords: buildKeywordPattern(def.en, def.zh),
-  requiredCapabilities: def.requiredCapabilities,
-  suggestedRoleSet: def.suggestedRoleSet,
 }));
 
 // ---------------------------------------------------------------------------
@@ -128,10 +108,15 @@ export interface ModeDecision {
  * Heuristic (keyword strategy, no LLM cost):
  *   1. Classify the question type via keyword matching.
  *   2. If only 1 model is available -> quick.
- *   3. If question is short (<30 chars) AND general -> compare.
- *   4. If question type is architecture/security or question is long (>120 chars) -> debate.
+ *   3. If question is short (<30 effective length) AND general -> compare.
+ *   4. If question type is architecture/security or question is long (>120
+ *      effective length) -> debate.
  *   5. If comparison keywords detected -> compare.
  *   6. Default -> compare.
+ *
+ * Length is measured with `effectiveLength` (CJK-weighted), not raw char count,
+ * so information-dense Chinese questions cross the same thresholds as their
+ * more verbose English equivalents.
  */
 export function resolveMode(
   question: string,
@@ -151,12 +136,15 @@ export function resolveMode(
     };
   }
 
-  const length = question.trim().length;
+  const length = effectiveLength(question);
 
-  // High-complexity types -> debate (if enough models)
+  // High-complexity types -> debate (if enough models). The length gate only
+  // filters throwaway one-liners ("架构好吗?"); keyword classification already
+  // established substance, so the bar is low — a typical 17-hanzi architecture
+  // question (effective ~43) must clear it.
   if (
     (questionType === 'architecture' || questionType === 'security') &&
-    length > 50
+    length > 40
   ) {
     const agentCount = Math.min(enabledModels.length, config?.general?.max_agents ?? 5);
     return {
@@ -241,269 +229,29 @@ export function classifyQuestion(
 }
 
 // ---------------------------------------------------------------------------
-// Agent seat allocation
+// Length metric
 // ---------------------------------------------------------------------------
 
-export interface SeatAllocationInput {
-  models: readonly ModelConfig[];
-  options: Pick<RunOptions, 'chairman' | 'devilAdvocate' | 'roleSet'>;
-  questionType: QuestionType;
-  resolvedMode: Exclude<DebateMode, 'auto'>;
-  roleSet?: RoleSet;
-  config?: Pick<CouncilConfig, 'general'>;
-}
-
-export interface SeatAllocationResult {
-  agents: Agent[];
-  chairmanId: string;
-  roleSetUsed: string;
-}
-
-const DEFAULT_ROLES: readonly string[] = [
-  'analyst',
-  'engineer',
-  'innovator',
-  'critic',
-  'pragmatist',
-];
+/**
+ * CJK code-point ranges: unified ideographs (incl. Ext-A) + compatibility,
+ * hiragana/katakana, and Hangul. Used only to weight length — approximate
+ * coverage is sufficient.
+ */
+const CJK_PATTERN =
+  /[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯]/;
 
 /**
- * Allocate agent seats: assign models to roles based on capabilities.
+ * Length metric that weights CJK characters more heavily than Latin ones.
  *
- * Strategy (from PRD 2.3):
- * - >= 3 models: each model gets 1 role, prefer different models
- * - 2 models: 2 models each get 1 role + optional 3rd seat reusing higher-priority model
- * - 1 model: same model plays all roles (single-model multi-role mode)
- *
- * Respects `min_agents` / `max_agents` from config.
+ * The `resolveMode` thresholds (50 / 120 / 30) were tuned against English, but
+ * CJK carries ~2.5× the information per character, so a raw char count badly
+ * understates a Chinese question's complexity. Each CJK character counts 2.5,
+ * every other character 1; the total is floored to stay an integer.
  */
-export function allocateSeats(input: SeatAllocationInput): SeatAllocationResult {
-  const {
-    models,
-    options,
-    questionType,
-    resolvedMode,
-    roleSet,
-    config,
-  } = input;
-
-  const enabledModels = models
-    .filter(m => m.enabled)
-    .sort((a, b) => a.priority - b.priority); // lower priority number = higher priority
-
-  if (enabledModels.length === 0) {
-    return { agents: [], chairmanId: '', roleSetUsed: 'default' };
+export function effectiveLength(question: string): number {
+  let total = 0;
+  for (const ch of question.trim()) {
+    total += CJK_PATTERN.test(ch) ? 2.5 : 1;
   }
-
-  const minAgents = config?.general?.min_agents ?? 2;
-  const maxAgents = config?.general?.max_agents ?? 5;
-  const allowSameModel = config?.general?.allow_same_model_agents ?? true;
-
-  // Determine the role list
-  const roleNames = getRoleNames(roleSet, questionType);
-  const roleSetName = getSuggestedRoleSet(questionType, options.roleSet);
-
-  // Determine how many seats to create
-  let targetSeats: number;
-  if (resolvedMode === 'quick') {
-    targetSeats = Math.max(1, Math.min(enabledModels.length, maxAgents));
-  } else {
-    targetSeats = Math.max(minAgents, Math.min(roleNames.length, maxAgents));
-  }
-
-  // Allocate models to seats
-  const agents: Agent[] = [];
-  for (let i = 0; i < targetSeats; i++) {
-    const role = roleNames[i % roleNames.length] ?? 'analyst';
-    const roleDesc = getRoleDescription(roleSet, role);
-
-    // Pick model: prefer different models for diversity, then cycle
-    let model: ModelConfig;
-    if (i < enabledModels.length) {
-      model = enabledModels[i]!;
-    } else if (allowSameModel) {
-      // Reuse highest-priority model first
-      model = enabledModels[i % enabledModels.length]!;
-    } else {
-      // Cannot reuse models — stop allocating
-      break;
-    }
-
-    // Prefer models with matching capabilities
-    const preferred = findPreferredModel(enabledModels, role, questionType, agents);
-    if (preferred && i < enabledModels.length) {
-      model = preferred;
-    }
-
-    agents.push({
-      agent_id: randomUUID(),
-      config: model,
-      role,
-      role_description: roleDesc,
-      system_prompt: getRoleSystemPrompt(roleSet, role),
-      is_chairman: false,
-      is_devil_advocate: false,
-    });
-  }
-
-  // Ensure minimum seats by reusing models
-  while (agents.length < minAgents && allowSameModel && enabledModels.length > 0) {
-    const idx = agents.length % enabledModels.length;
-    const role = roleNames[agents.length % roleNames.length] ?? 'analyst';
-    agents.push({
-      agent_id: randomUUID(),
-      config: enabledModels[idx]!,
-      role,
-      role_description: getRoleDescription(roleSet, role),
-      system_prompt: getRoleSystemPrompt(roleSet, role),
-      is_chairman: false,
-      is_devil_advocate: false,
-    });
-  }
-
-  // Assign chairman
-  const chairmanName = options.chairman;
-  let chairmanAgent = chairmanName
-    ? agents.find(a => a.config.name === chairmanName)
-    : undefined;
-  if (!chairmanAgent && agents.length > 0) {
-    // Fallback: highest-priority agent
-    chairmanAgent = agents.reduce((best, curr) =>
-      curr.config.priority < best.config.priority ? curr : best,
-    );
-  }
-  if (chairmanAgent) {
-    chairmanAgent.is_chairman = true;
-  }
-
-  // Assign devil's advocate (debate mode only)
-  if (resolvedMode === 'debate') {
-    assignDevilAdvocate(agents, questionType, options.devilAdvocate);
-  }
-
-  return {
-    agents,
-    chairmanId: chairmanAgent?.agent_id ?? '',
-    roleSetUsed: roleSetName,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-function getRoleNames(roleSet: RoleSet | undefined, questionType: QuestionType): string[] {
-  if (roleSet) {
-    return Object.keys(roleSet.roles);
-  }
-  // Default roles — reorder based on question type
-  const roles = [...DEFAULT_ROLES];
-  if (questionType === 'code') {
-    // Promote engineer
-    const idx = roles.indexOf('engineer');
-    if (idx > 0) {
-      roles.splice(idx, 1);
-      roles.unshift('engineer');
-    }
-  } else if (questionType === 'creative') {
-    const idx = roles.indexOf('innovator');
-    if (idx > 0) {
-      roles.splice(idx, 1);
-      roles.unshift('innovator');
-    }
-  }
-  return roles;
-}
-
-function getRoleDescription(roleSet: RoleSet | undefined, role: string): string {
-  if (roleSet && roleSet.roles[role]) {
-    return roleSet.roles[role].description;
-  }
-  return '';
-}
-
-function getRoleSystemPrompt(roleSet: RoleSet | undefined, role: string): string {
-  if (roleSet && roleSet.roles[role]) {
-    return roleSet.roles[role].system_prompt;
-  }
-  return '';
-}
-
-function getSuggestedRoleSet(questionType: QuestionType, override?: string): string {
-  if (override) return override;
-  for (const rule of KEYWORD_RULES) {
-    if (rule.type === questionType) {
-      return rule.suggestedRoleSet;
-    }
-  }
-  return 'default';
-}
-
-/**
- * Find a model that has capabilities matching the role/question type,
- * and has not already been assigned (to maximize diversity).
- */
-function findPreferredModel(
-  models: readonly ModelConfig[],
-  _role: string,
-  questionType: QuestionType,
-  existingAgents: readonly Agent[],
-): ModelConfig | undefined {
-  const usedModelNames = new Set(existingAgents.map(a => a.config.name));
-
-  // Find required capabilities for this question type
-  const rule = KEYWORD_RULES.find(r => r.type === questionType);
-  const requiredCaps = rule?.requiredCapabilities ?? [];
-
-  if (requiredCaps.length === 0) return undefined;
-
-  // Prefer unused models with matching capabilities
-  const candidates = models.filter(
-    m => !usedModelNames.has(m.name) && requiredCaps.every(c => m.capabilities.includes(c)),
-  );
-
-  if (candidates.length > 0) {
-    return candidates.sort((a, b) => a.priority - b.priority)[0];
-  }
-
-  return undefined;
-}
-
-/**
- * Assign devil's advocate role in debate mode.
- *
- * Trigger conditions (any one):
- * - agents.length >= 3
- * - question type is architecture or security
- * - user explicitly requested it
- *
- * Selection: prefer model with 'analysis' capability; otherwise highest priority.
- */
-function assignDevilAdvocate(
-  agents: Agent[],
-  questionType: QuestionType,
-  userRequested?: boolean,
-): void {
-  const shouldAssign =
-    userRequested === true ||
-    agents.length >= 3 ||
-    questionType === 'architecture' ||
-    questionType === 'security';
-
-  if (!shouldAssign || agents.length === 0) return;
-
-  // Prefer non-chairman with 'analysis' capability
-  const candidates = agents
-    .filter(a => !a.is_chairman)
-    .sort((a, b) => {
-      const aHasAnalysis = a.config.capabilities.includes('analysis') ? 0 : 1;
-      const bHasAnalysis = b.config.capabilities.includes('analysis') ? 0 : 1;
-      if (aHasAnalysis !== bHasAnalysis) return aHasAnalysis - bHasAnalysis;
-      return a.config.priority - b.config.priority;
-    });
-
-  const target = candidates[0] ?? agents.find(a => !a.is_chairman) ?? agents[0];
-  if (target) {
-    target.is_devil_advocate = true;
-  }
+  return Math.floor(total);
 }

@@ -13,6 +13,7 @@ import { InvocationError, InvocationTimeoutError } from '../types/errors.js';
 import type { CredentialManager } from './credentials/discovery.js';
 import { throttle, recordSuccess, recordFailure, getProviderStatus } from './health.js';
 import { classifyError, isRateLimit } from './error-classifier.js';
+import { isPrefixAtBoundary } from '../shared/match.js';
 
 /**
  * Every Google-family provider that may hold a callable credential or list a model.
@@ -637,26 +638,6 @@ export class ApiAdapter implements InvocationAdapter {
       guard.dispose();
     }
   }
-}
-
-/**
- * True when `prefix` is a boundary-terminated prefix of `longer`, i.e. `longer` continues
- * `prefix` with a variant/version separator rather than mid-token. This keeps fuzzy matching
- * from treating `gpt-5` and `gpt-5-mini` (or `gpt-4` and `gpt-4o`) as the same model.
- *
- * A boundary is: the next char is '-' or '.', OR a letter→digit transition (e.g. `gpt` → `gpt4`),
- * which marks an implicit version bump. `longer` must be strictly longer than `prefix`.
- */
-function isPrefixAtBoundary(longer: string, prefix: string): boolean {
-  if (prefix.length === 0 || longer.length <= prefix.length) return false;
-  if (!longer.startsWith(prefix)) return false;
-  const next = longer.charAt(prefix.length);
-  if (next === '-' || next === '.') return true;
-  const prevChar = prefix.charAt(prefix.length - 1);
-  const prevIsDigit = prevChar >= '0' && prevChar <= '9';
-  const nextIsDigit = next >= '0' && next <= '9';
-  // A letter→digit transition is a version boundary; a digit→digit run is the same number.
-  return nextIsDigit && !prevIsDigit;
 }
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '0.0.0.0']);

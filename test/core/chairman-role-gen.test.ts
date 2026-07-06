@@ -290,3 +290,58 @@ describe('Orchestrator role-generator model selection', () => {
     expect(roleGenCall(calls)?.model.name).toBe('balanced');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task #46 — routing.default.prefer drives role-gen candidate ordering + cap
+// ---------------------------------------------------------------------------
+
+/** Extract the model names, in listing order, from a role-generation prompt. */
+function listedModels(prompt: string): string[] {
+  return [...prompt.matchAll(/^\s*\d+\.\s+([^\s(]+)/gm)].map(mm => mm[1]!);
+}
+
+describe('Orchestrator prefer ordering', () => {
+  // 12 same-tier models (unrecognized ids → tier 2) so ordering is governed
+  // purely by preferOrder, then stable original order for the rest.
+  const twelve = (): ModelConfig[] =>
+    Array.from({ length: 12 }, (_, i) => model(`m${String(i).padStart(2, '0')}`, `mystery-${i}`));
+
+  it('promotes prefer-listed models to the front of the role-gen candidate list', async () => {
+    const { adapter, calls } = createAdapter();
+    // m11 and m09 would otherwise sit at the back (and m11 would be truncated away).
+    const orch = new Orchestrator(
+      adapter, createRenderer(), twelve(),
+      undefined, undefined, undefined, undefined, ['m11', 'm09'],
+    );
+    await orch.run('Compare these options carefully', { mode: 'compare' });
+
+    const listed = listedModels(roleGenCall(calls)!.prompt);
+    // Cap = max(range.max(5) * 2, 8) = 10.
+    expect(listed).toHaveLength(10);
+    // Preferred models come first, in the order they were listed in prefer.
+    expect(listed[0]).toBe('m11');
+    expect(listed[1]).toBe('m09');
+    // A would-be-truncated model survives *because* it was preferred.
+    expect(listed).toContain('m11');
+  });
+
+  it('matches prefer entries by model id as well as name', async () => {
+    const { adapter, calls } = createAdapter();
+    const orch = new Orchestrator(
+      adapter, createRenderer(), twelve(),
+      undefined, undefined, undefined, undefined, ['mystery-10'],
+    );
+    await orch.run('Compare these options carefully', { mode: 'compare' });
+
+    const listed = listedModels(roleGenCall(calls)!.prompt);
+    expect(listed[0]).toBe('m10');
+  });
+
+  it('caps the candidate list even without any prefer configured', async () => {
+    const { adapter, calls } = createAdapter();
+    const orch = new Orchestrator(adapter, createRenderer(), twelve());
+    await orch.run('Compare these options carefully', { mode: 'compare' });
+
+    expect(listedModels(roleGenCall(calls)!.prompt)).toHaveLength(10);
+  });
+});

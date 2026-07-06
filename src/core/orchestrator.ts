@@ -72,6 +72,15 @@ export interface AgentBounds {
 const DEFAULT_MIN_AGENTS = 2;
 const DEFAULT_MAX_AGENTS = 5;
 
+/**
+ * Floor on how many models are described to the role-generation LLM. The real
+ * cap is `max(range.max × 2, MIN_ROLE_GEN_MODELS)`: a panel never needs more
+ * than ~2 candidates per seat, so surfacing the top (prefer-ordered) slice both
+ * kills the prompt bloat a 28-model list caused AND shrinks the mis-assignment
+ * surface. The floor keeps enough variety for small panels.
+ */
+const MIN_ROLE_GEN_MODELS = 8;
+
 export class Orchestrator {
   constructor(
     private adapter: InvocationAdapter,
@@ -87,6 +96,13 @@ export class Orchestrator {
      * the dynamic LLM role-generation call entirely (explicit override path).
      */
     private explicitRoleSet?: RoleSet,
+    /**
+     * Ordered model preference (config `routing.default.prefer`). Models named
+     * here (by name or id) sort to the front of the role-generation candidate
+     * list — in listed order — ahead of everything else; unlisted models follow
+     * by descending capability. Empty ⇒ pure capability ordering.
+     */
+    private preferOrder: string[] = [],
   ) {}
 
   async run(question: string, options: RunOptions): Promise<Session> {
@@ -250,7 +266,11 @@ export class Orchestrator {
   private async executeRoute(session: Session): Promise<void> {
     const stage = this.createStage('route');
 
-    const models = this.availableModels.filter(m => m.enabled);
+    // Prefer-ordered enabled set: models listed in routing.default.prefer come
+    // first (in that order), the rest by descending capability. This ordering
+    // drives chairman fallback, round-robin assignment, and the truncated slice
+    // fed to the role-generation LLM (see promptModels below).
+    const models = this.orderByPreference(this.availableModels.filter(m => m.enabled));
     // Chairman: honor an explicit config default when it resolves; otherwise
     // pick the strongest model by capability tier (ties → higher config
     // priority / earlier in the list).
@@ -287,22 +307,30 @@ export class Orchestrator {
       range = { min, max };
     }
 
+    // Truncate the candidate list handed to the role designer / round-robin so a
+    // large (e.g. 28-model) roster neither bloats the prompt nor widens the
+    // mis-assignment surface. Top slice = prefer-ordered, so the "best" models
+    // survive the cut. resolveModel still resolves against the full `models`.
+    const promptCap = Math.max(range.max * 2, MIN_ROLE_GEN_MODELS);
+    const promptModels = models.slice(0, promptCap);
+
     // Role source, in priority order:
     // 1. Explicit --role-set override: use the template roles verbatim (capped
-    //    at the mode's upper bound), skipping the role-generation LLM call.
+    //    at the mode's upper bound), skipping the role-generation LLM call. The
+    //    template carries its own assign_to preference, so it sees full `models`.
     // 2. Quick mode: single-agent path with no productive-disagreement panel to
     //    design — use the built-in default role, also skipping the LLM call.
-    // 3. Otherwise: dynamic LLM role-panel design.
+    // 3. Otherwise: dynamic LLM role-panel design over the truncated slice.
     // All three yield GeneratedRole[] so the role→agent mapping below is shared.
     const roles = this.explicitRoleSet
       ? rolesFromRoleSet(this.explicitRoleSet, models).slice(0, range.max)
       : session.resolved_mode === 'quick'
-        ? defaultRoles(range.min, models)
+        ? defaultRoles(range.min, promptModels)
         : await generateRoles(
             session.question,
             range,
             this.adapter,
-            models,
+            promptModels,
             this.roleGenModel,
           );
 
@@ -974,6 +1002,30 @@ export class Orchestrator {
     session.degradation_events = session.degradation_events ?? [];
     session.degradation_events.push(event);
     this.renderer.onDegradation(event);
+  }
+
+  /**
+   * Order models by the configured `routing.default.prefer` list: preferred
+   * models first (in the order they appear in `preferOrder`, matched by name or
+   * id), then the remainder by descending capability tier, ties broken by config
+   * priority. Stable, non-mutating. Empty preferOrder ⇒ pure capability ordering.
+   */
+  private orderByPreference(models: ModelConfig[]): ModelConfig[] {
+    const rank = (m: ModelConfig): number =>
+      this.preferOrder.findIndex(p => p === m.name || p === m.model);
+
+    return [...models].sort((a, b) => {
+      const ra = rank(a);
+      const rb = rank(b);
+      if (ra !== -1 && rb !== -1) return ra - rb;   // both preferred: listed order
+      if (ra !== -1) return -1;                      // only a preferred
+      if (rb !== -1) return 1;                       // only b preferred
+      // Neither preferred: strongest capability first, then higher config priority.
+      const ca = rateModelCapability(a);
+      const cb = rateModelCapability(b);
+      if (ca !== cb) return cb - ca;
+      return a.priority - b.priority;
+    });
   }
 
   /**
