@@ -135,44 +135,51 @@ async function runQuickSetup(loader: ConfigLoader): Promise<void> {
   }
 
   const named = buildNamedModels(selected);
-  const configs = named.map(n => n.config);
+
+  // --- Connectivity gate (unified across all setup paths): probe every model,
+  //     allow explicit skip, drop failures unless individually kept. ---
+  const apiAdapter = new ApiAdapter(credManager);
+  const verifiedConfigs = await verifyModelConnectivity(
+    named.map(n => n.config),
+    apiAdapter,
+    { stepLabel: '\nStep 3/3: Testing model connectivity...\n' },
+  );
+  const keptNames = new Set(verifiedConfigs.map(c => c.name));
+  const verifiedNamed = named.filter(n => keptNames.has(n.config.name));
+
+  if (verifiedNamed.length === 0) {
+    process.stderr.write(
+      '\n\x1b[31m⚠  No models passed connectivity testing.\x1b[0m\n' +
+      '   Verify your API keys (or re-run and skip testing), then run "council setup" again.\n\n',
+    );
+    return;
+  }
+
+  const configs = verifiedNamed.map(n => n.config);
 
   process.stderr.write('\nEnabled models:\n');
-  for (const n of named) {
+  for (const n of verifiedNamed) {
     process.stderr.write(`  ✓ ${n.config.name} [${n.model.protocol}]\n`);
   }
 
   // --- Agent count: clamped to the number of available models ---
-  const { min: minAgents, max: maxAgents } = clampAgents(named.length);
-  if (named.length === 1) {
+  const { min: minAgents, max: maxAgents } = clampAgents(verifiedNamed.length);
+  if (verifiedNamed.length === 1) {
     process.stderr.write(
       '\n  \x1b[2mOnly one model available — the council will run multiple roles on the same model.\x1b[0m\n',
     );
   }
 
-  // --- Select Chairman + panel designer ---
+  // --- Select Chairman + panel designer (from the verified set) ---
   const chairman = selectBestChairman(configs);
   const chairmanName = chairman?.name ?? '';
   const roleGenModel = pickBalancedModel(configs);
-  process.stderr.write(`\nStep 3/3: Selected default Chairman: ${chairmanName}\n`);
-
-  // --- Probe the chairman only (non-blocking) so a dead key surfaces now. ---
-  const apiAdapter = new ApiAdapter(credManager);
-  const chairmanNamed = named.find(n => n.config.name === chairmanName);
-  if (chairmanNamed) {
-    const { ok, error } = await testConnectivity(chairmanNamed.config, apiAdapter);
-    if (!ok) {
-      process.stderr.write(
-        `\n  \x1b[33m⚠  Chairman probe failed: ${error ?? 'unknown error'}.\n` +
-        `     Config will still be written — verify credentials, then run "council models check".\x1b[0m\n`,
-      );
-    }
-  }
+  process.stderr.write(`\nSelected default Chairman: ${chairmanName}\n`);
 
   ensureDirectories();
 
-  // Quick never wipes existing models — upsert the discovered ones.
-  for (const n of named) loader.saveModelConfig(n.config);
+  // Quick never wipes existing models — upsert the verified ones.
+  for (const n of verifiedNamed) loader.saveModelConfig(n.config);
 
   const base = loader.loadCouncilConfigSafe();
   const config = assembleConfig({
@@ -215,36 +222,15 @@ async function runCustomSetup(loader: ConfigLoader): Promise<void> {
     const selected = await selectDiscoveredModels(discovered);
 
     if (selected.length > 0) {
-      const wantTest = await confirm({
-        message: 'Test model connectivity? (short API calls to verify credentials, ~5-10s)',
-        default: false,
-      });
-
-      if (wantTest) {
-        process.stderr.write('\nStep 3/5: Testing model connectivity...\n');
-        const testResults = await Promise.all(
-          selected.map(async m => {
-            const modelConfig = discoveredToModelConfig(m);
-            const { ok, error } = await testConnectivity(modelConfig, apiAdapter);
-            const icon = ok ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m';
-            const suffix = ok ? '\x1b[32mready\x1b[0m' : `\x1b[31mFAILED\x1b[0m — ${error ?? 'unknown error'}`;
-            process.stderr.write(`  ${icon} ${m.name.padEnd(44)} ${suffix}\n`);
-            return { model: m, ok };
-          }),
-        );
-
-        const failed = testResults.filter(r => !r.ok);
-        finalSelected = selected;
-        if (failed.length > 0) {
-          process.stderr.write(`\n  \x1b[33m${failed.length} model(s) failed connectivity test.\x1b[0m\n`);
-          const keepFailed = await confirm({ message: 'Keep failed models in configuration anyway?', default: false });
-          if (!keepFailed) {
-            finalSelected = selected.filter(m => testResults.find(r => r.model === m)?.ok);
-          }
-        }
-      } else {
-        finalSelected = selected;
-      }
+      // Unified connectivity gate (same behaviour as Quick / custom endpoints).
+      const pairs = selected.map(m => ({ model: m, config: discoveredToModelConfig(m) }));
+      const verified = await verifyModelConnectivity(
+        pairs.map(p => p.config),
+        apiAdapter,
+        { stepLabel: '\nStep 3/5: Testing model connectivity...\n' },
+      );
+      const keptNames = new Set(verified.map(c => c.name));
+      finalSelected = pairs.filter(p => keptNames.has(p.config.name)).map(p => p.model);
     }
   }
 
@@ -546,6 +532,59 @@ async function testConnectivity(
   }
 }
 
+/**
+ * Unified connectivity gate shared by all three setup paths (Quick, custom
+ * official models, custom endpoints). Behaviour is identical everywhere:
+ *   1. offer an explicit skip (default = run the test);
+ *   2. otherwise probe EVERY supplied model in parallel — not just the chairman;
+ *   3. drop each failed model by default, asking per-model whether to keep it.
+ * Returns the models to persist, preserving input order. Does not change the
+ * `testConnectivity` signature — it just orchestrates it consistently.
+ */
+export async function verifyModelConnectivity(
+  configs: ModelConfig[],
+  apiAdapter: ApiAdapter,
+  opts: { stepLabel?: string } = {},
+): Promise<ModelConfig[]> {
+  if (configs.length === 0) return [];
+
+  const skip = await confirm({
+    message: `Skip connectivity testing for ${configs.length} model(s)? (they'll be written without verification)`,
+    default: false,
+  });
+  if (skip) {
+    process.stderr.write('  Skipped connectivity testing — models written unverified.\n');
+    return configs;
+  }
+
+  if (opts.stepLabel) process.stderr.write(opts.stepLabel);
+  const results = await Promise.all(
+    configs.map(async cfg => {
+      const { ok, error } = await testConnectivity(cfg, apiAdapter);
+      const icon = ok ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m';
+      const suffix = ok ? '\x1b[32mready\x1b[0m' : `\x1b[31mFAILED\x1b[0m — ${error ?? 'unknown error'}`;
+      process.stderr.write(`  ${icon} ${cfg.name.padEnd(44)} ${suffix}\n`);
+      return { cfg, ok };
+    }),
+  );
+
+  const kept: ModelConfig[] = [];
+  for (const { cfg, ok } of results) {
+    if (ok) {
+      kept.push(cfg);
+      continue;
+    }
+    // Per-model decision on a failure (consistent across all paths — never a
+    // single global "keep all failed?" confirm).
+    const keep = await confirm({
+      message: `Keep ${cfg.name} despite the failed connectivity test?`,
+      default: false,
+    });
+    if (keep) kept.push(cfg);
+  }
+  return kept;
+}
+
 // ---------- standard-API / custom OpenAI-compatible endpoints ----------
 
 /**
@@ -634,37 +673,27 @@ async function collectCustomProviders(apiAdapter: ApiAdapter): Promise<ModelConf
     if (apiKey.length > 0) {
       mkdirSync(PATHS.credentials, { recursive: true, mode: 0o700 });
       credPath = customCredentialPath(sanitizedName);
-      writeFileSync(credPath, apiKey);
+      // Create with 0o600 up front (no world-readable window); chmod covers a
+      // pre-existing file whose mode writeFileSync would not tighten. [SEC-03]
+      writeFileSync(credPath, apiKey, { mode: 0o600 });
       chmodSync(credPath, 0o600);
     }
 
-    let anyKept = false;
-    for (const modelId of modelIds) {
-      const cfg = buildCustomModelConfig({
-        sanitizedName,
-        modelId,
-        baseUrl: resolvedBaseUrl,
-        protocol,
-        ...(credPath ? { credentialPath: credPath } : {}),
-      });
+    const cfgs = modelIds.map(modelId => buildCustomModelConfig({
+      sanitizedName,
+      modelId,
+      baseUrl: resolvedBaseUrl,
+      protocol,
+      ...(credPath ? { credentialPath: credPath } : {}),
+    }));
 
-      process.stderr.write(`  Testing ${cfg.name}...\n`);
-      const { ok, error } = await testConnectivity(cfg, apiAdapter);
-      if (ok) {
-        process.stderr.write(`  \x1b[32m✓\x1b[0m ${cfg.name} ready\n`);
-        collected.push(cfg);
-        anyKept = true;
-      } else {
-        process.stderr.write(`  \x1b[31m✗\x1b[0m ${cfg.name} FAILED — ${error ?? 'unknown error'}\n`);
-        const keep = await confirm({ message: `Keep ${modelId} in configuration anyway?`, default: false });
-        if (keep) {
-          collected.push(cfg);
-          anyKept = true;
-        }
-      }
-    }
+    // Unified connectivity gate (same behaviour as Quick / custom official models).
+    const kept = await verifyModelConnectivity(cfgs, apiAdapter, {
+      stepLabel: `  Testing ${sanitizedName} endpoint model(s)...\n`,
+    });
+    collected.push(...kept);
 
-    if (anyKept) usedNames.add(sanitizedName);
+    if (kept.length > 0) usedNames.add(sanitizedName);
     else if (credPath) {
       try { unlinkSync(credPath); } catch { /* already gone */ }
     }
