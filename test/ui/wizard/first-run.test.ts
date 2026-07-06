@@ -15,6 +15,7 @@ import {
 } from '../../../src/ui/wizard/first-run.js';
 import type { ModelCheckboxItem } from '../../../src/ui/wizard/first-run.js';
 import { assembleConfig, dedupePrefer } from '../../../src/config/assemble-council.js';
+import { MODEL_TIER_RULES } from '../../../src/shared/model-catalog.js';
 import type { CouncilConfig } from '../../../src/types/config.js';
 import type { DiscoveredModel } from '../../../src/providers/model-discovery.js';
 import { PATHS } from '../../../src/config/paths.js';
@@ -46,6 +47,27 @@ describe('isRecommended', () => {
     ['an unremarkable custom-endpoint id excluded', { id: 'llama-3-70b-instruct', protocol: 'openai', source: 'my-gateway' }, false],
   ])('%s', (_label, overrides, expected) => {
     expect(isRecommended(makeDiscovered(overrides))).toBe(expected);
+  });
+
+  it('reads the shared MODEL_TIER_RULES table (mutating it flips the wizard output)', () => {
+    // Proves isRecommended consumes the shared catalog rather than a private copy:
+    // flip the opus rule's `recommended` flag and the wizard must track it.
+    // Rule objects are plain (non-frozen) literals; readonly is compile-time only,
+    // so a narrow structural cast (NOT `as any`) lets the test mutate them.
+    const opus = makeDiscovered({ id: 'claude-opus-4-6', protocol: 'anthropic' });
+    expect(isRecommended(opus)).toBe(true); // baseline via the shared table
+
+    const opusRule = MODEL_TIER_RULES.find(r => r.pattern.test('claude-opus-4-6'));
+    expect(opusRule).toBeDefined();
+    const mutable = opusRule as { recommended: boolean };
+    const saved = mutable.recommended;
+    try {
+      mutable.recommended = false;
+      expect(isRecommended(opus)).toBe(false); // wizard follows the shared source
+    } finally {
+      mutable.recommended = saved;
+    }
+    expect(isRecommended(opus)).toBe(true); // restored — no leakage into later tests
   });
 });
 

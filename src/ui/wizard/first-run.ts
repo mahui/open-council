@@ -7,7 +7,7 @@ import { discoverModels } from '../../providers/model-discovery.js';
 import type { DiscoveredModel } from '../../providers/model-discovery.js';
 import type { ModelConfig, Protocol } from '../../types/config.js';
 import { ApiAdapter } from '../../providers/api-adapter.js';
-import { rateModelCapability } from '../../shared/model-catalog.js';
+import { rateModelCapability, isRecommendedModel } from '../../shared/model-catalog.js';
 import {
   buildNamedModels,
   selectBestChairman,
@@ -388,24 +388,15 @@ function modelKey(m: DiscoveredModel): string {
 }
 
 /**
- * Heuristic: does this model look like a flagship/recommended option?
- * Prefers the most capable models from each protocol while excluding
- * mini/lite/experimental variants that aren't suitable as debate participants.
+ * Does this model look like a flagship/recommended debate participant?
+ *
+ * Delegates to the shared MODEL_TIER_RULES table (src/shared/model-catalog.ts)
+ * so the wizard's default-participant heuristic never drifts from chairman
+ * ranking — the recommendation vocabulary (mini/nano/lite exclusions, o4
+ * inclusion, etc.) lives in exactly one place.
  */
 export function isRecommended(m: DiscoveredModel): boolean {
-  const id = m.id.toLowerCase();
-
-  // Anthropic: claude-opus-*, claude-sonnet-4*, claude-3-5-sonnet*
-  if (/opus/.test(id)) return true;
-  if (/claude-sonnet-4/.test(id)) return true;
-  if (/claude-3-5-sonnet/.test(id)) return true;
-
-  // OpenAI: o3, gpt-4o, gpt-5 — not mini variants
-  if (/^o[34]$/.test(id)) return true;
-  if (/gpt-4o$/.test(id)) return true;
-  if (/gpt-5(?!.*mini)/.test(id)) return true;
-
-  return false;
+  return isRecommendedModel(m.id);
 }
 
 export type ModelCheckboxChoice = { name: string; value: string; checked: boolean };
