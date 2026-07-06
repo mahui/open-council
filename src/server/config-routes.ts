@@ -218,7 +218,7 @@ export function createConfigRoutes(deps: ConfigRouteDeps): Hono {
   api.post('/setup/rescan', async (c) => {
     const credentialManager = new CredentialManager();
     const report = credentialManager.discoverAll();
-    const discovered = await discoverModels();
+    const discovered = await discoverModels(credentialManager);
 
     const existingNames = new Set(deps.loader.loadAllModelConfigs().map((m) => m.name));
     const added: string[] = [];

@@ -60,10 +60,21 @@ export class CredentialManager {
     }
 
     // 3. Protocol default env var.
-    const defaultEnv = DEFAULT_ENV_BY_PROTOCOL[config.protocol];
-    const dv = process.env[defaultEnv];
-    if (dv && dv.length > 0) return dv;
+    return this.resolveOfficialKey(config.protocol);
+  }
 
+  /**
+   * Resolve the official API key for a protocol's *standard* endpoint, or null.
+   * The single resolver for "official protocol key" — currently the protocol's
+   * default env var (ANTHROPIC_API_KEY / OPENAI_API_KEY). Custom-endpoint key
+   * files (custom-<name>.key) are NOT consulted here: they belong to a specific
+   * base_url, resolved per-ModelConfig by {@link getApiKey}, not to a protocol's
+   * official endpoint. Never returns key material to logs/DTOs (SEC-02).
+   */
+  resolveOfficialKey(protocol: Protocol): string | null {
+    const envVar = DEFAULT_ENV_BY_PROTOCOL[protocol];
+    const v = process.env[envVar];
+    if (v && v.length > 0) return v;
     return null;
   }
 

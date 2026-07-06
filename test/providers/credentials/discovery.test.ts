@@ -221,6 +221,32 @@ describe('CredentialManager.discoverAll / saveCustomKey', () => {
   });
 });
 
+describe('CredentialManager.resolveOfficialKey — official-endpoint key resolution', () => {
+  it('returns ANTHROPIC_API_KEY for the anthropic protocol', () => {
+    process.env['ANTHROPIC_API_KEY'] = 'sk-official-ant';
+    expect(new CredentialManager().resolveOfficialKey('anthropic')).toBe('sk-official-ant');
+  });
+
+  it('returns OPENAI_API_KEY for the openai protocol', () => {
+    process.env['OPENAI_API_KEY'] = 'sk-official-oai';
+    expect(new CredentialManager().resolveOfficialKey('openai')).toBe('sk-official-oai');
+  });
+
+  it('returns null when the protocol default env var is unset', () => {
+    expect(new CredentialManager().resolveOfficialKey('anthropic')).toBeNull();
+  });
+
+  it('treats an empty-string env var as unset (null)', () => {
+    process.env['OPENAI_API_KEY'] = '';
+    expect(new CredentialManager().resolveOfficialKey('openai')).toBeNull();
+  });
+
+  it('reads ONLY the env var — never a custom-<name>.key file (those bind to a base_url, not a protocol)', () => {
+    // No env set; even with custom key files on disk, official resolution stays null.
+    expect(new CredentialManager().resolveOfficialKey('anthropic')).toBeNull();
+  });
+});
+
 describe('CredentialManager — no cross-instance state', () => {
   it('two independent CredentialManager instances resolve identically from the same env (stateless)', () => {
     process.env['ANTHROPIC_API_KEY'] = 'sk-shared';

@@ -36,8 +36,14 @@ vi.mock('openai', () => ({
   },
 }));
 
-import { discoverModels } from '../../src/providers/model-discovery.js';
+import { discoverModels, discoverEndpointModels } from '../../src/providers/model-discovery.js';
 import { MODEL_CATALOG } from '../../src/shared/model-catalog.js';
+import { CredentialManager } from '../../src/providers/credentials/discovery.js';
+
+// Discovery now takes an injected CredentialManager (DI, no default param). The
+// manager is the *real* class driven by process.env — credential resolution is
+// covered by discovery.test.ts, so here we only keep mocking the SDK boundary.
+const creds = (): CredentialManager => new CredentialManager();
 
 const ENV_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY'] as const;
 const savedEnv: Record<string, string | undefined> = {};
@@ -77,7 +83,7 @@ function openaiCatalog(): Array<{ id: string; name: string; protocol: 'openai'; 
 
 describe('discoverModels — no credentials', () => {
   it('no env keys set → empty result, no SDK constructed', async () => {
-    const models = await discoverModels();
+    const models = await discoverModels(creds());
     expect(models).toEqual([]);
     expect(anthropicCtorMock).not.toHaveBeenCalled();
     expect(openaiCtorMock).not.toHaveBeenCalled();
@@ -94,7 +100,7 @@ describe('discoverModels — Anthropic', () => {
       data: [{ id: 'claude-opus-4-6', display_name: 'Claude Opus 4.6' }],
     });
 
-    const models = await discoverModels();
+    const models = await discoverModels(creds());
 
     expect(models).toEqual([
       { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', protocol: 'anthropic', source: 'official' },
@@ -104,26 +110,26 @@ describe('discoverModels — Anthropic', () => {
 
   it('falls back to display_name → id when display_name is absent', async () => {
     anthropicListMock.mockResolvedValue({ data: [{ id: 'claude-x' }] });
-    const models = await discoverModels();
+    const models = await discoverModels(creds());
     expect(models[0]?.name).toBe('claude-x');
   });
 
   it('an empty live page falls back to the static catalog (flagship/balanced/economy)', async () => {
     anthropicListMock.mockResolvedValue({ data: [] });
-    const models = await discoverModels();
+    const models = await discoverModels(creds());
     expect(models).toEqual(anthropicCatalog());
   });
 
   it('models.list() throwing falls back to the static catalog rather than propagating', async () => {
     anthropicListMock.mockRejectedValue(new Error('network unreachable'));
-    const models = await discoverModels();
+    const models = await discoverModels(creds());
     expect(models).toEqual(anthropicCatalog());
   });
 
   it('a fallback due to error is reported on stderr, not silently swallowed', async () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     anthropicListMock.mockRejectedValue(new Error('boom'));
-    await discoverModels();
+    await discoverModels(creds());
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('anthropic'));
     stderr.mockRestore();
   });
@@ -146,7 +152,7 @@ describe('discoverModels — OpenAI', () => {
       ],
     });
 
-    const models = await discoverModels();
+    const models = await discoverModels(creds());
 
     expect(models.map((m) => m.id).sort()).toEqual(['chatgpt-4o-latest', 'gpt-5.4', 'o3'].sort());
     expect(models.every((m) => m.protocol === 'openai' && m.source === 'official')).toBe(true);
@@ -155,13 +161,13 @@ describe('discoverModels — OpenAI', () => {
 
   it('all non-chat models filtered out → falls back to the static catalog', async () => {
     openaiListMock.mockResolvedValue({ data: [{ id: 'whisper-1' }, { id: 'text-embedding-3-small' }] });
-    const models = await discoverModels();
+    const models = await discoverModels(creds());
     expect(models).toEqual(openaiCatalog());
   });
 
   it('models.list() throwing falls back to the static catalog', async () => {
     openaiListMock.mockRejectedValue(new Error('503'));
-    const models = await discoverModels();
+    const models = await discoverModels(creds());
     expect(models).toEqual(openaiCatalog());
   });
 });
@@ -173,9 +179,121 @@ describe('discoverModels — both protocols credentialed', () => {
     anthropicListMock.mockResolvedValue({ data: [{ id: 'claude-opus-4-6', display_name: 'Claude Opus 4.6' }] });
     openaiListMock.mockResolvedValue({ data: [{ id: 'gpt-5.4' }] });
 
-    const models = await discoverModels();
+    const models = await discoverModels(creds());
 
     expect(models.map((m) => m.protocol)).toEqual(['anthropic', 'openai']);
     expect(models.map((m) => m.id)).toEqual(['claude-opus-4-6', 'gpt-5.4']);
+  });
+});
+
+describe('discoverEndpointModels — custom / self-hosted endpoints', () => {
+  const OLLAMA = 'http://localhost:11434/v1';
+
+  it('OpenAI-compat: returns every model with base_url + sourceLabel and NO family filter', async () => {
+    // llama/mistral/gemini ids that the official gpt/o filter would wrongly drop.
+    openaiListMock.mockResolvedValue({
+      data: [{ id: 'llama3.2' }, { id: 'mistral' }, { id: 'gemini-2.5-pro' }],
+    });
+
+    const models = await discoverEndpointModels({
+      protocol: 'openai',
+      baseUrl: OLLAMA,
+      sourceLabel: 'ollama',
+    });
+
+    expect(models).toEqual([
+      { id: 'llama3.2', name: 'llama3.2', protocol: 'openai', base_url: OLLAMA, source: 'ollama' },
+      { id: 'mistral', name: 'mistral', protocol: 'openai', base_url: OLLAMA, source: 'ollama' },
+      { id: 'gemini-2.5-pro', name: 'gemini-2.5-pro', protocol: 'openai', base_url: OLLAMA, source: 'ollama' },
+    ]);
+  });
+
+  it('no apiKey → SDK is constructed with a non-empty placeholder key (no env fallback) + the base_url', async () => {
+    openaiListMock.mockResolvedValue({ data: [{ id: 'llama3.2' }] });
+
+    await discoverEndpointModels({ protocol: 'openai', baseUrl: OLLAMA, sourceLabel: 'ollama' });
+
+    expect(openaiCtorMock).toHaveBeenCalledWith({
+      baseURL: OLLAMA,
+      apiKey: 'no-auth',
+      maxRetries: 0,
+      timeout: 5000,
+    });
+  });
+
+  it('an explicit apiKey is passed through to the SDK unchanged', async () => {
+    openaiListMock.mockResolvedValue({ data: [{ id: 'gpt-4o' }] });
+
+    await discoverEndpointModels({
+      protocol: 'openai',
+      baseUrl: 'https://gateway.example/v1',
+      apiKey: 'sk-gateway-key',
+      sourceLabel: 'gateway',
+    });
+
+    expect(openaiCtorMock).toHaveBeenCalledWith({
+      baseURL: 'https://gateway.example/v1',
+      apiKey: 'sk-gateway-key',
+      maxRetries: 0,
+      timeout: 5000,
+    });
+  });
+
+  it('Anthropic-compat: constructs the Anthropic SDK with base_url and maps ids', async () => {
+    anthropicListMock.mockResolvedValue({ data: [{ id: 'claude-proxy-1', display_name: 'Proxy' }] });
+
+    const models = await discoverEndpointModels({
+      protocol: 'anthropic',
+      baseUrl: 'https://proxy.example',
+      apiKey: 'sk-x',
+      sourceLabel: 'proxy',
+    });
+
+    expect(models).toEqual([
+      { id: 'claude-proxy-1', name: 'claude-proxy-1', protocol: 'anthropic', base_url: 'https://proxy.example', source: 'proxy' },
+    ]);
+    expect(anthropicCtorMock).toHaveBeenCalledWith({
+      baseURL: 'https://proxy.example',
+      apiKey: 'sk-x',
+      maxRetries: 0,
+      timeout: 5000,
+    });
+  });
+
+  it('a successful-but-empty listing returns [] (no static-catalog fallback)', async () => {
+    openaiListMock.mockResolvedValue({ data: [] });
+    const models = await discoverEndpointModels({ protocol: 'openai', baseUrl: OLLAMA, sourceLabel: 'ollama' });
+    expect(models).toEqual([]);
+  });
+
+  it('failure → warns on stderr and returns [] without throwing (no catalog fallback)', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    openaiListMock.mockRejectedValue(new Error('ECONNREFUSED'));
+
+    const models = await discoverEndpointModels({ protocol: 'openai', baseUrl: OLLAMA, sourceLabel: 'ollama' });
+
+    expect(models).toEqual([]);
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining(OLLAMA));
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('unavailable'));
+    // Distinct from the official path — must NOT mention the static catalog.
+    expect(stderr).not.toHaveBeenCalledWith(expect.stringContaining('static catalog'));
+    stderr.mockRestore();
+  });
+
+  it('the failure warning never leaks the API key (SEC-02)', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    openaiListMock.mockRejectedValue(new Error('bad request'));
+
+    await discoverEndpointModels({
+      protocol: 'openai',
+      baseUrl: 'https://gateway.example/v1',
+      apiKey: 'sk-super-secret',
+      sourceLabel: 'gateway',
+    });
+
+    for (const call of stderr.mock.calls) {
+      expect(String(call[0])).not.toContain('sk-super-secret');
+    }
+    stderr.mockRestore();
   });
 });

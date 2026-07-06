@@ -115,7 +115,7 @@ async function runQuickSetup(loader: ConfigLoader): Promise<void> {
 
   // --- Step 2: live model discovery (official /models endpoints) ---
   process.stderr.write('\nStep 2/3: Discovering available models...\n');
-  const discovered = await discoverModels();
+  const discovered = await discoverModels(credManager);
 
   let selected = discovered.filter(isRecommended);
   if (selected.length === 0) selected = discovered;
@@ -206,7 +206,7 @@ async function runCustomSetup(loader: ConfigLoader): Promise<void> {
 
   // --- Step 2: Discover official models from any detected env keys ---
   process.stderr.write('\nStep 2/5: Discovering available models...\n');
-  const discovered = await discoverModels();
+  const discovered = await discoverModels(credManager);
 
   if (discovered.length === 0) {
     process.stderr.write('\n⚠  No models found from detected API keys.\n');
