@@ -6,7 +6,14 @@
  * test/providers/model-assembly.test.ts instead of here.
  */
 import { describe, it, expect } from 'vitest';
-import { isRecommended, clampAgents, credentialHint } from '../../../src/ui/wizard/first-run.js';
+import {
+  isRecommended,
+  clampAgents,
+  credentialHint,
+  buildModelChoices,
+  SHOW_ALL_VALUE,
+} from '../../../src/ui/wizard/first-run.js';
+import type { ModelCheckboxItem } from '../../../src/ui/wizard/first-run.js';
 import { assembleConfig, dedupePrefer } from '../../../src/config/assemble-council.js';
 import type { CouncilConfig } from '../../../src/types/config.js';
 import type { DiscoveredModel } from '../../../src/providers/model-discovery.js';
@@ -74,6 +81,140 @@ describe('credentialHint', () => {
     ['some-unknown-provider', 'set the endpoint API key (env var or key file)'],
   ])('provider=%s → matching hint', (provider, expected) => {
     expect(credentialHint(provider)).toContain(expected);
+  });
+});
+
+describe('buildModelChoices', () => {
+  // Only choice rows carry a `value`; Separator headers do not.
+  type Selectable = { name: string; value: string; checked: boolean };
+  const selectable = (items: ModelCheckboxItem[]): Selectable[] =>
+    items.filter((i): i is Selectable => 'value' in i);
+  const findByValue = (items: ModelCheckboxItem[], value: string): Selectable | undefined =>
+    selectable(items).find(c => c.value === value);
+  const modelRows = (items: ModelCheckboxItem[]): Selectable[] =>
+    selectable(items).filter(c => c.value !== SHOW_ALL_VALUE);
+
+  const openaiModels = (n: number): DiscoveredModel[] =>
+    Array.from({ length: n }, (_, i) =>
+      makeDiscovered({ id: `model-${String(i).padStart(2, '0')}`, protocol: 'openai' }),
+    );
+
+  // 25 models (> threshold): 5 recommended flagships + 20 non-recommended fillers,
+  // split across both protocols so grouping is exercised too.
+  const mixedDiscovered = (): { models: DiscoveredModel[]; recommendedCount: number } => {
+    const recommended = [
+      makeDiscovered({ id: 'claude-opus-4-20250514', protocol: 'anthropic' }),
+      makeDiscovered({ id: 'claude-sonnet-4-20250514', protocol: 'anthropic' }),
+      makeDiscovered({ id: 'claude-3-5-sonnet-20241022', protocol: 'anthropic' }),
+      makeDiscovered({ id: 'gpt-4o', protocol: 'openai' }),
+      makeDiscovered({ id: 'gpt-5', protocol: 'openai' }),
+    ];
+    const filler = Array.from({ length: 20 }, (_, i) =>
+      makeDiscovered({ id: `filler-${String(i).padStart(2, '0')}`, protocol: 'openai' }),
+    );
+    return { models: [...recommended, ...filler], recommendedCount: recommended.length };
+  };
+
+  it('total ≤ 20: no truncation, no "show all" row, every model present', () => {
+    const models = [
+      makeDiscovered({ id: 'claude-opus-4-20250514', protocol: 'anthropic' }), // recommended
+      makeDiscovered({ id: 'claude-haiku-3-5', protocol: 'anthropic' }),        // not
+      makeDiscovered({ id: 'gpt-4o', protocol: 'openai' }),                     // recommended
+      makeDiscovered({ id: 'gpt-4o-mini', protocol: 'openai' }),               // not
+    ];
+    const { choices, hiddenCount } = buildModelChoices(models);
+
+    expect(hiddenCount).toBe(0);
+    expect(findByValue(choices, SHOW_ALL_VALUE)).toBeUndefined();
+    expect(modelRows(choices)).toHaveLength(4); // ≤ 20 → nothing collapsed
+
+    // isRecommended drives the default checked state when no checkedKeys given.
+    const opus = modelRows(choices).find(c => c.name.startsWith('claude-opus'));
+    const haiku = modelRows(choices).find(c => c.name.startsWith('claude-haiku'));
+    expect(opus?.checked).toBe(true);
+    expect(haiku?.checked).toBe(false);
+  });
+
+  // Acceptance criterion 1: > 20 collapses to recommended items + one disclosure row.
+  it('total > 20: shows recommended items + a single "show all / N hidden" row', () => {
+    const { models, recommendedCount } = mixedDiscovered();
+    const { choices, hiddenCount } = buildModelChoices(models);
+
+    // non-Separator items == recommended count + the one "show all" row
+    expect(selectable(choices)).toHaveLength(recommendedCount + 1);
+    expect(hiddenCount).toBe(models.length - recommendedCount); // 20 hidden
+
+    // the disclosure row exists and states how many were hidden
+    const showAllRow = findByValue(choices, SHOW_ALL_VALUE);
+    expect(showAllRow).toBeDefined();
+    expect(showAllRow?.name).toContain(String(hiddenCount));
+
+    // every visible model row is a recommended flagship, no filler leaked in
+    const visible = modelRows(choices);
+    expect(visible).toHaveLength(recommendedCount);
+    expect(visible.every(c => !c.name.includes('filler'))).toBe(true);
+
+    // the per-protocol header also spells out how many were held back (openai: 2 of 22)
+    const headers = choices.filter(i => !('value' in i)) as { separator: string }[];
+    expect(headers.some(h => h.separator.includes('showing 2 of 22'))).toBe(true);
+  });
+
+  // Acceptance criterion 2: the "show all" view returns every discovered model per protocol.
+  it('"show all" view returns every discovered model, grouped by protocol', () => {
+    const { models } = mixedDiscovered();
+    const { choices, hiddenCount } = buildModelChoices(models, { showAll: true });
+
+    expect(hiddenCount).toBe(0);
+    expect(findByValue(choices, SHOW_ALL_VALUE)).toBeUndefined();
+
+    const shown = modelRows(choices);
+    expect(shown).toHaveLength(models.length); // all 25 present
+
+    const anthropicCount = models.filter(m => m.protocol === 'anthropic').length;
+    const openaiCount = models.filter(m => m.protocol === 'openai').length;
+    expect(shown.filter(c => c.name.includes('[anthropic]'))).toHaveLength(anthropicCount);
+    expect(shown.filter(c => c.name.includes('[openai]'))).toHaveLength(openaiCount);
+  });
+
+  it('boundary: 20 models render in full, 21 (none recommended) collapse behind "show all"', () => {
+    // 20 ≤ threshold → full list, no disclosure row
+    const at = buildModelChoices(openaiModels(20));
+    expect(at.hiddenCount).toBe(0);
+    expect(modelRows(at.choices)).toHaveLength(20);
+    expect(findByValue(at.choices, SHOW_ALL_VALUE)).toBeUndefined();
+
+    // 21 > threshold with nothing recommended → everything disclosed behind the row
+    const over = buildModelChoices(openaiModels(21));
+    expect(over.hiddenCount).toBe(21);
+    expect(modelRows(over.choices)).toHaveLength(0);
+    expect(findByValue(over.choices, SHOW_ALL_VALUE)).toBeDefined();
+  });
+
+  it('show-all rebuild preserves the user selection via checkedKeys', () => {
+    const models = openaiModels(25);
+    // Discover the real value keys from an untruncated build (avoids duplicating modelKey()).
+    const allKeys = modelRows(buildModelChoices(models, { showAll: true }).choices).map(c => c.value);
+    expect(allKeys).toHaveLength(25);
+
+    const preserved = new Set([allKeys[0]!, allKeys[10]!, allKeys[24]!]);
+    const { choices, hiddenCount } = buildModelChoices(models, { showAll: true, checkedKeys: preserved });
+
+    expect(hiddenCount).toBe(0);
+    expect(findByValue(choices, SHOW_ALL_VALUE)).toBeUndefined();
+
+    const rows = modelRows(choices);
+    expect(rows).toHaveLength(25); // every model revealed after "show all"
+    const checked = new Set(rows.filter(c => c.checked).map(c => c.value));
+    expect(checked).toEqual(preserved); // exactly the preserved selection, nothing more
+  });
+
+  it('checkedKeys overrides the isRecommended default (a recommended model can start unchecked)', () => {
+    const models = [
+      makeDiscovered({ id: 'gpt-4o', protocol: 'openai' }),       // recommended by default
+      makeDiscovered({ id: 'gpt-4o-mini', protocol: 'openai' }), // not
+    ];
+    const { choices } = buildModelChoices(models, { showAll: true, checkedKeys: new Set() });
+    expect(modelRows(choices).every(c => c.checked === false)).toBe(true);
   });
 });
 

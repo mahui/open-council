@@ -212,17 +212,7 @@ async function runCustomSetup(loader: ConfigLoader): Promise<void> {
     process.stderr.write('\n⚠  No models found from detected API keys.\n');
     process.stderr.write('  Continuing — you can still add standard-API / custom endpoints next.\n');
   } else {
-    const { choices } = buildModelChoices(discovered);
-    process.stderr.write('\n');
-    const selectedKeys = await checkbox({
-      message: 'Choose models for your council (space to toggle, leave empty to skip):',
-      choices,
-      pageSize: 18,
-    });
-
-    const selected = selectedKeys
-      .map(k => discovered.find(m => modelKey(m) === k))
-      .filter((m): m is DiscoveredModel => !!m);
+    const selected = await selectDiscoveredModels(discovered);
 
     if (selected.length > 0) {
       const wantTest = await confirm({
@@ -418,10 +408,45 @@ export function isRecommended(m: DiscoveredModel): boolean {
   return false;
 }
 
-type CheckboxChoice = { name: string; value: string; checked: boolean };
-type CheckboxItem = CheckboxChoice | Separator;
+export type ModelCheckboxChoice = { name: string; value: string; checked: boolean };
+export type ModelCheckboxItem = ModelCheckboxChoice | Separator;
 
-function buildModelChoices(discovered: DiscoveredModel[]): { choices: CheckboxItem[] } {
+export interface BuildModelChoicesOptions {
+  /** Render the complete list without per-protocol truncation. */
+  showAll?: boolean;
+  /**
+   * When provided, each choice's `checked` state is read from this set (by model
+   * key) instead of the `isRecommended` default. Used to carry the user's current
+   * selections across a "show all" re-render.
+   */
+  checkedKeys?: ReadonlySet<string>;
+}
+
+export interface ModelChoicesResult {
+  choices: ModelCheckboxItem[];
+  /** Number of models hidden by truncation (0 when the full list is shown). */
+  hiddenCount: number;
+}
+
+/** Above this many discovered models the default view collapses to the flagships. */
+const MODEL_LIST_TRUNCATE_THRESHOLD = 20;
+/** Sentinel checkbox value: toggling it re-renders the full, untruncated list. */
+export const SHOW_ALL_VALUE = '__council_show_all__';
+
+/**
+ * Shape the discovered models into checkbox choices. When the list is long the
+ * default view collapses to the recommended flagships per protocol, but — unlike
+ * the previous silent truncation — the hidden models are disclosed via the
+ * per-protocol header ("showing N of M") and an actionable "show all" row, so
+ * the user always knows nothing was quietly dropped.
+ */
+export function buildModelChoices(
+  discovered: DiscoveredModel[],
+  options: BuildModelChoicesOptions = {},
+): ModelChoicesResult {
+  const { showAll = false, checkedKeys } = options;
+  const truncate = !showAll && discovered.length > MODEL_LIST_TRUNCATE_THRESHOLD;
+
   const byProtocol = new Map<Protocol, DiscoveredModel[]>();
   for (const m of discovered) {
     const list = byProtocol.get(m.protocol) ?? [];
@@ -429,12 +454,13 @@ function buildModelChoices(discovered: DiscoveredModel[]): { choices: CheckboxIt
     byProtocol.set(m.protocol, list);
   }
 
-  const choices: CheckboxItem[] = [];
-  const showAll = discovered.length <= 20;
+  const isChecked = (m: DiscoveredModel): boolean =>
+    checkedKeys ? checkedKeys.has(modelKey(m)) : isRecommended(m);
+
+  const choices: ModelCheckboxItem[] = [];
+  let hiddenCount = 0;
 
   for (const [protocol, models] of byProtocol) {
-    choices.push(new Separator(`── ${protocol} ──`));
-
     const sorted = [...models].sort((a, b) => {
       const ra = isRecommended(a) ? 0 : 1;
       const rb = isRecommended(b) ? 0 : 1;
@@ -442,17 +468,71 @@ function buildModelChoices(discovered: DiscoveredModel[]): { choices: CheckboxIt
       return a.name.localeCompare(b.name);
     });
 
-    const limit = showAll ? sorted.length : Math.min(4, sorted.length);
-    for (const m of sorted.slice(0, limit)) {
+    // Default (truncated) view surfaces only the recommended flagships; the rest
+    // stay one keystroke away behind the "show all" row rather than being dropped.
+    const visible = truncate ? sorted.filter(isRecommended) : sorted;
+    const hiddenHere = sorted.length - visible.length;
+    hiddenCount += hiddenHere;
+
+    choices.push(new Separator(
+      hiddenHere > 0 ? `── ${protocol} (showing ${visible.length} of ${sorted.length}) ──` : `── ${protocol} ──`,
+    ));
+
+    for (const m of visible) {
       choices.push({
         name: `${m.name}  [${m.protocol}]`,
         value: modelKey(m),
-        checked: isRecommended(m),
+        checked: isChecked(m),
       });
     }
   }
 
-  return { choices };
+  // Explicit, actionable disclosure of what truncation hid — toggling this row
+  // re-renders the complete list instead of silently dropping the rest.
+  if (hiddenCount > 0) {
+    choices.push(new Separator(' '));
+    choices.push({
+      name: `⋯ Show all ${discovered.length} models  (${hiddenCount} more hidden — toggle to reveal)`,
+      value: SHOW_ALL_VALUE,
+      checked: false,
+    });
+  }
+
+  return { choices, hiddenCount };
+}
+
+/**
+ * Present the discovered models as a checkbox list, disclosing (never hiding)
+ * any truncation. When the list is long it is capped per protocol with a
+ * "N more hidden" action row; toggling that row re-renders the full list with
+ * the user's current selections preserved.
+ */
+async function selectDiscoveredModels(discovered: DiscoveredModel[]): Promise<DiscoveredModel[]> {
+  let showAll = false;
+  let checkedKeys: ReadonlySet<string> | undefined;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { choices } = buildModelChoices(discovered, { showAll, checkedKeys });
+    process.stderr.write('\n');
+    const selectedKeys = await checkbox({
+      message: 'Choose models for your council (space to toggle, leave empty to skip):',
+      choices,
+      pageSize: 18,
+    });
+
+    if (selectedKeys.includes(SHOW_ALL_VALUE)) {
+      // Reveal the full list, carrying over whatever the user had already ticked.
+      showAll = true;
+      checkedKeys = new Set(selectedKeys.filter(k => k !== SHOW_ALL_VALUE));
+      process.stderr.write('  Showing the full model list…\n');
+      continue;
+    }
+
+    return selectedKeys
+      .map(k => discovered.find(m => modelKey(m) === k))
+      .filter((m): m is DiscoveredModel => !!m);
+  }
 }
 
 /** Make a short (~10s) real API call to verify a model's credentials work. */
