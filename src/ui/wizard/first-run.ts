@@ -3,7 +3,7 @@ import { select, confirm, checkbox, input, password, Separator } from '@inquirer
 import { PATHS } from '../../config/paths.js';
 import { ConfigLoader } from '../../config/loader.js';
 import { CredentialManager } from '../../providers/credentials/discovery.js';
-import { discoverModels } from '../../providers/model-discovery.js';
+import { discoverModels, discoverEndpointModels } from '../../providers/model-discovery.js';
 import type { DiscoveredModel } from '../../providers/model-discovery.js';
 import type { ModelConfig, Protocol } from '../../types/config.js';
 import { ApiAdapter } from '../../providers/api-adapter.js';
@@ -550,10 +550,11 @@ async function testConnectivity(
 
 /**
  * Interactively collect standard-API models: pick a protocol, a base_url
- * (default official, editable → any compatible endpoint), one or more model
- * ids, and an optional API key (pasted → 0o600 key file, or left empty for
- * no-auth localhost endpoints). Covers both "official model, manual key" and
- * "custom gateway / self-hosted" cases.
+ * (default official, editable → any compatible endpoint), an optional API key
+ * (pasted → 0o600 key file, or left empty for no-auth localhost endpoints), and
+ * one or more model ids — either discovered live from the endpoint's `/models`
+ * list (checkbox-select) or typed by hand. Covers both "official model, manual
+ * key" and "custom gateway / self-hosted" cases.
  */
 async function collectCustomProviders(apiAdapter: ApiAdapter): Promise<ModelConfig[]> {
   const wantCustom = await confirm({
@@ -602,21 +603,31 @@ async function collectCustomProviders(apiAdapter: ApiAdapter): Promise<ModelConf
       },
     });
 
-    const modelIdsRaw = await input({
-      message: 'Model identifier(s) — comma-separated (e.g. gpt-4o or llama3.2,mistral):',
-      validate: (v: string) => {
-        const ids = parseModelIds(v);
-        if (ids.length === 0) return 'At least one model id is required.';
-        if (new Set(ids).size !== ids.length) return 'Duplicate model ids in input.';
-        return true;
-      },
-    });
-    const modelIds = parseModelIds(modelIdsRaw);
-
+    // Key is captured before model ids so the discovery path can authenticate
+    // against the endpoint; it is only written to disk once we keep a model.
     const apiKey = await password({
       message: 'API key (leave empty for no auth, e.g. local ollama):',
       mask: '*',
     });
+
+    // Empty base_url → official endpoint; buildCustomModelConfig always sets
+    // base_url, so an official standard-API model just carries the official URL,
+    // which resolves the same as omitting it.
+    const resolvedBaseUrl = baseUrl.trim() || officialBaseUrl(protocol);
+
+    const modelIds = await resolveEndpointModelIds({
+      protocol,
+      baseUrl: resolvedBaseUrl,
+      apiKey,
+      sourceLabel: sanitizedName,
+    });
+
+    if (modelIds.length === 0) {
+      process.stderr.write('  No models chosen for this endpoint — skipping it.\n');
+      const more = await confirm({ message: 'Add another endpoint?', default: false });
+      if (!more) break;
+      continue;
+    }
 
     // Persist key once per endpoint — all models this round share the credential file.
     let credPath: string | undefined;
@@ -627,16 +638,12 @@ async function collectCustomProviders(apiAdapter: ApiAdapter): Promise<ModelConf
       chmodSync(credPath, 0o600);
     }
 
-    const trimmedBaseUrl = baseUrl.trim();
     let anyKept = false;
     for (const modelId of modelIds) {
       const cfg = buildCustomModelConfig({
         sanitizedName,
         modelId,
-        // Empty base_url → official endpoint; buildCustomModelConfig always sets
-        // base_url, so an official standard-API model here just carries the
-        // official URL, which resolves the same as omitting it.
-        baseUrl: trimmedBaseUrl || officialBaseUrl(protocol),
+        baseUrl: resolvedBaseUrl,
         protocol,
         ...(credPath ? { credentialPath: credPath } : {}),
       });
@@ -672,6 +679,75 @@ async function collectCustomProviders(apiAdapter: ApiAdapter): Promise<ModelConf
 /** Official base URL for a protocol (mirrors OFFICIAL_BASE_URL in the schema). */
 function officialBaseUrl(protocol: Protocol): string {
   return protocol === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.openai.com/v1';
+}
+
+/**
+ * Obtain the model ids for a custom endpoint. The user picks between discovering
+ * them live from the endpoint's `/models` list (checkbox-select) and typing them
+ * by hand. Discovery is best-effort: `discoverEndpointModels` returns [] (never
+ * throws) on failure/timeout, in which case we note it on stderr and degrade to
+ * the manual path rather than showing an empty checkbox. An empty selection from
+ * a populated list is treated as "skip this endpoint" (returns []).
+ */
+export async function resolveEndpointModelIds(opts: {
+  protocol: Protocol;
+  baseUrl: string;
+  apiKey: string;
+  sourceLabel: string;
+}): Promise<string[]> {
+  const method = await select<'discover' | 'manual'>({
+    message: 'How should this endpoint\'s models be chosen?',
+    choices: [
+      { name: 'Discover from the endpoint (query its /models list)', value: 'discover' },
+      { name: 'Enter model id(s) manually (comma-separated)', value: 'manual' },
+    ],
+    default: 'discover',
+  });
+
+  if (method === 'discover') {
+    process.stderr.write('  Discovering models from the endpoint…\n');
+    const discovered = await discoverEndpointModels({
+      protocol: opts.protocol,
+      baseUrl: opts.baseUrl,
+      ...(opts.apiKey.length > 0 ? { apiKey: opts.apiKey } : {}),
+      sourceLabel: opts.sourceLabel,
+    });
+
+    if (discovered.length > 0) {
+      // A populated list — selection (possibly empty) is authoritative.
+      return selectEndpointModelIds(discovered);
+    }
+    process.stderr.write(
+      '  \x1b[33mEndpoint returned no model list — enter id(s) manually instead.\x1b[0m\n',
+    );
+    // fall through to the manual prompt
+  }
+
+  return promptManualModelIds();
+}
+
+/** Checkbox-select model ids from a live-discovered endpoint list. */
+async function selectEndpointModelIds(discovered: DiscoveredModel[]): Promise<string[]> {
+  process.stderr.write('\n');
+  return checkbox({
+    message: `Select models from this endpoint (${discovered.length} found; space to toggle, empty to skip):`,
+    choices: discovered.map(m => ({ name: m.id, value: m.id, checked: false })),
+    pageSize: 18,
+  });
+}
+
+/** Prompt for a comma-separated model id list (manual fallback / explicit choice). */
+async function promptManualModelIds(): Promise<string[]> {
+  const raw = await input({
+    message: 'Model identifier(s) — comma-separated (e.g. gpt-4o or llama3.2,mistral):',
+    validate: (v: string) => {
+      const ids = parseModelIds(v);
+      if (ids.length === 0) return 'At least one model id is required.';
+      if (new Set(ids).size !== ids.length) return 'Duplicate model ids in input.';
+      return true;
+    },
+  });
+  return parseModelIds(raw);
 }
 
 /** Parse a comma-separated model id list, trimming and dropping empties. */
