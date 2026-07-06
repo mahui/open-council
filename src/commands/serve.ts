@@ -32,7 +32,7 @@ export async function runServe(options: ServeOptions): Promise<void> {
 
   // Assemble orchestration deps (server-side only; credentials never leave here).
   const credentialManager = await discoverCredentials();
-  const { models, chairman, roleGenModel } = resolveModels(credentialManager, { loadGeneralConfig: true });
+  const { models, chairman, roleGenModel, minAgents, maxAgents } = resolveModels(credentialManager, { loadGeneralConfig: true });
   if (models.length === 0) {
     process.stderr.write(
       'Error: No models available. Run "council setup" or set API keys ' +
@@ -51,6 +51,8 @@ export async function runServe(options: ServeOptions): Promise<void> {
     allModels: loader.loadAllModelConfigs(),
     defaultChairman: chairman ?? '',
     roleGenModel,
+    minAgents: minAgents ?? 2,
+    maxAgents: maxAgents ?? 5,
   });
   const manager = new DebateManager({ runtime, store, loadRoleSet: (name) => loader.loadRoleSet(name) });
 

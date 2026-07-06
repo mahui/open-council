@@ -87,7 +87,7 @@ export class DebateManager {
         renderer,
         snapshot.models,
         input.chairman ?? snapshot.defaultChairman,
-        undefined,
+        { min: snapshot.minAgents, max: snapshot.maxAgents },
         snapshot.roleGenModel,
         explicitRoleSet,
       );

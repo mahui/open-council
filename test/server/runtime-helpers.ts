@@ -19,7 +19,14 @@ export function makeRuntime(
   models: ModelConfig[],
   defaultChairman = 'claude',
 ): RuntimeConfig {
-  return new RuntimeConfig({ adapter, models, allModels: models, defaultChairman });
+  return new RuntimeConfig({
+    adapter,
+    models,
+    allModels: models,
+    defaultChairman,
+    minAgents: 2,
+    maxAgents: 5,
+  });
 }
 
 /** Throwaway config/credential deps for routes that never touch the settings面. */

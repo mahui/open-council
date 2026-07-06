@@ -20,6 +20,10 @@ export interface ResolvedModels {
   chairman?: string;
   /** Role-panel designer model from council.yaml (only when loadGeneralConfig is set). */
   roleGenModel?: ModelConfig;
+  /** Minimum agent seats from council.yaml (only when loadGeneralConfig is set). */
+  minAgents?: number;
+  /** Maximum agent seats from council.yaml (only when loadGeneralConfig is set). */
+  maxAgents?: number;
   /** TUI mode from council.yaml, defaults to 'auto'. */
   tuiMode: 'auto' | 'always' | 'never';
 }
@@ -60,6 +64,8 @@ export function resolveModels(
   let models: ModelConfig[];
   let chairman: string | undefined;
   let roleGenModel: ModelConfig | undefined;
+  let minAgents: number | undefined;
+  let maxAgents: number | undefined;
   let tuiMode: 'auto' | 'always' | 'never' = 'auto';
 
   if (loader.isConfigured()) {
@@ -72,6 +78,8 @@ export function resolveModels(
         if (roleGenName) {
           roleGenModel = models.find(m => m.name === roleGenName);
         }
+        minAgents = config.general.min_agents;
+        maxAgents = config.general.max_agents;
         tuiMode = config.output.tui_mode;
       } catch (err) {
         process.stderr.write(
@@ -92,5 +100,5 @@ export function resolveModels(
     models = discoverModelsFromEnv(credentialManager);
   }
 
-  return { models, chairman, roleGenModel, tuiMode };
+  return { models, chairman, roleGenModel, minAgents, maxAgents, tuiMode };
 }

@@ -54,13 +54,31 @@ const MAX_DEBATE_ROUNDS = 3;
  */
 const AGREEMENT_STOP_THRESHOLD = 0.6;
 
+/**
+ * Agent-count bounds sourced from config (`general.min_agents` /
+ * `general.max_agents`). Injected as a single object so the positional
+ * constructor stays backward-compatible: the former 5th parameter was
+ * `maxAgents?: number`, and every caller passed `undefined` there, so an
+ * optional object slots in without shifting `roleGenModel`/`explicitRoleSet`.
+ * Both fields are optional; executeRoute falls back to the schema defaults
+ * (min 2, max 5) and always intersects with per-mode seat semantics.
+ */
+export interface AgentBounds {
+  min?: number;
+  max?: number;
+}
+
+/** Config defaults (mirror config schema: min_agents=2, max_agents=5). */
+const DEFAULT_MIN_AGENTS = 2;
+const DEFAULT_MAX_AGENTS = 5;
+
 export class Orchestrator {
   constructor(
     private adapter: InvocationAdapter,
     private renderer: Renderer,
     private availableModels: ModelConfig[],
     private defaultChairman?: string,
-    private maxAgents: number = 5,
+    private agentBounds: AgentBounds = {},
     /** Optional explicit model for role-panel design (config: role_generator_model). */
     private roleGenModel?: ModelConfig,
     /**
@@ -240,17 +258,33 @@ export class Orchestrator {
       ? models.find(m => m.name === this.defaultChairman) ?? this.selectStrongestModel(models)
       : this.selectStrongestModel(models);
 
-    // Compute an agent-count interval per mode; the LLM picks the size that
-    // fits the question's complexity (no longer driven solely by model count).
-    const maxAgents = this.maxAgents;
-    const upperBound = Math.min(models.length, maxAgents);
+    // Compute an agent-count interval per mode by intersecting the config
+    // bounds (min_agents/max_agents) with each mode's seat semantics; the LLM
+    // then picks the size that fits the question's complexity.
+    //   quick   → always {1,1} (exempt from min_agents, PRD §辩论模式)
+    //   compare → { max(2, min_agents), min(models, max_agents) }
+    //   debate  → { max(3, min_agents), min(models, max_agents) }
+    // When the floor exceeds available seats (min > max, e.g. few models or a
+    // tight max_agents) the minimum is clamped down and a degradation is raised.
+    const configMin = this.agentBounds.min ?? DEFAULT_MIN_AGENTS;
+    const configMax = this.agentBounds.max ?? DEFAULT_MAX_AGENTS;
+    const upperBound = Math.min(models.length, configMax);
     let range: { min: number; max: number };
     if (session.resolved_mode === 'quick') {
       range = { min: 1, max: 1 };
-    } else if (session.resolved_mode === 'compare') {
-      range = { min: 2, max: Math.max(upperBound, 2) };
     } else {
-      range = { min: 3, max: Math.max(upperBound, 3) };
+      const modeFloor = session.resolved_mode === 'compare' ? 2 : 3;
+      let min = Math.max(modeFloor, configMin);
+      const max = upperBound;
+      if (min > max) {
+        this.recordDegradation(session, {
+          phase: 'route',
+          reason: `min_agents floor (${min}) exceeds available seats (${max})`,
+          impact: `Clamping minimum panel size to ${max}`,
+        });
+        min = max;
+      }
+      range = { min, max };
     }
 
     // Role source, in priority order:

@@ -45,10 +45,20 @@ interface ReplState {
   mode: DebateMode;
   models: ModelConfig[];
   chairman?: string;
+  /** Role-panel designer model from council.yaml (general.role_generator_model). */
+  roleGenModel?: ModelConfig;
+  /** Agent-seat bounds from council.yaml (general.min_agents / max_agents). */
+  minAgents?: number;
+  maxAgents?: number;
   credentialManager: CredentialManager;
   adapter: AutoAdapter;
   sessionCount: number;
   input?: InputController;
+}
+
+/** Resolve the role-generator model (by name) from loaded config, if configured. */
+function resolveRoleGenModel(roleGenName: string | undefined, models: ModelConfig[]): ModelConfig | undefined {
+  return roleGenName ? models.find(m => m.name === roleGenName) : undefined;
 }
 
 export async function startRepl(): Promise<void> {
@@ -62,6 +72,9 @@ export async function startRepl(): Promise<void> {
 
   let models: ModelConfig[];
   let chairman: string | undefined;
+  let roleGenModel: ModelConfig | undefined;
+  let minAgents: number | undefined;
+  let maxAgents: number | undefined;
   const loader = new ConfigLoader();
 
   if (loader.isConfigured()) {
@@ -69,6 +82,9 @@ export async function startRepl(): Promise<void> {
       const config = loader.loadCouncilConfig();
       models = loader.loadAllModels();
       chairman = config.general.default_chairman;
+      roleGenModel = resolveRoleGenModel(config.general.role_generator_model, models);
+      minAgents = config.general.min_agents;
+      maxAgents = config.general.max_agents;
     } catch (err) {
       process.stderr.write(`\r${YELLOW}⚠ 配置无法加载，已回落到环境变量发现的模型（可能与你配置的模型不同）。${RESET}\n`);
       process.stderr.write(formatConfigError(err, PATHS.config) + '\n');
@@ -92,6 +108,9 @@ export async function startRepl(): Promise<void> {
             const config = loader.loadCouncilConfig();
             models = loader.loadAllModels();
             chairman = config.general.default_chairman;
+            roleGenModel = resolveRoleGenModel(config.general.role_generator_model, models);
+            minAgents = config.general.min_agents;
+            maxAgents = config.general.max_agents;
           } catch (err) {
             process.stderr.write(formatConfigError(err, PATHS.config) + '\n');
           }
@@ -120,6 +139,9 @@ export async function startRepl(): Promise<void> {
     mode: 'auto',
     models,
     chairman,
+    roleGenModel,
+    minAgents,
+    maxAgents,
     credentialManager,
     adapter,
     sessionCount: 0,
@@ -213,6 +235,9 @@ async function handleCommand(input: string, state: ReplState): Promise<void> {
             const config = loader.loadCouncilConfig();
             state.models = loader.loadAllModels();
             state.chairman = config.general.default_chairman;
+            state.roleGenModel = resolveRoleGenModel(config.general.role_generator_model, state.models);
+            state.minAgents = config.general.min_agents;
+            state.maxAgents = config.general.max_agents;
             process.stderr.write(`  ${GREEN}✓${RESET} Configuration reloaded.\n`);
           } catch (err) {
             process.stderr.write(`  ${YELLOW}⚠ Config reload failed: ${err instanceof Error ? err.message : err}${RESET}\n`);
@@ -289,6 +314,8 @@ async function handleQuestion(question: string, state: ReplState): Promise<void>
     renderer,
     state.models,
     state.chairman,
+    { min: state.minAgents, max: state.maxAgents },
+    state.roleGenModel,
   );
 
   const runOptions: RunOptions = {

@@ -31,6 +31,10 @@ export interface RuntimeSnapshot {
   defaultChairman: string;
   /** Optional role-panel designer model resolved from council.yaml. */
   roleGenModel?: ModelConfig;
+  /** Minimum agent seats for compare/debate (config general.min_agents). */
+  minAgents: number;
+  /** Maximum agent seats for all multi-agent modes (config general.max_agents). */
+  maxAgents: number;
 }
 
 export class RuntimeConfig {
@@ -69,8 +73,10 @@ export function buildSnapshot(opts: {
   const defaultChairman = config?.general.default_chairman ?? '';
   const roleGenName = config?.general.role_generator_model;
   const roleGenModel = roleGenName ? models.find(m => m.name === roleGenName) : undefined;
+  const minAgents = config?.general.min_agents ?? 2;
+  const maxAgents = config?.general.max_agents ?? 5;
   const adapter = opts.adapter ?? buildAutoAdapter(opts.credentialManager);
-  return { adapter, models, allModels, defaultChairman, roleGenModel };
+  return { adapter, models, allModels, defaultChairman, roleGenModel, minAgents, maxAgents };
 }
 
 /**
