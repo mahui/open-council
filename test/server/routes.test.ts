@@ -47,12 +47,12 @@ function createMockAdapter(): InvocationAdapter {
 function createModels(): ModelConfig[] {
   return [
     {
-      name: 'claude', invocation: 'api', provider: 'anthropic', model: 'claude-test',
+      name: 'claude', protocol: 'anthropic', provider: 'anthropic', model: 'claude-test',
       timeout_seconds: 120, capabilities: ['general'], priority: 100, max_concurrent: 1,
       resource_weight: 1, enabled: true, streaming: true, api_key_env: 'ANTHROPIC_API_KEY',
     },
     {
-      name: 'gemini', invocation: 'api', provider: 'google', model: 'gemini-test',
+      name: 'gemini', protocol: 'openai', provider: 'google', model: 'gemini-test',
       timeout_seconds: 120, capabilities: ['general'], priority: 90, max_concurrent: 1,
       resource_weight: 1, enabled: true, streaming: true,
     },
@@ -101,11 +101,12 @@ describe('GET /api/models', () => {
     const res = await app.request('http://x/api/models', { headers: HEADERS });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      models: { name: string; invocation: string }[];
+      models: { name: string; protocol: string }[];
       modes: string[];
       defaultChairman?: string;
     };
     expect(body.models.map((m) => m.name)).toEqual(['claude', 'gemini']);
+    expect(body.models.map((m) => m.protocol)).toEqual(['anthropic', 'openai']);
     expect(body.modes).toEqual(['quick', 'compare', 'debate', 'auto']);
     expect(body.defaultChairman).toBe('claude');
     expect(JSON.stringify(body)).not.toContain('api_key_env');

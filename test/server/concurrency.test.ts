@@ -47,12 +47,12 @@ function createMockAdapter(): InvocationAdapter {
 function createModels(): ModelConfig[] {
   return [
     {
-      name: 'claude', invocation: 'api', provider: 'anthropic', model: 'claude-test',
+      name: 'claude', protocol: 'anthropic', provider: 'anthropic', model: 'claude-test',
       timeout_seconds: 120, capabilities: ['general'], priority: 100, max_concurrent: 1,
       resource_weight: 1, enabled: true, streaming: true, api_key_env: 'ANTHROPIC_API_KEY',
     },
     {
-      name: 'gemini', invocation: 'api', provider: 'google', model: 'gemini-test',
+      name: 'gemini', protocol: 'openai', provider: 'google', model: 'gemini-test',
       timeout_seconds: 120, capabilities: ['general'], priority: 90, max_concurrent: 1,
       resource_weight: 1, enabled: true, streaming: true,
     },

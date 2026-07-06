@@ -86,7 +86,7 @@ describe('ConfigLoader', () => {
 
     const modelYaml = `
 name: test-model
-invocation: api
+protocol: anthropic
 provider: anthropic
 model: claude-sonnet-4-20250514
 timeout_seconds: 120
@@ -110,7 +110,7 @@ streaming: true
 
     writeFileSync(join(testDir, 'models', 'enabled.yaml'), `
 name: enabled
-invocation: api
+protocol: anthropic
 provider: anthropic
 model: test
 timeout_seconds: 120
@@ -120,7 +120,7 @@ streaming: true
 
     writeFileSync(join(testDir, 'models', 'disabled.yaml'), `
 name: disabled
-invocation: api
+protocol: openai
 provider: openai
 model: test
 timeout_seconds: 120

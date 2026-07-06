@@ -9,7 +9,7 @@ import type { ModelConfig } from '../../src/types/config.js';
 function makeModel(): ModelConfig {
   return {
     name: 'claude',
-    invocation: 'api',
+    protocol: 'anthropic',
     provider: 'anthropic',
     model: 'claude-test',
     timeout_seconds: 120,

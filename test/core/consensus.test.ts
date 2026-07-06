@@ -266,22 +266,26 @@ describe('standardDeviation', () => {
 });
 
 describe('getProviderFamily', () => {
-  it('should return provider when set', () => {
+  it('should return the explicit provider label when set', () => {
     expect(getProviderFamily({ provider: 'anthropic' } as ModelConfig)).toBe('anthropic');
   });
 
-  it('should infer from binary name', () => {
-    expect(getProviderFamily({ binary: 'claude' } as ModelConfig)).toBe('anthropic');
-    expect(getProviderFamily({ binary: 'codex' } as ModelConfig)).toBe('openai');
-    expect(getProviderFamily({ binary: 'gemini' } as ModelConfig)).toBe('google');
-    expect(getProviderFamily({ binary: 'ollama-server' } as ModelConfig)).toBe('ollama');
+  it('should derive protocol:host from base_url when no provider label is set (custom endpoint)', () => {
+    expect(getProviderFamily({ protocol: 'openai', base_url: 'https://gw.example.com/v1' } as ModelConfig)).toBe('openai:gw.example.com');
   });
 
-  it('should fall back to the raw binary string when it matches no known family', () => {
-    expect(getProviderFamily({ binary: 'some-custom-cli' } as ModelConfig)).toBe('some-custom-cli');
+  it('two custom endpoints on different hosts count as distinct families', () => {
+    const a = getProviderFamily({ protocol: 'openai', base_url: 'https://gw-a.example.com/v1' } as ModelConfig);
+    const b = getProviderFamily({ protocol: 'openai', base_url: 'https://gw-b.example.com/v1' } as ModelConfig);
+    expect(a).not.toBe(b);
   });
 
-  it('should fall back to an empty string when neither provider nor binary is set', () => {
-    expect(getProviderFamily({} as ModelConfig)).toBe('');
+  it('an unparsable base_url falls back to protocol:base_url verbatim rather than throwing', () => {
+    expect(getProviderFamily({ protocol: 'openai', base_url: 'not-a-url' } as ModelConfig)).toBe('openai:not-a-url');
+  });
+
+  it('should fall back to the protocol when neither provider nor base_url is set (official endpoint)', () => {
+    expect(getProviderFamily({ protocol: 'anthropic' } as ModelConfig)).toBe('anthropic');
+    expect(getProviderFamily({ protocol: 'openai' } as ModelConfig)).toBe('openai');
   });
 });

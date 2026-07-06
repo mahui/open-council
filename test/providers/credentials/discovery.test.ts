@@ -1,625 +1,231 @@
 /**
- * Tests for CredentialManager (src/providers/credentials/discovery.ts).
+ * Tests for the standard-API CredentialManager (src/providers/credentials/discovery.ts).
  *
- * CredentialManager reads real paths under the user's home directory
- * (KNOWN_CREDENTIALS.*, PATHS.credentials — computed from node:os homedir() at
- * module load) and writes refreshed OAuth tokens back to disk. To keep tests
- * safe (never touching a developer's real ~/.codex, ~/.gemini or ~/.council)
- * and independent of what happens to exist on the host, node:fs and
- * node:child_process are mocked at the module level (TEST-03: this mocks the
- * I/O/external-library boundary, not CredentialManager's own logic). pi-ai's
- * OAuth surface is mocked too, since real token refresh is pi-ai's concern,
- * not this module's — our contract is that CredentialManager calls it with the
- * right arguments and persists/propagates the result correctly.
+ * After the standard-API convergence the manager is a thin, three-method shell:
+ * `getApiKey` (env → key file → protocol default env), `discoverAll` (report env
+ * vars + custom key files present on disk), and `saveCustomKey` (persist a
+ * GUI-entered key to a 0o600 file). No OAuth, no keychain, no CLI, no pi-ai.
+ *
+ * Strategy: real filesystem calls against a tmpdir (TEST-04) — `PATHS.credentials`
+ * is a plain (non-frozen) object field, so tests point it at a tmpdir for the
+ * duration of the test and restore the original value afterwards, rather than
+ * mocking node:fs wholesale (there is no OAuth/keychain surface left to isolate).
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
-  return {
-    ...actual,
-    existsSync: vi.fn(() => false),
-    readFileSync: vi.fn(() => { throw new Error('unexpected real read'); }),
-    writeFileSync: vi.fn(),
-    mkdirSync: vi.fn(),
-  };
-});
-
-vi.mock('node:child_process', () => ({
-  execSync: vi.fn(() => { throw new Error('no keychain in tests'); }),
-}));
-
-vi.mock('@mariozechner/pi-ai', () => ({
-  getEnvApiKey: vi.fn(() => undefined),
-}));
-
-vi.mock('@mariozechner/pi-ai/oauth', () => ({
-  getOAuthProvider: vi.fn(() => undefined),
-  getOAuthProviders: vi.fn(() => []),
-  getOAuthApiKey: vi.fn(),
-}));
-
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { execSync } from 'node:child_process';
-import { getEnvApiKey } from '@mariozechner/pi-ai';
-import { getOAuthProvider, getOAuthProviders, getOAuthApiKey } from '@mariozechner/pi-ai/oauth';
-import { CredentialManager } from '../../../src/providers/credentials/discovery.js';
-import { CredentialNotFoundError } from '../../../src/types/errors.js';
-import { KNOWN_CREDENTIALS, PATHS } from '../../../src/config/paths.js';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { OAuthCredentials, OAuthProviderInterface, OAuthLoginCallbacks } from '@mariozechner/pi-ai';
+import { CredentialManager } from '../../../src/providers/credentials/discovery.js';
+import { PATHS } from '../../../src/config/paths.js';
+import type { ModelConfig } from '../../../src/types/config.js';
 
-function stubCallbacks(): OAuthLoginCallbacks {
-  return { onAuth: vi.fn(), onPrompt: vi.fn() };
+function makeConfig(overrides: Partial<ModelConfig> = {}): ModelConfig {
+  return {
+    name: 'test-model',
+    protocol: 'anthropic',
+    model: 'claude-x',
+    timeout_seconds: 120,
+    capabilities: ['general'],
+    priority: 100,
+    max_concurrent: 1,
+    resource_weight: 1,
+    enabled: true,
+    streaming: true,
+    ...overrides,
+  };
 }
 
-function resetMocks(): void {
-  vi.mocked(existsSync).mockReset().mockReturnValue(false);
-  vi.mocked(readFileSync).mockReset().mockImplementation(() => { throw new Error('ENOENT'); });
-  vi.mocked(writeFileSync).mockReset();
-  vi.mocked(getEnvApiKey).mockReset().mockReturnValue(undefined);
-  vi.mocked(getOAuthProvider).mockReset().mockReturnValue(undefined);
-  vi.mocked(getOAuthProviders).mockReset().mockReturnValue([]);
-  vi.mocked(getOAuthApiKey).mockReset();
-  vi.mocked(execSync).mockReset().mockImplementation(() => { throw new Error('no keychain in tests'); });
-}
+const ENV_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'MY_CUSTOM_KEY'] as const;
+const savedEnv: Record<string, string | undefined> = {};
 
-describe('CredentialManager.discoverAll — env vars', () => {
-  beforeEach(resetMocks);
-  afterEach(() => vi.restoreAllMocks());
-
-  it('an env-provided key is discovered, cached, and reported as valid', async () => {
-    vi.mocked(getEnvApiKey).mockImplementation((provider: unknown) => (provider === 'anthropic' ? 'sk-env-anthropic' : undefined));
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['anthropic']).toEqual({ source: 'env', status: 'valid' });
-    expect(mgr.hasCredential('anthropic')).toBe(true);
-    await expect(mgr.getApiKey('anthropic')).resolves.toBe('sk-env-anthropic');
-    expect(mgr.getDirectSource('anthropic')).toBe('env');
-  });
-
-  it('no env vars, no OAuth, no legacy files → empty report and no credentials found', async () => {
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report).toEqual({});
-    expect(mgr.hasCredential('openai')).toBe(false);
-    await expect(mgr.getApiKey('openai')).rejects.toThrow(CredentialNotFoundError);
-  });
-
-  it('a google-vertex model resolves onto the shared Google credential (no dedicated Vertex cred)', async () => {
-    // Real user env: gemini-2.5-pro.yaml saved with provider google-vertex, but only the
-    // Google credential is present. LEGACY_TO_PIAI['google-vertex'] must fall back to it.
-    vi.mocked(getEnvApiKey).mockImplementation((provider: unknown) => (provider === 'google' ? 'sk-env-google' : undefined));
-
-    const mgr = new CredentialManager();
-    await mgr.discoverAll();
-
-    expect(mgr.hasCredential('google-vertex')).toBe(true);
-    await expect(mgr.getApiKey('google-vertex')).resolves.toBe('sk-env-google');
-    // getPiaiProvider redirects the orphan Vertex name onto a callable, credentialed provider.
-    expect(mgr.getPiaiProvider('google-vertex')).toBe('google');
-  });
-});
-
-describe('CredentialManager.discoverAll — legacy codex auth.json (~/.codex/auth.json)', () => {
-  beforeEach(resetMocks);
-  afterEach(() => vi.restoreAllMocks());
-
-  it('parses tokens.access_token from a mock ~/.codex/auth.json and registers it under openai-codex + openai', async () => {
-    vi.mocked(existsSync).mockImplementation((p: unknown) => p === KNOWN_CREDENTIALS.openai);
-    vi.mocked(readFileSync).mockImplementation((p: unknown) => {
-      if (p === KNOWN_CREDENTIALS.openai) {
-        return JSON.stringify({
-          tokens: {
-            access_token: 'sk-codex-access',
-            refresh_token: 'sk-codex-refresh',
-            expires_at: 1999999999999,
-            account_id: 'acct-123',
-          },
-        });
-      }
-      throw new Error('ENOENT');
-    });
-    vi.mocked(getOAuthProvider).mockImplementation((id: unknown) => {
-      if (id === 'openai-codex') {
-        return {
-          id: 'openai-codex',
-          name: 'OpenAI Codex',
-          getApiKey: (creds: OAuthCredentials) => `apikey:${creds.access}`,
-        } as unknown as OAuthProviderInterface;
-      }
-      return undefined;
-    });
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['openai-codex']).toEqual({
-      source: 'file',
-      status: 'valid',
-      path: KNOWN_CREDENTIALS.openai,
-    });
-    expect(mgr.hasCredential('openai')).toBe(true);
-    expect(mgr.hasCredential('openai-codex')).toBe(true);
-    expect(mgr.getDirectSource('openai-codex')).toBe('oauth');
-    await expect(mgr.getApiKey('openai')).resolves.toBe('apikey:sk-codex-access');
-  });
-
-  it('auth.json missing entirely → no cache entry, no report entry (same as "not found", not an error)', async () => {
-    vi.mocked(existsSync).mockReturnValue(false);
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['openai-codex']).toBeUndefined();
-    expect(mgr.hasCredential('openai')).toBe(false);
-  });
-
-  it('auth.json has no tokens.access_token field → treated as absent, no report entry', async () => {
-    vi.mocked(existsSync).mockImplementation((p: unknown) => p === KNOWN_CREDENTIALS.openai);
-    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ tokens: {} }) as never);
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['openai-codex']).toBeUndefined();
-    expect(mgr.hasCredential('openai')).toBe(false);
-  });
-
-  it('valid file shape but the OAuth provider\'s getApiKey() throws → status "parse_error"', async () => {
-    vi.mocked(existsSync).mockImplementation((p: unknown) => p === KNOWN_CREDENTIALS.openai);
-    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
-      tokens: { access_token: 'sk-x', refresh_token: '', expires_at: 0 },
-    }) as never);
-    vi.mocked(getOAuthProvider).mockImplementation((id: unknown) => {
-      if (id === 'openai-codex') {
-        return {
-          id: 'openai-codex',
-          name: 'OpenAI Codex',
-          getApiKey: () => { throw new Error('malformed token'); },
-        } as unknown as OAuthProviderInterface;
-      }
-      return undefined;
-    });
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['openai-codex']).toEqual({
-      source: 'file',
-      status: 'parse_error',
-      path: KNOWN_CREDENTIALS.openai,
-    });
-    expect(mgr.hasCredential('openai-codex')).toBe(false);
-  });
-});
-
-describe('CredentialManager — environment variables take priority over legacy files', () => {
-  beforeEach(resetMocks);
-  afterEach(() => vi.restoreAllMocks());
-
-  it('when both an env key and a codex auth.json exist for "openai", getApiKey("openai") returns the env value', async () => {
-    vi.mocked(getEnvApiKey).mockImplementation((provider: unknown) => (provider === 'openai' ? 'sk-env-openai' : undefined));
-    vi.mocked(existsSync).mockImplementation((p: unknown) => p === KNOWN_CREDENTIALS.openai);
-    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
-      tokens: { access_token: 'sk-file-codex', refresh_token: '', expires_at: 0 },
-    }) as never);
-    vi.mocked(getOAuthProvider).mockImplementation((id: unknown) => {
-      if (id === 'openai-codex') {
-        return {
-          id: 'openai-codex',
-          name: 'OpenAI Codex',
-          getApiKey: (creds: OAuthCredentials) => `apikey:${creds.access}`,
-        } as unknown as OAuthProviderInterface;
-      }
-      return undefined;
-    });
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    // Env is recorded first and 'openai' is only overwritten by the legacy-file
-    // path if it wasn't already cached — so env wins for the 'openai' lookup.
-    expect(report['openai']).toEqual({ source: 'env', status: 'valid' });
-    expect(mgr.getDirectSource('openai')).toBe('env');
-    await expect(mgr.getApiKey('openai')).resolves.toBe('sk-env-openai');
-
-    // The file-based credential is still independently discovered and usable
-    // under its specific pi-ai provider id.
-    expect(report['openai-codex']).toEqual({ source: 'file', status: 'valid', path: KNOWN_CREDENTIALS.openai });
-    expect(mgr.getDirectSource('openai-codex')).toBe('oauth');
-  });
-});
-
-describe('CredentialManager.discoverAll — stored OAuth credentials (~/.council/credentials/<id>.json)', () => {
-  beforeEach(resetMocks);
-  afterEach(() => vi.restoreAllMocks());
-
-  function stubProvider(id: string): void {
-    vi.mocked(getOAuthProviders).mockReturnValue([
-      { id, name: id, getApiKey: vi.fn(), login: vi.fn(), refreshToken: vi.fn() } as unknown as OAuthProviderInterface,
-    ]);
+beforeEach(() => {
+  for (const k of ENV_KEYS) {
+    savedEnv[k] = process.env[k];
+    delete process.env[k];
   }
-
-  const credPath = (id: string): string => join(PATHS.credentials, `${id}.json`);
-
-  it('valid, non-expired stored credentials → status "valid" (newCredentials === stored, no rewrite)', async () => {
-    stubProvider('anthropic');
-    const stored: OAuthCredentials = { access: 'tok-a', refresh: 'ref-a', expires: 0 };
-    vi.mocked(existsSync).mockImplementation((p: unknown) => p === credPath('anthropic'));
-    vi.mocked(readFileSync).mockImplementation((p: unknown) => (p === credPath('anthropic') ? JSON.stringify(stored) : (() => { throw new Error('ENOENT'); })()));
-    // discovery.ts parses the file itself (a fresh object each time), so to exercise the
-    // "unchanged" branch we must echo back the exact object reference pi-ai was given,
-    // not a separately-constructed literal with equal contents.
-    vi.mocked(getOAuthApiKey).mockImplementation(async (providerId, credentials) => ({
-      apiKey: 'resolved-key',
-      newCredentials: credentials[providerId]!,
-    }));
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['anthropic']).toEqual({ source: 'file', status: 'valid', path: credPath('anthropic') });
-    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled();
-    expect(mgr.hasCredential('anthropic')).toBe(true);
-  });
-
-  it('expired stored credentials trigger a refresh → status "refreshed" and the new token is persisted to disk', async () => {
-    stubProvider('anthropic');
-    const stored: OAuthCredentials = { access: 'old-tok', refresh: 'ref-a', expires: 0 };
-    const refreshed: OAuthCredentials = { access: 'new-tok', refresh: 'ref-a', expires: 9999999999999 };
-    vi.mocked(existsSync).mockImplementation((p: unknown) => p === credPath('anthropic'));
-    vi.mocked(readFileSync).mockImplementation((p: unknown) => (p === credPath('anthropic') ? JSON.stringify(stored) : (() => { throw new Error('ENOENT'); })()));
-    vi.mocked(getOAuthApiKey).mockResolvedValue({ apiKey: 'new-api-key', newCredentials: refreshed });
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['anthropic']).toEqual({ source: 'file', status: 'refreshed', path: credPath('anthropic') });
-    expect(vi.mocked(getOAuthApiKey)).toHaveBeenCalledWith('anthropic', { anthropic: stored });
-    expect(vi.mocked(writeFileSync)).toHaveBeenCalledWith(
-      credPath('anthropic'),
-      JSON.stringify(refreshed, null, 2),
-      { mode: 0o600 },
-    );
-  });
-
-  it('refresh throws (token unrecoverable) → status "expired", no crash', async () => {
-    stubProvider('anthropic');
-    const stored: OAuthCredentials = { access: 'dead-tok', refresh: 'ref-a', expires: 0 };
-    vi.mocked(existsSync).mockImplementation((p: unknown) => p === credPath('anthropic'));
-    vi.mocked(readFileSync).mockImplementation((p: unknown) => (p === credPath('anthropic') ? JSON.stringify(stored) : (() => { throw new Error('ENOENT'); })()));
-    vi.mocked(getOAuthApiKey).mockRejectedValue(new Error('refresh_token invalid'));
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['anthropic']).toEqual({ source: 'file', status: 'expired', path: credPath('anthropic') });
-    expect(mgr.hasCredential('anthropic')).toBe(false);
-  });
-
-  it('no stored credential file for the OAuth provider → silently skipped (no report entry)', async () => {
-    stubProvider('anthropic');
-    vi.mocked(existsSync).mockReturnValue(false);
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['anthropic']).toBeUndefined();
-    expect(mgr.hasCredential('anthropic')).toBe(false);
-    expect(vi.mocked(getOAuthApiKey)).not.toHaveBeenCalled();
-  });
 });
 
-describe('CredentialManager — misc accessors', () => {
-  beforeEach(resetMocks);
-  afterEach(() => vi.restoreAllMocks());
-
-  it('getPiaiProvider falls back to the legacy provider name when nothing is cached', () => {
-    const mgr = new CredentialManager();
-    expect(mgr.getPiaiProvider('some-uncached-provider')).toBe('some-uncached-provider');
-  });
-
-  it('getAvailableProviders returns the distinct set of cached pi-ai provider ids', async () => {
-    vi.mocked(getEnvApiKey).mockImplementation((provider: unknown) => (provider === 'anthropic' ? 'sk-a' : undefined));
-
-    const mgr = new CredentialManager();
-    await mgr.discoverAll();
-
-    expect(mgr.getAvailableProviders()).toEqual(['anthropic']);
-  });
-
-  it('getLoginableProviders maps pi-ai OAuth providers to {id, name} pairs', () => {
-    vi.mocked(getOAuthProviders).mockReturnValue([
-      { id: 'anthropic', name: 'Anthropic', getApiKey: vi.fn(), login: vi.fn(), refreshToken: vi.fn() } as unknown as OAuthProviderInterface,
-    ]);
-
-    const mgr = new CredentialManager();
-    expect(mgr.getLoginableProviders()).toEqual([{ id: 'anthropic', name: 'Anthropic' }]);
-  });
-
-  it('getOAuthCredentials returns undefined when no OAuth credential is cached for the provider', () => {
-    const mgr = new CredentialManager();
-    expect(mgr.getOAuthCredentials('anthropic')).toBeUndefined();
-  });
+afterEach(() => {
+  for (const k of ENV_KEYS) {
+    if (savedEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = savedEnv[k];
+  }
 });
 
-describe('CredentialManager.login', () => {
-  beforeEach(resetMocks);
-  afterEach(() => vi.restoreAllMocks());
-
-  it('runs the OAuth login flow, persists credentials, and caches under both the pi-ai id and its legacy alias', async () => {
-    const creds: OAuthCredentials = { access: 'new-access', refresh: 'new-refresh', expires: 0 };
-    vi.mocked(getOAuthProvider).mockImplementation((id: unknown) => {
-      if (id === 'openai-codex') {
-        return {
-          id: 'openai-codex',
-          name: 'OpenAI Codex',
-          login: vi.fn().mockResolvedValue(creds),
-          getApiKey: (c: OAuthCredentials) => `k:${c.access}`,
-        } as unknown as OAuthProviderInterface;
-      }
-      return undefined;
-    });
-
-    const mgr = new CredentialManager();
-    const result = await mgr.login('openai-codex', stubCallbacks());
-
-    expect(result).toBe(creds);
-    expect(vi.mocked(writeFileSync)).toHaveBeenCalledWith(
-      join(PATHS.credentials, 'openai-codex.json'),
-      JSON.stringify(creds, null, 2),
-      { mode: 0o600 },
-    );
-    // 'openai-codex' legacy-maps to 'openai' — a different name — so both cache slots are populated.
-    expect(mgr.hasCredential('openai-codex')).toBe(true);
-    expect(mgr.hasCredential('openai')).toBe(true);
-    expect(mgr.getDirectSource('openai-codex')).toBe('oauth');
-    expect(mgr.getDirectSource('openai')).toBe('oauth');
-    await expect(mgr.getApiKey('openai')).resolves.toBe('k:new-access');
+describe('CredentialManager.getApiKey — resolution order', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'oc-cred-test-'));
   });
-
-  it('unknown OAuth provider id → throws without touching the filesystem', async () => {
-    vi.mocked(getOAuthProvider).mockReturnValue(undefined);
-
-    const mgr = new CredentialManager();
-
-    await expect(mgr.login('not-a-real-provider', stubCallbacks())).rejects.toThrow(
-      'Unknown OAuth provider: not-a-real-provider',
-    );
-    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled();
-  });
-});
-
-describe('CredentialManager.discoverAll — OAuth id vs. legacy-name aliasing', () => {
-  beforeEach(resetMocks);
-  afterEach(() => vi.restoreAllMocks());
-
-  const credPath = (id: string): string => join(PATHS.credentials, `${id}.json`);
-
-  it('an OAuth id whose legacy name differs (google-gemini-cli → google) is also cached under the legacy name', async () => {
-    vi.mocked(getOAuthProviders).mockReturnValue([
-      { id: 'google-gemini-cli', name: 'Gemini CLI', getApiKey: vi.fn(), login: vi.fn(), refreshToken: vi.fn() } as unknown as OAuthProviderInterface,
-    ]);
-    const stored: OAuthCredentials = { access: 'g-tok', refresh: 'g-ref', expires: 0 };
-    vi.mocked(existsSync).mockImplementation((p: unknown) => p === credPath('google-gemini-cli'));
-    vi.mocked(readFileSync).mockImplementation((p: unknown) => (p === credPath('google-gemini-cli') ? JSON.stringify(stored) : (() => { throw new Error('ENOENT'); })()));
-    // Echo back the exact object reference pi-ai was handed, so the "unchanged" (status: valid)
-    // branch is exercised rather than "refreshed" (discovery.ts parses its own fresh copy from disk).
-    vi.mocked(getOAuthApiKey).mockImplementation(async (providerId, credentials) => ({
-      apiKey: 'resolved-google-key',
-      newCredentials: credentials[providerId]!,
-    }));
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['google-gemini-cli']).toEqual({ source: 'file', status: 'valid', path: credPath('google-gemini-cli') });
-    expect(mgr.hasCredential('google-gemini-cli')).toBe(true);
-    expect(mgr.hasCredential('google')).toBe(true);
-    expect(mgr.getDirectSource('google')).toBe('oauth');
-  });
-
-  it('does not overwrite the legacy alias slot when it is already occupied (e.g. by an env credential)', async () => {
-    vi.mocked(getEnvApiKey).mockImplementation((provider: unknown) => (provider === 'google' ? 'sk-env-google' : undefined));
-    vi.mocked(getOAuthProviders).mockReturnValue([
-      { id: 'google-gemini-cli', name: 'Gemini CLI', getApiKey: vi.fn(), login: vi.fn(), refreshToken: vi.fn() } as unknown as OAuthProviderInterface,
-    ]);
-    const stored: OAuthCredentials = { access: 'g-tok', refresh: 'g-ref', expires: 0 };
-    vi.mocked(existsSync).mockImplementation((p: unknown) => p === credPath('google-gemini-cli'));
-    vi.mocked(readFileSync).mockImplementation((p: unknown) => (p === credPath('google-gemini-cli') ? JSON.stringify(stored) : (() => { throw new Error('ENOENT'); })()));
-    vi.mocked(getOAuthApiKey).mockResolvedValue({ apiKey: 'resolved-google-key', newCredentials: stored });
-
-    const mgr = new CredentialManager();
-    await mgr.discoverAll();
-
-    // 'google-gemini-cli' is still discovered on its own pi-ai id...
-    expect(mgr.hasCredential('google-gemini-cli')).toBe(true);
-    // ...but the shared legacy 'google' slot stays with the env credential that got there first.
-    expect(mgr.getDirectSource('google')).toBe('env');
-    await expect(mgr.getApiKey('google')).resolves.toBe('sk-env-google');
-  });
-});
-
-describe('CredentialManager.discoverAll — legacy Gemini CLI file (~/.gemini/oauth_creds.json)', () => {
-  const realFetch = globalThis.fetch;
-
-  beforeEach(resetMocks);
   afterEach(() => {
-    vi.restoreAllMocks();
-    globalThis.fetch = realFetch;
+    rmSync(dir, { recursive: true, force: true });
   });
 
-  function stubGeminiProviders(opts: { antigravity: 'present' | 'throws' | 'absent' }): void {
-    vi.mocked(getOAuthProvider).mockImplementation((id: unknown) => {
-      if (id === 'google-gemini-cli') {
-        return {
-          id: 'google-gemini-cli',
-          name: 'Gemini CLI',
-          getApiKey: (c: OAuthCredentials) => `gc:${c.access}:${c['projectId'] ?? 'none'}`,
-        } as unknown as OAuthProviderInterface;
-      }
-      if (id === 'google-antigravity') {
-        if (opts.antigravity === 'absent') return undefined;
-        return {
-          id: 'google-antigravity',
-          name: 'Antigravity',
-          getApiKey: () => {
-            if (opts.antigravity === 'throws') throw new Error('antigravity key derivation failed');
-            return 'antigravity-key';
-          },
-        } as unknown as OAuthProviderInterface;
-      }
-      return undefined;
-    });
-  }
-
-  it('full success path: reads the file, discovers the project id, and registers gemini-cli + antigravity + google', async () => {
-    vi.mocked(existsSync).mockImplementation((p: unknown) => p === KNOWN_CREDENTIALS.google);
-    vi.mocked(readFileSync).mockImplementation((p: unknown) => (p === KNOWN_CREDENTIALS.google
-      ? JSON.stringify({ access_token: 'gtok', refresh_token: 'gref', expiry_date: 123 })
-      : (() => { throw new Error('ENOENT'); })()));
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ cloudaicompanionProject: 'proj-123' }),
-    }) as unknown as typeof fetch;
-    stubGeminiProviders({ antigravity: 'present' });
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['google-gemini-cli']).toEqual({ source: 'file', status: 'valid', path: KNOWN_CREDENTIALS.google });
-    expect(report['google-antigravity']).toEqual({ source: 'file', status: 'valid', path: KNOWN_CREDENTIALS.google });
-    expect(mgr.hasCredential('google-gemini-cli')).toBe(true);
-    expect(mgr.hasCredential('google-antigravity')).toBe(true);
-    expect(mgr.hasCredential('google')).toBe(true);
-    await expect(mgr.getApiKey('google-gemini-cli')).resolves.toContain('proj-123');
+  it('api_key_env takes priority when the named env var is set', () => {
+    process.env['MY_CUSTOM_KEY'] = 'sk-from-env';
+    process.env['ANTHROPIC_API_KEY'] = 'sk-official-fallback';
+    const cm = new CredentialManager();
+    expect(cm.getApiKey(makeConfig({ api_key_env: 'MY_CUSTOM_KEY' }))).toBe('sk-from-env');
   });
 
-  it('project-id lookup fails (fetch not ok) → gemini-cli is still registered, just without a projectId', async () => {
-    vi.mocked(existsSync).mockImplementation((p: unknown) => p === KNOWN_CREDENTIALS.google);
-    vi.mocked(readFileSync).mockImplementation((p: unknown) => (p === KNOWN_CREDENTIALS.google
-      ? JSON.stringify({ access_token: 'gtok', refresh_token: 'gref', expiry_date: 123 })
-      : (() => { throw new Error('ENOENT'); })()));
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 403 }) as unknown as typeof fetch;
-    stubGeminiProviders({ antigravity: 'absent' });
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['google-gemini-cli']).toEqual({ source: 'file', status: 'valid', path: KNOWN_CREDENTIALS.google });
-    // Antigravity provider unavailable in pi-ai → falls back to reusing gemini-cli's apiKey string.
-    expect(mgr.hasCredential('google-antigravity')).toBe(true);
-    await expect(mgr.getApiKey('google-gemini-cli')).resolves.toContain(':none');
+  it('falls back to api_key_path (a 0o600 key file) when api_key_env is unset', () => {
+    const keyPath = join(dir, 'key.txt');
+    writeFileSync(keyPath, 'sk-from-file\n');
+    const cm = new CredentialManager();
+    expect(cm.getApiKey(makeConfig({ api_key_path: keyPath }))).toBe('sk-from-file');
   });
 
-  it('antigravity getApiKey() throws → gemini-cli registration still succeeds, antigravity falls back', async () => {
-    vi.mocked(existsSync).mockImplementation((p: unknown) => p === KNOWN_CREDENTIALS.google);
-    vi.mocked(readFileSync).mockImplementation((p: unknown) => (p === KNOWN_CREDENTIALS.google
-      ? JSON.stringify({ access_token: 'gtok', refresh_token: 'gref', expiry_date: 123 })
-      : (() => { throw new Error('ENOENT'); })()));
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }) as unknown as typeof fetch;
-    stubGeminiProviders({ antigravity: 'throws' });
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['google-gemini-cli']).toEqual({ source: 'file', status: 'valid', path: KNOWN_CREDENTIALS.google });
-    expect(mgr.hasCredential('google-antigravity')).toBe(true); // fallback path still registers it
+  it('api_key_path content is trimmed of surrounding whitespace/newlines', () => {
+    const keyPath = join(dir, 'key.txt');
+    writeFileSync(keyPath, '  sk-padded  \n');
+    const cm = new CredentialManager();
+    expect(cm.getApiKey(makeConfig({ api_key_path: keyPath }))).toBe('sk-padded');
   });
 
-  it('oauth_creds.json missing the access_token field → treated as absent, no report entry', async () => {
-    vi.mocked(existsSync).mockImplementation((p: unknown) => p === KNOWN_CREDENTIALS.google);
-    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ refresh_token: 'r' }) as never);
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['google-gemini-cli']).toBeUndefined();
-    expect(mgr.hasCredential('google-gemini-cli')).toBe(false);
+  it('an api_key_path pointing at a missing file is skipped (falls through), not thrown', () => {
+    process.env['ANTHROPIC_API_KEY'] = 'sk-official';
+    const cm = new CredentialManager();
+    expect(cm.getApiKey(makeConfig({ api_key_path: join(dir, 'missing.key') }))).toBe('sk-official');
   });
 
-  it('getOAuthProvider("google-gemini-cli") throws inside the try block → status "parse_error"', async () => {
-    vi.mocked(existsSync).mockImplementation((p: unknown) => p === KNOWN_CREDENTIALS.google);
-    vi.mocked(readFileSync).mockImplementation((p: unknown) => (p === KNOWN_CREDENTIALS.google
-      ? JSON.stringify({ access_token: 'gtok', refresh_token: 'gref', expiry_date: 123 })
-      : (() => { throw new Error('ENOENT'); })()));
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }) as unknown as typeof fetch;
-    vi.mocked(getOAuthProvider).mockImplementation((id: unknown) => {
-      if (id === 'google-gemini-cli') {
-        return {
-          id: 'google-gemini-cli',
-          name: 'Gemini CLI',
-          getApiKey: () => { throw new Error('bad token'); },
-        } as unknown as OAuthProviderInterface;
-      }
-      return undefined;
-    });
+  it('falls back to the protocol default env var (ANTHROPIC_API_KEY) when no explicit source is configured', () => {
+    process.env['ANTHROPIC_API_KEY'] = 'sk-default-anthropic';
+    const cm = new CredentialManager();
+    expect(cm.getApiKey(makeConfig({ protocol: 'anthropic' }))).toBe('sk-default-anthropic');
+  });
 
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
+  it('falls back to OPENAI_API_KEY for the openai protocol', () => {
+    process.env['OPENAI_API_KEY'] = 'sk-default-openai';
+    const cm = new CredentialManager();
+    expect(cm.getApiKey(makeConfig({ protocol: 'openai' }))).toBe('sk-default-openai');
+  });
 
-    expect(report['google-gemini-cli']).toEqual({ source: 'file', status: 'parse_error', path: KNOWN_CREDENTIALS.google });
+  it('an empty-string env var value is treated as unset (falls through)', () => {
+    process.env['MY_CUSTOM_KEY'] = '';
+    process.env['ANTHROPIC_API_KEY'] = 'sk-fallback';
+    const cm = new CredentialManager();
+    expect(cm.getApiKey(makeConfig({ api_key_env: 'MY_CUSTOM_KEY' }))).toBe('sk-fallback');
+  });
+
+  it('no key resolvable anywhere → null (caller decides whether an empty key is acceptable)', () => {
+    const cm = new CredentialManager();
+    expect(cm.getApiKey(makeConfig())).toBeNull();
+  });
+
+  it('api_key_env takes priority even over an existing api_key_path', () => {
+    process.env['MY_CUSTOM_KEY'] = 'sk-env-wins';
+    const keyPath = join(dir, 'key.txt');
+    writeFileSync(keyPath, 'sk-file-loses');
+    const cm = new CredentialManager();
+    expect(cm.getApiKey(makeConfig({ api_key_env: 'MY_CUSTOM_KEY', api_key_path: keyPath }))).toBe('sk-env-wins');
   });
 });
 
-describe.skipIf(process.platform !== 'darwin')('CredentialManager.discoverAll — macOS Keychain (Claude Code OAuth)', () => {
-  beforeEach(resetMocks);
-  afterEach(() => vi.restoreAllMocks());
+describe('CredentialManager.discoverAll / saveCustomKey', () => {
+  const originalCredentialsDir = PATHS.credentials;
+  let dir: string;
 
-  it('valid keychain entry → anthropic registered from "keychain:Claude Code-credentials"', async () => {
-    vi.mocked(execSync).mockReturnValue(JSON.stringify({
-      claudeAiOauth: { accessToken: 'keychain-tok', refreshToken: 'keychain-ref', expiresAt: 999 },
-    }) as never);
-    vi.mocked(getOAuthProvider).mockImplementation((id: unknown) => {
-      if (id === 'anthropic') {
-        return {
-          id: 'anthropic',
-          name: 'Anthropic',
-          getApiKey: (c: OAuthCredentials) => `keychain-key:${c.access}`,
-        } as unknown as OAuthProviderInterface;
-      }
-      return undefined;
-    });
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['anthropic']).toEqual({ source: 'file', status: 'valid', path: 'keychain:Claude Code-credentials' });
-    await expect(mgr.getApiKey('anthropic')).resolves.toBe('keychain-key:keychain-tok');
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'oc-cred-discover-'));
+    (PATHS as { credentials: string }).credentials = dir;
+  });
+  afterEach(() => {
+    (PATHS as { credentials: string }).credentials = originalCredentialsDir;
+    rmSync(dir, { recursive: true, force: true });
   });
 
-  it('keychain read throws (not signed into Claude Code) → no report entry, no crash', async () => {
-    vi.mocked(execSync).mockImplementation(() => { throw new Error('security: item not found'); });
-
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
-
-    expect(report['anthropic']).toBeUndefined();
-    expect(mgr.hasCredential('anthropic')).toBe(false);
+  it('no env vars, no credentials dir contents → empty report', () => {
+    const cm = new CredentialManager();
+    expect(cm.discoverAll()).toEqual({});
   });
 
-  it('keychain entry present but getApiKey() throws → status "expired"', async () => {
-    vi.mocked(execSync).mockReturnValue(JSON.stringify({
-      claudeAiOauth: { accessToken: 'keychain-tok', refreshToken: '', expiresAt: 0 },
-    }) as never);
-    vi.mocked(getOAuthProvider).mockImplementation((id: unknown) => {
-      if (id === 'anthropic') {
-        return {
-          id: 'anthropic',
-          name: 'Anthropic',
-          getApiKey: () => { throw new Error('bad keychain token'); },
-        } as unknown as OAuthProviderInterface;
-      }
-      return undefined;
+  it('reports ANTHROPIC_API_KEY as a valid env-sourced credential', () => {
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant';
+    const cm = new CredentialManager();
+    expect(cm.discoverAll()).toEqual({
+      anthropic: { source: 'env', status: 'valid', env_var: 'ANTHROPIC_API_KEY' },
     });
+  });
 
-    const mgr = new CredentialManager();
-    const report = await mgr.discoverAll();
+  it('reports both official env vars when both are set', () => {
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant';
+    process.env['OPENAI_API_KEY'] = 'sk-oai';
+    const cm = new CredentialManager();
+    const report = cm.discoverAll();
+    expect(report['anthropic']).toEqual({ source: 'env', status: 'valid', env_var: 'ANTHROPIC_API_KEY' });
+    expect(report['openai']).toEqual({ source: 'env', status: 'valid', env_var: 'OPENAI_API_KEY' });
+  });
 
-    expect(report['anthropic']).toEqual({ source: 'file', status: 'expired', path: 'keychain:Claude Code-credentials' });
+  it('an empty-string env var is not reported as present', () => {
+    process.env['ANTHROPIC_API_KEY'] = '';
+    const cm = new CredentialManager();
+    expect(cm.discoverAll()).toEqual({});
+  });
+
+  it('discovers a custom-endpoint key file saved under credentials/custom-<name>.key', () => {
+    writeFileSync(join(dir, 'custom-mylab.key'), 'sk-custom', { mode: 0o600 });
+    const cm = new CredentialManager();
+    expect(cm.discoverAll()).toEqual({
+      'custom:mylab': { source: 'file', status: 'valid', path: join(dir, 'custom-mylab.key') },
+    });
+  });
+
+  it('ignores files in the credentials dir that do not match the custom-<name>.key pattern', () => {
+    writeFileSync(join(dir, 'random-file.txt'), 'not a key');
+    writeFileSync(join(dir, 'custom-mylab.key'), 'sk-custom');
+    const cm = new CredentialManager();
+    expect(Object.keys(cm.discoverAll())).toEqual(['custom:mylab']);
+  });
+
+  it('combines env-sourced and file-sourced entries in one report', () => {
+    process.env['OPENAI_API_KEY'] = 'sk-oai';
+    writeFileSync(join(dir, 'custom-gw.key'), 'sk-custom');
+    const cm = new CredentialManager();
+    const report = cm.discoverAll();
+    expect(Object.keys(report).sort()).toEqual(['custom:gw', 'openai']);
+  });
+
+  it('a missing credentials directory is tolerated (no crash, empty file-sourced entries)', () => {
+    rmSync(dir, { recursive: true, force: true });
+    const cm = new CredentialManager();
+    expect(cm.discoverAll()).toEqual({});
+  });
+
+  it('saveCustomKey writes the key to custom-<name>.key with 0o600 permissions', () => {
+    const cm = new CredentialManager();
+    const path = cm.saveCustomKey('mylab', 'sk-secret-value');
+
+    expect(path).toBe(join(dir, 'custom-mylab.key'));
+    expect(existsSync(path)).toBe(true);
+    expect(readFileSync(path, 'utf-8')).toBe('sk-secret-value');
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it('saveCustomKey creates the credentials directory if it does not yet exist', () => {
+    rmSync(dir, { recursive: true, force: true });
+    const cm = new CredentialManager();
+    const path = cm.saveCustomKey('mylab', 'sk-secret');
+    expect(existsSync(path)).toBe(true);
+  });
+
+  it('a key saved via saveCustomKey is immediately visible via discoverAll (round-trip)', () => {
+    const cm = new CredentialManager();
+    cm.saveCustomKey('roundtrip', 'sk-rt');
+    expect(cm.discoverAll()).toHaveProperty('custom:roundtrip');
+  });
+
+  it('saveCustomKey never echoes the key material back — only the path is returned', () => {
+    const cm = new CredentialManager();
+    const path = cm.saveCustomKey('mylab', 'sk-should-not-leak');
+    expect(path).not.toContain('sk-should-not-leak');
+  });
+});
+
+describe('CredentialManager — no cross-instance state', () => {
+  it('two independent CredentialManager instances resolve identically from the same env (stateless)', () => {
+    process.env['ANTHROPIC_API_KEY'] = 'sk-shared';
+    const a = new CredentialManager();
+    const b = new CredentialManager();
+    expect(a.getApiKey(makeConfig())).toBe(b.getApiKey(makeConfig()));
   });
 });

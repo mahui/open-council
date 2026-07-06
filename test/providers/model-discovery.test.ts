@@ -1,247 +1,181 @@
 /**
- * Tests for discoverModels() (src/providers/model-discovery.ts).
+ * Tests for discoverModels() (src/providers/model-discovery.ts) after the
+ * standard-API convergence: discovery now queries each protocol's official
+ * `/models` endpoint via the vendor SDK when the corresponding env var is set,
+ * falling back to the hand-maintained static catalog on error or an empty
+ * result. No CLI binaries, no OAuth, no pi-ai registry.
  *
- * Strategy: mock @mariozechner/pi-ai (getModels), @mariozechner/pi-ai/oauth
- * (getOAuthProvider), and node:child_process (execFileSync, which hasBinary()
- * uses under the hood) so discovery never touches a real network or the host's
- * installed CLI binaries. A fake CredentialManager is built inline per test
- * (TEST-03 — we mock the external-library/OS boundary, not the module under
- * test's own internals).
+ * Strategy: mock the `@anthropic-ai/sdk` and `openai` default exports so
+ * `models.list()` never touches the network (TEST-03 — we mock the external
+ * SDK boundary, not the module under test's own internals).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-vi.mock('@mariozechner/pi-ai', () => ({
-  getModels: vi.fn(),
+const { anthropicListMock, anthropicCtorMock, openaiListMock, openaiCtorMock } = vi.hoisted(() => ({
+  anthropicListMock: vi.fn(),
+  anthropicCtorMock: vi.fn(),
+  openaiListMock: vi.fn(),
+  openaiCtorMock: vi.fn(),
 }));
 
-vi.mock('@mariozechner/pi-ai/oauth', () => ({
-  getOAuthProvider: vi.fn(() => null),
+vi.mock('@anthropic-ai/sdk', () => ({
+  default: class {
+    models = { list: anthropicListMock };
+    constructor(opts: unknown) {
+      anthropicCtorMock(opts);
+    }
+  },
 }));
 
-vi.mock('node:child_process', () => ({
-  execFileSync: vi.fn(() => { throw new Error('binary not found'); }),
+vi.mock('openai', () => ({
+  default: class {
+    models = { list: openaiListMock };
+    constructor(opts: unknown) {
+      openaiCtorMock(opts);
+    }
+  },
 }));
 
 import { discoverModels } from '../../src/providers/model-discovery.js';
 import { MODEL_CATALOG } from '../../src/shared/model-catalog.js';
-import type { CredentialManager } from '../../src/providers/credentials/discovery.js';
-import { getModels } from '@mariozechner/pi-ai';
-import { getOAuthProvider } from '@mariozechner/pi-ai/oauth';
-import { execFileSync } from 'node:child_process';
 
-function makeModel(id: string, provider: string, name = id): unknown {
-  return { id, provider, name };
+const ENV_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY'] as const;
+const savedEnv: Record<string, string | undefined> = {};
+
+beforeEach(() => {
+  for (const k of ENV_KEYS) {
+    savedEnv[k] = process.env[k];
+    delete process.env[k];
+  }
+  anthropicListMock.mockReset();
+  anthropicCtorMock.mockReset();
+  openaiListMock.mockReset();
+  openaiCtorMock.mockReset();
+});
+
+afterEach(() => {
+  for (const k of ENV_KEYS) {
+    if (savedEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = savedEnv[k];
+  }
+  vi.restoreAllMocks();
+});
+
+function anthropicCatalog(): Array<{ id: string; name: string; protocol: 'anthropic'; source: string }> {
+  const cat = MODEL_CATALOG.anthropic;
+  return [cat.flagship, cat.balanced, cat.economy].map((m) => ({
+    id: m.id, name: m.displayName, protocol: 'anthropic', source: 'official',
+  }));
 }
 
-function makeFakeCredentialManager(overrides: Partial<CredentialManager> = {}): CredentialManager {
-  return {
-    discoverAll: vi.fn(),
-    getApiKey: vi.fn().mockResolvedValue(''),
-    hasCredential: vi.fn().mockReturnValue(false),
-    getPiaiProvider: vi.fn().mockReturnValue(''),
-    getAvailableProviders: vi.fn().mockReturnValue([]),
-    getOAuthCredentials: vi.fn().mockReturnValue(undefined),
-    getDirectSource: vi.fn().mockReturnValue(undefined),
-    login: vi.fn(),
-    getLoginableProviders: vi.fn().mockReturnValue([]),
-    ...overrides,
-  } as unknown as CredentialManager;
+function openaiCatalog(): Array<{ id: string; name: string; protocol: 'openai'; source: string }> {
+  const cat = MODEL_CATALOG.openai;
+  return [cat.flagship, cat.balanced, cat.economy].map((m) => ({
+    id: m.id, name: m.displayName, protocol: 'openai', source: 'official',
+  }));
 }
 
-describe('discoverModels — API models from credentialed providers', () => {
-  beforeEach(() => {
-    vi.mocked(getModels).mockReset();
-    vi.mocked(getOAuthProvider).mockReset().mockReturnValue(null as never);
-    vi.mocked(execFileSync).mockReset().mockImplementation(() => { throw new Error('not found'); });
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it('returns API models for each credentialed provider', async () => {
-    const credManager = makeFakeCredentialManager({
-      getAvailableProviders: vi.fn().mockReturnValue(['anthropic']),
-    });
-    vi.mocked(getModels).mockReturnValue([
-      makeModel('claude-x', 'anthropic'),
-    ] as never);
-
-    const models = await discoverModels(credManager);
-
-    expect(models).toEqual([
-      { id: 'claude-x', name: 'claude-x', provider: 'anthropic', invocation: 'api' },
-    ]);
-  });
-
-  it('a provider unrecognized by pi-ai (getModels throws) is skipped without throwing', async () => {
-    const credManager = makeFakeCredentialManager({
-      getAvailableProviders: vi.fn().mockReturnValue(['unknown-provider']),
-    });
-    vi.mocked(getModels).mockImplementation(() => { throw new Error('unrecognized provider'); });
-
-    await expect(discoverModels(credManager)).resolves.toEqual([]);
-  });
-
-  it('enabledProviders whitelist filters out providers not in the set', async () => {
-    const credManager = makeFakeCredentialManager({
-      getAvailableProviders: vi.fn().mockReturnValue(['anthropic', 'openai']),
-    });
-    vi.mocked(getModels).mockImplementation((provider: unknown) => {
-      if (provider === 'anthropic') return [makeModel('claude-x', 'anthropic')] as never;
-      if (provider === 'openai') return [makeModel('gpt-x', 'openai')] as never;
-      return [] as never;
-    });
-
-    const models = await discoverModels(credManager, new Set(['anthropic']));
-
-    expect(models.map(m => m.provider)).toEqual(['anthropic']);
-  });
-
-  it('OAuth-specific provider is expanded to also query its generic sibling (google-gemini-cli → +google)', async () => {
-    const credManager = makeFakeCredentialManager({
-      getAvailableProviders: vi.fn().mockReturnValue(['google-gemini-cli']),
-    });
-    vi.mocked(getModels).mockImplementation((provider: unknown) => {
-      if (provider === 'google-gemini-cli') return [makeModel('gemini-cli-model', 'google-gemini-cli')] as never;
-      if (provider === 'google') return [makeModel('gemini-generic-model', 'google')] as never;
-      return [] as never;
-    });
-
-    const models = await discoverModels(credManager);
-
-    const ids = models.map(m => m.id).sort();
-    expect(ids).toEqual(['gemini-cli-model', 'gemini-generic-model']);
-    expect(vi.mocked(getModels)).toHaveBeenCalledWith('google-gemini-cli');
-    expect(vi.mocked(getModels)).toHaveBeenCalledWith('google');
-  });
-
-  it('duplicate model id+provider from overlapping expansion is deduplicated', async () => {
-    const credManager = makeFakeCredentialManager({
-      getAvailableProviders: vi.fn().mockReturnValue(['google-gemini-cli', 'google-antigravity']),
-    });
-    // Both providers happen to surface the exact same (provider, id) pair.
-    vi.mocked(getModels).mockImplementation((provider: unknown) => {
-      if (provider === 'google-gemini-cli') return [makeModel('shared-model', 'google')] as never;
-      if (provider === 'google-antigravity') return [] as never;
-      if (provider === 'google') return [makeModel('shared-model', 'google')] as never;
-      if (provider === 'google-vertex') return [] as never;
-      return [] as never;
-    });
-
-    const models = await discoverModels(credManager);
-    const sharedMatches = models.filter(m => m.id === 'shared-model' && m.provider === 'google' && m.invocation === 'api');
-
-    expect(sharedMatches).toHaveLength(1);
-  });
-
-  it('applies the OAuth provider\'s modifyModels hook when present (e.g. GitHub Copilot base URL rewrite)', async () => {
-    const credManager = makeFakeCredentialManager({
-      getAvailableProviders: vi.fn().mockReturnValue(['github-copilot']),
-      getOAuthCredentials: vi.fn().mockReturnValue({ access: 'tok', refresh: '', expires: 0 }),
-    });
-    vi.mocked(getModels).mockReturnValue([makeModel('copilot-model', 'github-copilot')] as never);
-    vi.mocked(getOAuthProvider).mockReturnValue({
-      id: 'github-copilot',
-      name: 'GitHub Copilot',
-      modifyModels: vi.fn(() => [makeModel('copilot-model-modified', 'github-copilot')]),
-    } as never);
-
-    const models = await discoverModels(credManager);
-
-    expect(models).toEqual([
-      { id: 'copilot-model-modified', name: 'copilot-model-modified', provider: 'github-copilot', invocation: 'api' },
-    ]);
-  });
-
-  it('no credentialed providers and no CLI binaries → empty result', async () => {
-    const credManager = makeFakeCredentialManager({ getAvailableProviders: vi.fn().mockReturnValue([]) });
-
-    const models = await discoverModels(credManager);
-
+describe('discoverModels — no credentials', () => {
+  it('no env keys set → empty result, no SDK constructed', async () => {
+    const models = await discoverModels();
     expect(models).toEqual([]);
+    expect(anthropicCtorMock).not.toHaveBeenCalled();
+    expect(openaiCtorMock).not.toHaveBeenCalled();
   });
 });
 
-describe('discoverModels — CLI binary discovery', () => {
+describe('discoverModels — Anthropic', () => {
   beforeEach(() => {
-    vi.mocked(getModels).mockReset().mockReturnValue([] as never);
-    vi.mocked(getOAuthProvider).mockReset().mockReturnValue(null as never);
-    vi.mocked(execFileSync).mockReset();
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-test';
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it('no credentialed providers, "claude" binary present → returns Claude CLI models only', async () => {
-    const credManager = makeFakeCredentialManager({ getAvailableProviders: vi.fn().mockReturnValue([]) });
-    vi.mocked(execFileSync).mockImplementation((...args: unknown[]) => {
-      const argv = args[1] as string[];
-      if (argv[0] === 'claude') return Buffer.from('/usr/local/bin/claude');
-      throw new Error('not found');
+  it('maps a live models.list() page to DiscoveredModel[], reasoning-off client options (maxRetries 0)', async () => {
+    anthropicListMock.mockResolvedValue({
+      data: [{ id: 'claude-opus-4-6', display_name: 'Claude Opus 4.6' }],
     });
 
-    const models = await discoverModels(credManager);
+    const models = await discoverModels();
 
-    expect(models.every(m => m.invocation === 'cli')).toBe(true);
-    expect(models.map(m => m.id)).toEqual(['claude-sonnet-4-6', 'claude-opus-4-6']);
+    expect(models).toEqual([
+      { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', protocol: 'anthropic', source: 'official' },
+    ]);
+    expect(anthropicCtorMock).toHaveBeenCalledWith({ apiKey: 'sk-ant-test', maxRetries: 0, timeout: 5000 });
   });
 
-  it('"codex" and "gemini" binaries present → returns both CLI model sets', async () => {
-    const credManager = makeFakeCredentialManager({ getAvailableProviders: vi.fn().mockReturnValue([]) });
-    vi.mocked(execFileSync).mockImplementation((...args: unknown[]) => {
-      const argv = args[1] as string[];
-      if (argv[0] === 'codex' || argv[0] === 'gemini') return Buffer.from('/usr/local/bin/found');
-      throw new Error('not found');
+  it('falls back to display_name → id when display_name is absent', async () => {
+    anthropicListMock.mockResolvedValue({ data: [{ id: 'claude-x' }] });
+    const models = await discoverModels();
+    expect(models[0]?.name).toBe('claude-x');
+  });
+
+  it('an empty live page falls back to the static catalog (flagship/balanced/economy)', async () => {
+    anthropicListMock.mockResolvedValue({ data: [] });
+    const models = await discoverModels();
+    expect(models).toEqual(anthropicCatalog());
+  });
+
+  it('models.list() throwing falls back to the static catalog rather than propagating', async () => {
+    anthropicListMock.mockRejectedValue(new Error('network unreachable'));
+    const models = await discoverModels();
+    expect(models).toEqual(anthropicCatalog());
+  });
+
+  it('a fallback due to error is reported on stderr, not silently swallowed', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    anthropicListMock.mockRejectedValue(new Error('boom'));
+    await discoverModels();
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('anthropic'));
+    stderr.mockRestore();
+  });
+});
+
+describe('discoverModels — OpenAI', () => {
+  beforeEach(() => {
+    process.env['OPENAI_API_KEY'] = 'sk-oai-test';
+  });
+
+  it('filters /models to chat-capable families (gpt-*, o[0-9], chatgpt*), dropping embeddings/tts/etc.', async () => {
+    openaiListMock.mockResolvedValue({
+      data: [
+        { id: 'gpt-5.4' },
+        { id: 'o3' },
+        { id: 'chatgpt-4o-latest' },
+        { id: 'whisper-1' },
+        { id: 'text-embedding-3-small' },
+        { id: 'dall-e-3' },
+      ],
     });
 
-    const models = await discoverModels(credManager);
-    const ids = models.map(m => m.id).sort();
+    const models = await discoverModels();
 
-    expect(ids).toEqual(['gemini-2.5-flash', 'gemini-2.5-pro', 'gpt-5.4', 'gpt-5.4-mini'].sort());
+    expect(models.map((m) => m.id).sort()).toEqual(['chatgpt-4o-latest', 'gpt-5.4', 'o3'].sort());
+    expect(models.every((m) => m.protocol === 'openai' && m.source === 'official')).toBe(true);
+    expect(openaiCtorMock).toHaveBeenCalledWith({ apiKey: 'sk-oai-test', maxRetries: 0, timeout: 5000 });
   });
 
-  it('no binaries found at all → no CLI models added', async () => {
-    const credManager = makeFakeCredentialManager({ getAvailableProviders: vi.fn().mockReturnValue([]) });
-    vi.mocked(execFileSync).mockImplementation(() => { throw new Error('not found'); });
-
-    const models = await discoverModels(credManager);
-
-    expect(models).toEqual([]);
+  it('all non-chat models filtered out → falls back to the static catalog', async () => {
+    openaiListMock.mockResolvedValue({ data: [{ id: 'whisper-1' }, { id: 'text-embedding-3-small' }] });
+    const models = await discoverModels();
+    expect(models).toEqual(openaiCatalog());
   });
 
-  it('CLI model IDs are sourced from the shared catalog, not hardcoded (drift guard)', async () => {
-    const credManager = makeFakeCredentialManager({ getAvailableProviders: vi.fn().mockReturnValue([]) });
-    // All three CLI binaries present.
-    vi.mocked(execFileSync).mockImplementation(() => Buffer.from('/usr/local/bin/found'));
-
-    const models = await discoverModels(credManager);
-    const cliIds = models.filter(m => m.invocation === 'cli').map(m => m.id).sort();
-
-    const catalogCliIds = Object.values(MODEL_CATALOG)
-      .flatMap(c => c.cliModels.map(m => m.id))
-      .sort();
-
-    expect(cliIds).toEqual(catalogCliIds);
+  it('models.list() throwing falls back to the static catalog', async () => {
+    openaiListMock.mockRejectedValue(new Error('503'));
+    const models = await discoverModels();
+    expect(models).toEqual(openaiCatalog());
   });
+});
 
-  it('API credential and CLI binary for the same underlying provider both appear (different invocation modes)', async () => {
-    const credManager = makeFakeCredentialManager({
-      getAvailableProviders: vi.fn().mockReturnValue(['anthropic']),
-    });
-    vi.mocked(getModels).mockReturnValue([makeModel('claude-sonnet-4-6', 'anthropic')] as never);
-    vi.mocked(execFileSync).mockImplementation((...args: unknown[]) => {
-      const argv = args[1] as string[];
-      if (argv[0] === 'claude') return Buffer.from('/usr/local/bin/claude');
-      throw new Error('not found');
-    });
+describe('discoverModels — both protocols credentialed', () => {
+  it('concatenates Anthropic models followed by OpenAI models', async () => {
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant';
+    process.env['OPENAI_API_KEY'] = 'sk-oai';
+    anthropicListMock.mockResolvedValue({ data: [{ id: 'claude-opus-4-6', display_name: 'Claude Opus 4.6' }] });
+    openaiListMock.mockResolvedValue({ data: [{ id: 'gpt-5.4' }] });
 
-    const models = await discoverModels(credManager);
+    const models = await discoverModels();
 
-    const apiEntry = models.find(m => m.id === 'claude-sonnet-4-6' && m.invocation === 'api');
-    const cliEntry = models.find(m => m.id === 'claude-sonnet-4-6' && m.invocation === 'cli');
-    expect(apiEntry).toBeDefined();
-    expect(cliEntry).toBeDefined();
+    expect(models.map((m) => m.protocol)).toEqual(['anthropic', 'openai']);
+    expect(models.map((m) => m.id)).toEqual(['claude-opus-4-6', 'gpt-5.4']);
   });
 });

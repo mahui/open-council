@@ -28,7 +28,7 @@ function mockAdapter(): InvocationAdapter {
 
 function baseModel(overrides: Partial<ModelConfig> & { name: string }): ModelConfig {
   return {
-    invocation: 'api', provider: 'anthropic', model: 'm', timeout_seconds: 120,
+    protocol: 'anthropic', provider: 'anthropic', model: 'm', timeout_seconds: 120,
     capabilities: ['general'], priority: 100, max_concurrent: 1, resource_weight: 1,
     enabled: true, streaming: true, ...overrides,
   };
@@ -95,10 +95,14 @@ afterEach(() => {
 describe('GET /api/config — redaction', () => {
   it('projects general/prefer/models + readOnly, never leaks credentials', async () => {
     harness = makeHarness([
-      baseModel({ name: 'claude', api_key_env: 'ANTHROPIC_API_KEY' }),
+      baseModel({ name: 'claude', protocol: 'anthropic', api_key_env: 'ANTHROPIC_API_KEY' }),
       baseModel({
-        name: 'custom:local:llama', provider: 'custom:local', model: 'llama',
-        api_base_url: 'http://localhost:11434/v1', api_credential_path: '/tmp/nope.key',
+        name: 'custom:local:llama', protocol: 'openai', provider: 'custom:local', model: 'llama',
+        base_url: 'http://localhost:11434/v1', api_key_path: '/tmp/nope.key',
+      }),
+      baseModel({
+        name: 'legacy-disabled', protocol: 'openai', enabled: false,
+        legacy_disabled_reason: 'CLI 通道已移除，请改用标准 API（protocol: anthropic | openai + API key）',
       }),
     ]);
     const dto = await getConfig(harness);
@@ -106,19 +110,29 @@ describe('GET /api/config — redaction', () => {
     expect(dto.version).toMatch(/^[0-9a-f]{64}$/);
     expect(dto.general.default_mode).toBe('auto');
     expect(dto.prefer).toContain('claude');
-    expect(dto.readOnly.schema_version).toBe(1);
+    expect(dto.readOnly.schema_version).toBe(2);
+
+    const claude = dto.models.find((m) => m.name === 'claude');
+    expect(claude?.protocol).toBe('anthropic');
+    expect(claude?.isCustom).toBe(false);
 
     const custom = dto.models.find((m) => m.name === 'custom:local:llama');
+    expect(custom?.protocol).toBe('openai');
     expect(custom?.isCustom).toBe(true);
     expect(custom?.apiBaseUrl).toBe('http://localhost:11434/v1');
     expect(custom?.hasCredentialFile).toBe(false); // path doesn't exist
+
+    // A migrated-and-disabled legacy model surfaces its reason for the settings UI.
+    const legacy = dto.models.find((m) => m.name === 'legacy-disabled');
+    expect(legacy?.enabled).toBe(false);
+    expect(legacy?.legacy_disabled_reason).toMatch(/CLI/);
 
     // Each model carries its own per-file optimistic-lock token (§4.3).
     for (const m of dto.models) expect(m.version).toMatch(/^[0-9a-f]{64}$/);
 
     // No secret-ish fields anywhere in the response body.
     const raw = JSON.stringify(dto);
-    for (const forbidden of ['api_key_env', 'api_credential_path', 'ANTHROPIC_API_KEY', 'apiKey', 'token']) {
+    for (const forbidden of ['api_key_env', 'api_key_path', 'ANTHROPIC_API_KEY', 'apiKey', 'token']) {
       expect(raw).not.toContain(forbidden);
     }
   });
@@ -200,10 +214,11 @@ describe('PUT /api/config — merge + optimistic lock', () => {
 
 describe('PATCH /api/models/:name — enable toggle', () => {
   it('flips enabled on disk and reloads the runtime, own version lock', async () => {
-    harness = makeHarness([baseModel({ name: 'claude' }), baseModel({ name: 'gemini', provider: 'google' })]);
+    harness = makeHarness([baseModel({ name: 'claude' }), baseModel({ name: 'gemini', protocol: 'openai', provider: 'google' })]);
     const dto = await getConfig(harness);
     const model = dto.models.find((m) => m.name === 'gemini');
     expect(model?.enabled).toBe(true);
+    expect(model?.protocol).toBe('openai');
     expect(model?.version).toMatch(/^[0-9a-f]{64}$/);
 
     // Echo back the per-model version token from the GET projection (frontend flow).
@@ -214,6 +229,7 @@ describe('PATCH /api/models/:name — enable toggle', () => {
     expect(res.status).toBe(200);
     const patched = (await res.json()) as ModelSettingDTO;
     expect(patched.enabled).toBe(false);
+    expect(patched.protocol).toBe('openai');
     // The write changed the file, so the returned lock token must be fresh.
     expect(patched.version).toMatch(/^[0-9a-f]{64}$/);
     expect(patched.version).not.toBe(model!.version);
@@ -250,8 +266,8 @@ describe('POST /api/providers/custom — credential ingress', () => {
 
     // Key landed in a 0o600 file; the model YAML only stores the path, not the key.
     const model = harness.loader.loadModelConfig('custom:mylab:a');
-    expect(model?.api_credential_path).toBeTruthy();
-    const keyPath = model!.api_credential_path!;
+    expect(model?.api_key_path).toBeTruthy();
+    const keyPath = model!.api_key_path!;
     expect(existsSync(keyPath)).toBe(true);
     expect(statSync(keyPath).mode & 0o777).toBe(0o600);
     expect(readFileSync(keyPath, 'utf-8')).toBe(secret);

@@ -42,7 +42,7 @@ function mockAdapter(): InvocationAdapter {
 
 function baseModel(overrides: Partial<ModelConfig> & { name: string }): ModelConfig {
   return {
-    invocation: 'api', provider: 'anthropic', model: 'm', timeout_seconds: 120,
+    protocol: 'anthropic', provider: 'anthropic', model: 'm', timeout_seconds: 120,
     capabilities: ['general'], priority: 100, max_concurrent: 1, resource_weight: 1,
     enabled: true, streaming: true, ...overrides,
   };
@@ -68,7 +68,7 @@ function makeHarness(models: ModelConfig[], prefer: string[]): Harness {
   loader.saveCouncilConfig(config);
 
   const credentialManager = new CredentialManager();
-  vi.spyOn(CredentialManager.prototype, 'discoverAll').mockResolvedValue({});
+  vi.spyOn(CredentialManager.prototype, 'discoverAll').mockReturnValue({});
   const runtime = new RuntimeConfig(buildSnapshot({ loader, credentialManager, adapter: mockAdapter() }));
 
   const store = {
@@ -97,8 +97,8 @@ describe('POST /api/setup/rescan — prefer maintenance', () => {
   it('appends a newly-discovered model to prefer, keeping it de-duplicated', async () => {
     harness = makeHarness([baseModel({ name: 'claude' })], ['claude']);
     discovered = [
-      { id: 'claude', name: 'claude', provider: 'anthropic', invocation: 'api' }, // already exists
-      { id: 'gemini', name: 'gemini', provider: 'google', invocation: 'api' },     // new
+      { id: 'claude', name: 'claude', protocol: 'anthropic', source: 'official' }, // already exists
+      { id: 'gemini', name: 'gemini', protocol: 'openai', source: 'official' },     // new
     ];
 
     const res = await harness.app.request('http://x/api/setup/rescan', {
@@ -116,7 +116,7 @@ describe('POST /api/setup/rescan — prefer maintenance', () => {
 
   it('leaves prefer untouched (and clean) when nothing new is discovered', async () => {
     harness = makeHarness([baseModel({ name: 'claude' })], ['claude']);
-    discovered = [{ id: 'claude', name: 'claude', provider: 'anthropic', invocation: 'api' }];
+    discovered = [{ id: 'claude', name: 'claude', protocol: 'anthropic', source: 'official' }];
 
     const res = await harness.app.request('http://x/api/setup/rescan', {
       method: 'POST', headers: WRITE_HEADERS, body: '{}',
@@ -133,7 +133,7 @@ describe('POST /api/setup/rescan — prefer maintenance', () => {
     // Seed already has claude in prefer; discovery re-surfaces it as "existing"
     // and adds gemini. The result must not contain a duplicate claude.
     harness = makeHarness([baseModel({ name: 'claude' })], ['claude']);
-    discovered = [{ id: 'gemini', name: 'gemini', provider: 'google', invocation: 'api' }];
+    discovered = [{ id: 'gemini', name: 'gemini', protocol: 'openai', source: 'official' }];
 
     await harness.app.request('http://x/api/setup/rescan', {
       method: 'POST', headers: WRITE_HEADERS, body: '{}',

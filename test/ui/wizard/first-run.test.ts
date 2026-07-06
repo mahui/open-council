@@ -1,232 +1,61 @@
+/**
+ * Tests for the wizard's own pure helpers (src/ui/wizard/first-run.ts) after the
+ * standard-API convergence: no OAuth login, no CLI binary probing. Naming /
+ * chairman-selection / custom-endpoint shaping now live in
+ * src/providers/model-assembly.ts and are covered by
+ * test/providers/model-assembly.test.ts instead of here.
+ */
 import { describe, it, expect } from 'vitest';
-import {
-  isRecommended,
-  clampAgents,
-  credentialHint,
-} from '../../../src/ui/wizard/first-run.js';
-import {
-  selectBestChairman,
-  discoveredToModelConfig,
-  buildNamedModels,
-} from '../../../src/providers/model-assembly.js';
+import { isRecommended, clampAgents, credentialHint } from '../../../src/ui/wizard/first-run.js';
 import { assembleConfig, dedupePrefer } from '../../../src/config/assemble-council.js';
-import type { ModelConfig, CouncilConfig } from '../../../src/types/config.js';
+import type { CouncilConfig } from '../../../src/types/config.js';
 import type { DiscoveredModel } from '../../../src/providers/model-discovery.js';
 import { PATHS } from '../../../src/config/paths.js';
-
-/** Minimal, schema-shaped ModelConfig builder — every field the wizard's pure
- *  helpers actually read is explicit; the rest are innocuous defaults. */
-function makeModel(overrides: Partial<ModelConfig> & { name: string }): ModelConfig {
-  return {
-    invocation: 'api',
-    provider: 'anthropic',
-    timeout_seconds: 120,
-    capabilities: ['general'],
-    priority: 100,
-    max_concurrent: 1,
-    resource_weight: 1,
-    enabled: true,
-    streaming: true,
-    ...overrides,
-  };
-}
 
 function makeDiscovered(overrides: Partial<DiscoveredModel> & { id: string }): DiscoveredModel {
   return {
     name: overrides.id,
-    provider: 'anthropic',
-    invocation: 'api',
+    protocol: 'anthropic',
+    source: 'official',
     ...overrides,
   };
 }
 
-describe('selectBestChairman', () => {
-  it('旗舰 API 模型 > CLI 模型 > 未知模型', () => {
-    const flagshipApi = makeModel({ name: 'claude-opus-4', model: 'claude-opus-4-20250514', invocation: 'api' });
-    const cliModel = makeModel({ name: 'custom-model-v1-cli', model: 'custom-model-v1', invocation: 'cli' });
-    const unknownApi = makeModel({ name: 'custom-model-v2', model: 'custom-model-v2', invocation: 'api' });
-
-    // Shuffle input order — result must not depend on array position.
-    const best = selectBestChairman([unknownApi, cliModel, flagshipApi]);
-
-    expect(best?.name).toBe('claude-opus-4');
-  });
-
-  it('CLI 模型优于同能力档位的未知 API 模型（invocation bonus）', () => {
-    const cliModel = makeModel({ name: 'custom-model-v1-cli', model: 'custom-model-v1', invocation: 'cli' });
-    const unknownApi = makeModel({ name: 'custom-model-v2', model: 'custom-model-v2', invocation: 'api' });
-
-    const best = selectBestChairman([unknownApi, cliModel]);
-
-    expect(best?.name).toBe('custom-model-v1-cli');
-  });
-
-  it('同能力档位内，tiebreaker 按旗舰加分区分（gpt-5 > claude-sonnet-4）', () => {
-    const gptFive = makeModel({ name: 'gpt-5-turbo', model: 'gpt-5-turbo', invocation: 'api' });
-    const claudeSonnet = makeModel({ name: 'claude-sonnet-4', model: 'claude-sonnet-4-20250514', invocation: 'api' });
-
-    // Both land in the "balanced" capability tier (rateModelCapability === 2);
-    // only the flagship-id tiebreaker should separate them.
-    const best = selectBestChairman([claudeSonnet, gptFive]);
-
-    expect(best?.name).toBe('gpt-5-turbo');
-  });
-
-  it('空配置列表 → 返回 undefined', () => {
-    expect(selectBestChairman([])).toBeUndefined();
-  });
-});
-
 describe('isRecommended', () => {
   it.each<[string, Partial<DiscoveredModel>, boolean]>([
-    ['CLI 模型总是推荐（即便 id 看似普通）', { id: 'anything-goes', invocation: 'cli' }, true],
-    ['Anthropic opus', { id: 'claude-opus-4-20250514', invocation: 'api' }, true],
-    ['Anthropic sonnet-4', { id: 'claude-sonnet-4-20250514', invocation: 'api' }, true],
-    ['Anthropic 3-5-sonnet', { id: 'claude-3-5-sonnet-20241022', invocation: 'api' }, true],
-    ['OpenAI o3', { id: 'o3', invocation: 'api' }, true],
-    ['OpenAI o4', { id: 'o4', invocation: 'api' }, true],
-    ['OpenAI gpt-4o', { id: 'gpt-4o', invocation: 'api' }, true],
-    ['OpenAI gpt-5', { id: 'gpt-5', invocation: 'api' }, true],
-    ['OpenAI gpt-5-turbo (无 mini 后缀)', { id: 'gpt-5-turbo', invocation: 'api' }, true],
-    ['Google gemini-2.5-pro', { id: 'gemini-2.5-pro', invocation: 'api' }, true],
-    ['Google gemini-pro', { id: 'gemini-pro', invocation: 'api' }, true],
+    ['Anthropic opus', { id: 'claude-opus-4-20250514' }, true],
+    ['Anthropic sonnet-4', { id: 'claude-sonnet-4-20250514' }, true],
+    ['Anthropic 3-5-sonnet', { id: 'claude-3-5-sonnet-20241022' }, true],
+    ['OpenAI o3', { id: 'o3', protocol: 'openai' }, true],
+    ['OpenAI o4', { id: 'o4', protocol: 'openai' }, true],
+    ['OpenAI gpt-4o', { id: 'gpt-4o', protocol: 'openai' }, true],
+    ['OpenAI gpt-5', { id: 'gpt-5', protocol: 'openai' }, true],
+    ['OpenAI gpt-5-turbo (no mini suffix)', { id: 'gpt-5-turbo', protocol: 'openai' }, true],
 
-    ['Anthropic haiku 被排除', { id: 'claude-haiku-3-5', invocation: 'api' }, false],
-    ['OpenAI gpt-4o-mini 被排除（非精确 gpt-4o）', { id: 'gpt-4o-mini', invocation: 'api' }, false],
-    ['OpenAI gpt-5-mini 被排除', { id: 'gpt-5-mini', invocation: 'api' }, false],
-    ['OpenAI o1 不在推荐白名单', { id: 'o1', invocation: 'api' }, false],
-    ['Google gemini-2.5-flash 被排除', { id: 'gemini-2.5-flash', invocation: 'api' }, false],
-    ['Google gemini-1.5-pro 与旗舰版本号不符，被排除', { id: 'gemini-1.5-pro', invocation: 'api' }, false],
-    ['未知供应商模型被排除', { id: 'llama-3-70b-instruct', invocation: 'api', provider: 'other' }, false],
+    ['Anthropic haiku excluded', { id: 'claude-haiku-3-5' }, false],
+    ['OpenAI gpt-4o-mini excluded (not exact gpt-4o)', { id: 'gpt-4o-mini', protocol: 'openai' }, false],
+    ['OpenAI gpt-5-mini excluded', { id: 'gpt-5-mini', protocol: 'openai' }, false],
+    ['OpenAI o1 not on the recommended list', { id: 'o1', protocol: 'openai' }, false],
+    ['an unremarkable custom-endpoint id excluded', { id: 'llama-3-70b-instruct', protocol: 'openai', source: 'my-gateway' }, false],
   ])('%s', (_label, overrides, expected) => {
     expect(isRecommended(makeDiscovered(overrides))).toBe(expected);
   });
 });
 
-describe('discoveredToModelConfig', () => {
-  it('name 省略时默认取 discovered.id', () => {
-    const m = makeDiscovered({ id: 'claude-opus-4-20250514', provider: 'anthropic', invocation: 'api' });
-    const cfg = discoveredToModelConfig(m);
-    expect(cfg.name).toBe('claude-opus-4-20250514');
-  });
-
-  it('显式 name 覆盖 discovered.id', () => {
-    const m = makeDiscovered({ id: 'claude-opus-4-20250514', provider: 'anthropic', invocation: 'api' });
-    const cfg = discoveredToModelConfig(m, 'custom-name');
-    expect(cfg.name).toBe('custom-name');
-    expect(cfg.model).toBe('claude-opus-4-20250514');
-  });
-
-  it.each<[string, string, number]>([
-    ['anthropic', 'anthropic', 100],
-    ['openai', 'openai', 90],
-    ['openai-codex', 'openai-codex', 90],
-    ['google', 'google', 80],
-    ['custom:local', 'custom:local', 80],
-  ])('provider=%s → priority=%i', (_label, provider, expectedPriority) => {
-    const m = makeDiscovered({ id: 'model-x', provider, invocation: 'api' });
-    const cfg = discoveredToModelConfig(m);
-    expect(cfg.priority).toBe(expectedPriority);
-    expect(cfg.streaming).toBe(true);
-    expect(cfg.binary).toBeUndefined();
-  });
-
-  it('CLI + anthropic → claude 二进制与 arg 参数', () => {
-    const m = makeDiscovered({ id: 'claude-opus-4-20250514', provider: 'anthropic', invocation: 'cli' });
-    const cfg = discoveredToModelConfig(m);
-    expect(cfg.binary).toBe('claude');
-    expect(cfg.args).toEqual(['-p', '--model', 'claude-opus-4-20250514']);
-    expect(cfg.input_mode).toBe('arg');
-    expect(cfg.streaming).toBe(false);
-  });
-
-  it('CLI + openai → codex 二进制与 exec 参数', () => {
-    const m = makeDiscovered({ id: 'gpt-5', provider: 'openai', invocation: 'cli' });
-    const cfg = discoveredToModelConfig(m);
-    expect(cfg.binary).toBe('codex');
-    expect(cfg.args).toEqual(['exec', '-m', 'gpt-5', '-c', 'approval_policy="never"', '--json']);
-    expect(cfg.input_mode).toBe('arg');
-  });
-
-  it('CLI + google → gemini 二进制', () => {
-    const m = makeDiscovered({ id: 'gemini-2.5-pro', provider: 'google', invocation: 'cli' });
-    const cfg = discoveredToModelConfig(m);
-    expect(cfg.binary).toBe('gemini');
-    expect(cfg.args).toEqual(['-p']);
-    expect(cfg.input_mode).toBe('arg');
-  });
-});
-
-describe('buildNamedModels', () => {
-  it('API 与 CLI 共享同一 id 时，仅 CLI 变体加 -cli 后缀', () => {
-    const models: DiscoveredModel[] = [
-      makeDiscovered({ id: 'gemini-2.5-pro', name: 'gemini-2.5-pro (api)', provider: 'google', invocation: 'api' }),
-      makeDiscovered({ id: 'gemini-2.5-pro', name: 'gemini-2.5-pro (cli)', provider: 'google', invocation: 'cli' }),
-    ];
-
-    const named = buildNamedModels(models);
-    const apiNamed = named.find(n => n.model.invocation === 'api');
-    const cliNamed = named.find(n => n.model.invocation === 'cli');
-
-    expect(apiNamed?.config.name).toBe('gemini-2.5-pro');
-    expect(cliNamed?.config.name).toBe('gemini-2.5-pro-cli');
-  });
-
-  it('无 id 冲突时名字保持干净（不加后缀），即便是唯一的 CLI 模型', () => {
-    const models: DiscoveredModel[] = [
-      makeDiscovered({ id: 'gpt-5', name: 'gpt-5', provider: 'openai', invocation: 'cli' }),
-    ];
-
-    const named = buildNamedModels(models);
-
-    expect(named[0]?.config.name).toBe('gpt-5');
-  });
-
-  it('无冲突的多个不同 id 模型均保持各自 id 作为 name', () => {
-    const models: DiscoveredModel[] = [
-      makeDiscovered({ id: 'claude-opus-4', name: 'claude-opus-4', provider: 'anthropic', invocation: 'api' }),
-      makeDiscovered({ id: 'gpt-5', name: 'gpt-5', provider: 'openai', invocation: 'api' }),
-    ];
-
-    const named = buildNamedModels(models);
-
-    expect(named.map(n => n.config.name).sort()).toEqual(['claude-opus-4', 'gpt-5']);
-  });
-
-  it('prefer 列表引用的是冲突消解后的最终 name，而非原始 discovered.id', () => {
-    const models: DiscoveredModel[] = [
-      makeDiscovered({ id: 'gemini-2.5-pro', name: 'a', provider: 'google', invocation: 'api' }),
-      makeDiscovered({ id: 'gemini-2.5-pro', name: 'b', provider: 'google', invocation: 'cli' }),
-    ];
-
-    const named = buildNamedModels(models);
-    const prefer = named.map(n => n.config.name);
-
-    expect(prefer).toEqual(['gemini-2.5-pro', 'gemini-2.5-pro-cli']);
-    // Distinct entries — the whole point of the collision resolution.
-    expect(new Set(prefer).size).toBe(prefer.length);
-    // Each NamedModel's config.name is what downstream code (prefer/chairman) reads;
-    // reconfirm it matches what we just derived, not the raw model.id.
-    for (const n of named) {
-      expect(n.config.name).toBe(prefer.find(p => p === n.config.name));
-    }
-  });
-});
-
 describe('clampAgents', () => {
-  it('1 个模型时 → { min: 1, max: 3 }（多角色单模型场景）', () => {
+  it('1 model available → { min: 1, max: 3 } (multi-role single-model scenario)', () => {
     expect(clampAgents(1)).toEqual({ min: 1, max: 3 });
   });
 
-  it('2 个模型时 → { min: 2, max: 2 }', () => {
+  it('2 models available → { min: 2, max: 2 }', () => {
     expect(clampAgents(2)).toEqual({ min: 2, max: 2 });
   });
 
-  it('3 个模型时 → { min: 2, max: 3 }', () => {
+  it('3 models available → { min: 2, max: 3 }', () => {
     expect(clampAgents(3)).toEqual({ min: 2, max: 3 });
   });
 
-  it('5 个及以上模型时 → max 封顶为 5', () => {
+  it('5+ models available → max caps at 5', () => {
     expect(clampAgents(5)).toEqual({ min: 2, max: 5 });
     expect(clampAgents(10)).toEqual({ min: 2, max: 5 });
   });
@@ -234,17 +63,17 @@ describe('clampAgents', () => {
 
 describe('credentialHint', () => {
   it.each<[string, string]>([
-    ['anthropic', 'claude login'],
-    ['Anthropic', 'claude login'],
-    ['openai', 'codex login'],
-    ['openai-codex', 'codex login'],
-    ['google', 'gemini` and sign in'],
-    ['google-gemini-cli', 'gemini` and sign in'],
-    ['google-vertex', 'gemini` and sign in'],
-    ['github-copilot', 'gh auth login'],
-    ['some-unknown-provider', 'check the credential file'],
-  ])('provider=%s → 命中对应提示', (provider, expectedSubstring) => {
-    expect(credentialHint(provider)).toContain(expectedSubstring);
+    ['anthropic', 'set ANTHROPIC_API_KEY'],
+    ['Anthropic', 'set ANTHROPIC_API_KEY'],
+    ['claude-opus', 'set ANTHROPIC_API_KEY'],
+    ['openai', 'set OPENAI_API_KEY'],
+    ['gpt-4o', 'set OPENAI_API_KEY'],
+    ['google', 'set the endpoint API key (env var or key file)'],
+    ['github-copilot', 'set the endpoint API key (env var or key file)'],
+    ['custom:my-gateway', 'set the endpoint API key (env var or key file)'],
+    ['some-unknown-provider', 'set the endpoint API key (env var or key file)'],
+  ])('provider=%s → matching hint', (provider, expected) => {
+    expect(credentialHint(provider)).toContain(expected);
   });
 });
 
@@ -295,7 +124,7 @@ describe('assembleConfig', () => {
     storage_security: { session_retention_days: 15 },
   };
 
-  it('有 base 时：用户手改字段保留，向导决定的字段被覆盖', () => {
+  it('with a base: wizard-decided fields override, user-owned fields are preserved', () => {
     const result = assembleConfig({
       generalOverride: {
         default_chairman: 'new-chairman',
@@ -335,9 +164,11 @@ describe('assembleConfig', () => {
     expect(result.circuit_breaker).toEqual(customBase.circuit_breaker);
     expect(result.output).toEqual(customBase.output);
     expect(result.storage_security).toEqual(customBase.storage_security);
+    // schema_version is carried over from base, unaffected by the merge.
+    expect(result.schema_version).toBe(1);
   });
 
-  it('无 base 时：从 schema 默认值生成完整配置，且包含向导指定的 role_generator_model', () => {
+  it('without a base: builds a complete config from schema defaults, schema_version 2 (standard-API convergence)', () => {
     const result = assembleConfig({
       generalOverride: {
         default_chairman: 'solo-model',
@@ -363,9 +194,10 @@ describe('assembleConfig', () => {
     expect(result.routing.default.role_set).toBe('default');
     expect(result.concurrency.global_resource_limit).toBe(10);
     expect(result.output.format).toBe('markdown');
-    expect(result.schema_version).toBe(1);
+    expect(result.schema_version).toBe(2);
   });
-  it('无 base 时 storage 目录来自 PATHS，routing 反映向导选择', () => {
+
+  it('without a base: storage dirs come from PATHS, routing reflects the wizard choice', () => {
     const result = assembleConfig({
       generalOverride: {
         default_chairman: 'solo-model',
@@ -378,7 +210,6 @@ describe('assembleConfig', () => {
       base: null,
     });
 
-    // Storage dirs come from PATHS, not schema string defaults, when base is absent.
     expect(result.storage.data_dir).toBe(PATHS.dataDir);
     expect(result.storage.checkpoint_dir).toBe(PATHS.checkpoints);
     expect(result.storage.log_dir).toBe(PATHS.logs);
@@ -387,7 +218,7 @@ describe('assembleConfig', () => {
     expect(result.routing.default.chairman).toBe('solo-model');
   });
 
-  it('无 base 且单模型时（min_agents=1）不会被 schema 校验拒绝', () => {
+  it('without a base and a single model (min_agents=1) is not rejected by schema validation', () => {
     const result = assembleConfig({
       generalOverride: { default_chairman: 'only-model', role_generator_model: '', min_agents: 1, max_agents: 3 },
       prefer: ['only-model'],
@@ -399,7 +230,7 @@ describe('assembleConfig', () => {
     expect(result.general.role_generator_model).toBe('');
   });
 
-  it('prefer 含重复项时被保序去重（首个出现位置保留）', () => {
+  it('a prefer list with repeats is order-preserving de-duped (first occurrence wins)', () => {
     const result = assembleConfig({
       generalOverride: { default_chairman: 'a', role_generator_model: '', min_agents: 1, max_agents: 3 },
       prefer: ['a', 'b', 'a', 'c', 'b'],
@@ -410,7 +241,7 @@ describe('assembleConfig', () => {
     expect(result.routing.default.prefer).toEqual(['a', 'b', 'c']);
   });
 
-  it('对同一去重后的输入幂等：重复 assemble 结果稳定', () => {
+  it('is idempotent for an already-deduped input: re-assembling yields a stable result', () => {
     const once = assembleConfig({
       generalOverride: { default_chairman: 'a', role_generator_model: '', min_agents: 1, max_agents: 3 },
       prefer: ['a', 'b', 'a'],
@@ -430,17 +261,17 @@ describe('assembleConfig', () => {
 });
 
 describe('dedupePrefer', () => {
-  it('保序去重，首个出现位置获胜', () => {
+  it('order-preserving de-dup, first occurrence wins', () => {
     expect(dedupePrefer(['b', 'a', 'b', 'c', 'a'])).toEqual(['b', 'a', 'c']);
   });
 
-  it('已去重的列表原样返回（幂等）', () => {
+  it('an already-deduped list is returned as-is (idempotent)', () => {
     const clean = ['x', 'y', 'z'];
     expect(dedupePrefer(clean)).toEqual(clean);
     expect(dedupePrefer(dedupePrefer(clean))).toEqual(clean);
   });
 
-  it('空列表 → 空列表', () => {
+  it('empty list → empty list', () => {
     expect(dedupePrefer([])).toEqual([]);
   });
 });
