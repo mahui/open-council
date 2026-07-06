@@ -253,15 +253,29 @@ InvocationAdapter { invoke, healthCheck }   // 实际签名（无 stream 方法�
 
 ---
 
-## 3. pi-ai 去留（已拍板：弃用，换官方 SDK）
+## 3. pi-ai 移除（产品决策，不可协商）
 
-**决策**：移除 `@mariozechner/pi-ai`，改依赖 `@anthropic-ai/sdk` + `openai`。openai SDK 的 `baseURL` 天然覆盖一切 OpenAI 兼容端点。
+**决策**：移除 `@mariozechner/pi-ai`，api-adapter 内核换 `@anthropic-ai/sdk` + `openai` 官方 SDK。openai SDK 的 `baseURL` 天然覆盖一切 OpenAI 兼容端点。这是用户 2026-07-06 的直接产品决策——收敛后 pi-ai 只剩两协议 invoke，其核心价值（20+ provider 适配 + OAuth）全被放弃，留着等于扛一个大依赖只用其零头。官方 SDK 直白、类型一等公民、错误对象结构化（分类更干净）、原生 AbortSignal。pi-ai 内部本就是包这两个 SDK，去中间层无能力损失。
 
-**理由**：收敛后 pi-ai 只剩两协议 invoke，其核心价值（20+ provider 适配 + OAuth）全被放弃，留着等于扛一个大依赖只用其零头。官方 SDK 直白、类型一等公民、错误对象结构化（分类更干净）、原生 AbortSignal、维护活跃。pi-ai 内部本就是包这两个 SDK，去掉中间层无能力损失。
+**替换范围（澄清：不是大重写）**：超时守卫 / 重试退避 / 错误分类 / 截断检测**全部包在 `invoke` 调用的外层**（`executeWithHealth`/`withRetry`/`createTimeoutGuard`），换的只是最内两个点——`streamSimple` / `completeSimple`。接口签名不变，583 测试兜底语义。
 
-**迁移代价（诚实评估）**：api-adapter 的 invoke 调用体重写为两个 `ProtocolClient` 实现（§2.4/2.5）——这是最需谨慎的一块，但**可靠性骨架（超时/重试/熔断/截断/usage）不动**，只替换「调谁」。风险集中在：(1) 两 SDK 流式事件形状差异（§2.5 表已明确）、(2) 兼容端点的字段支持差异（集中在 OpenAIClient 一处降级）、(3) 目录失去 pi-ai 校验（§1.7 trade-off，用 live `/models` 补偿）。
+### W2 实施注意事项 / 重接清单（= api-adapter 工作项验收要点）
 
-**放弃的能力**：pi-ai 目录的 ID 真实性校验、pi-ai 未来自动新增 provider。二者与产品收敛方向一致（我们只要两协议），可接受。
+原「风险论证」降级为下面的重接检查项；每项都是 W2a 的验收门槛，逐项过测即完成：
+
+| # | 重接点 | 要求 | 参见 |
+|---|--------|------|------|
+| R1 | AbortSignal 透传 | 空闲 guard 的 `signal` 传入两 SDK 请求选项（anthropic `{ signal }`、openai `{ signal }`）；超时 abort → SDK 抛 `APIUserAbortError` → 重分类 `InvocationTimeoutError`。可删现有防 pi-ai 的 `expired` racing promise | §2.5 |
+| R2 | SDK 原生错误类型接入现有 `classifyError` | 不重写分类器；`APIError.status` 直接命中现有 `extractStatus` → status 主路径；字符串匹配降为非-APIError 兜底；`isRateLimit` 优先 `instanceof RateLimitError \|\| status===429` | §2.6 |
+| R3 | 流式事件映射 | anthropic `content_block_delta.text_delta` / openai `choices[0].delta.content` → `onChunk` | §2.5 表 |
+| R4 | usage 字段映射 | anthropic `input_tokens/output_tokens`（message_start + message_delta）/ openai `prompt_tokens/completion_tokens`（需 `stream_options.include_usage`）→ `token_usage`；缺失兜底 0 | §2.5 表 |
+| R5 | stop_reason/finish_reason → `truncated` | anthropic `stop_reason==='max_tokens'` / openai `finish_reason==='length'` → `truncated:true` | §2.5 表 |
+| R6 | SDK 原生 `maxRetries` 设 **0** | 否则与自研 `withRetry` 双重叠加、对熔断器隐藏失败 | §2.1 |
+| R7 | 兼容端点字段降级 | `stream_options`/`reasoning_effort`/`max_tokens(→max_completion_tokens)` 支持差异，集中在 OpenAIClient 一处温和降级 | §2.4 |
+
+**验收口径**：`InvocationAdapter` 契约不变，**现有 provider 测试语义全过**（pi-ai mock 换 SDK mock，断言的行为语义不变）。
+
+**放弃的能力（可接受）**：pi-ai 目录 ID 真实性校验、pi-ai 未来自动新增 provider——与「只要两协议」的收敛方向一致，由 §1.5 live `/models` 补偿。
 
 ---
 
@@ -319,7 +333,7 @@ InvocationAdapter { invoke, healthCheck }   // 实际签名（无 stream 方法�
 |------|--------|-----------|------|--------|
 | **W0（本篇）** | schema/类型/ProtocolClient 契约定稿 | architect | — | — |
 | **W1 地基** | `types/config.ts` + `config/schema.ts`（protocol schema、删 CLI 字段、schema_version=2、OFFICIAL_BASE_URL）；`package.json` 换依赖（-pi-ai +两 SDK） | cli-dev(config) | W0 | 串行（阻塞下游） |
-| **W2a providers 引擎** | ProtocolClient 接口 + AnthropicClient + OpenAIClient；api-adapter invoke 体改调；错误分类改 status 主路径；删 resolveModel/family/adapter.ts/cli-adapter.ts | provider-dev | W1 | 与 W2b/c 并行 |
+| **W2a api-adapter 重写**（独立工作项） | ProtocolClient 接口 + AnthropicClient + OpenAIClient；api-adapter invoke 体改调（R1–R7 重接清单，§3）；错误分类改 status 主路径；删 resolveModel/family/adapter.ts/cli-adapter.ts。**验收 = 现有 provider 测试语义全过（pi-ai mock→SDK mock，断言行为不变）** | provider-dev | W1 | 与 W2b/c 并行 |
 | **W2b 凭证瘦身** | credentials/discovery.ts → env+file 薄壳；删 OAuth/keychain/legacy/getEnvApiKey；paths.ts 删 KNOWN_CREDENTIALS | provider-dev | W1 | 并行 |
 | **W2c 发现/装配/目录** | model-discovery（live `/models`）、model-assembly（塌缩命名）、model-catalog（硬编码，删 pi-ai 校验）、presets | provider-dev | W1 | 并行 |
 | **W3 迁移** | `config/migrate.ts` + loader 挂载（schema_version<2 触发） | cli-dev(config) | W1,W2 | 依赖 schema |
