@@ -118,6 +118,8 @@ export interface ConfigDTO {
   prefer: string[]; // routing.default.prefer
   models: ModelSettingDTO[]; // 含禁用模型
   readOnly: ReadOnlyConfigDTO;
+  // 非阻断性提示（仅 PUT 写回时可能出现）：如 chairman 已知但被禁用，写入放行但附带说明。
+  warning?: string;
 }
 
 export interface UpdateConfigRequest {

@@ -9,7 +9,7 @@ import {
   discoveredToModelConfig,
   buildNamedModels,
 } from '../../../src/providers/model-assembly.js';
-import { assembleConfig } from '../../../src/config/assemble-council.js';
+import { assembleConfig, dedupePrefer } from '../../../src/config/assemble-council.js';
 import type { ModelConfig, CouncilConfig } from '../../../src/types/config.js';
 import type { DiscoveredModel } from '../../../src/providers/model-discovery.js';
 import { PATHS } from '../../../src/config/paths.js';
@@ -397,5 +397,50 @@ describe('assembleConfig', () => {
 
     expect(result.general.min_agents).toBe(1);
     expect(result.general.role_generator_model).toBe('');
+  });
+
+  it('prefer 含重复项时被保序去重（首个出现位置保留）', () => {
+    const result = assembleConfig({
+      generalOverride: { default_chairman: 'a', role_generator_model: '', min_agents: 1, max_agents: 3 },
+      prefer: ['a', 'b', 'a', 'c', 'b'],
+      chairman: 'a',
+      base: null,
+    });
+
+    expect(result.routing.default.prefer).toEqual(['a', 'b', 'c']);
+  });
+
+  it('对同一去重后的输入幂等：重复 assemble 结果稳定', () => {
+    const once = assembleConfig({
+      generalOverride: { default_chairman: 'a', role_generator_model: '', min_agents: 1, max_agents: 3 },
+      prefer: ['a', 'b', 'a'],
+      chairman: 'a',
+      base: null,
+    });
+    const twice = assembleConfig({
+      generalOverride: { default_chairman: 'a', role_generator_model: '', min_agents: 1, max_agents: 3 },
+      prefer: once.routing.default.prefer,
+      chairman: 'a',
+      base: null,
+    });
+
+    expect(twice.routing.default.prefer).toEqual(once.routing.default.prefer);
+    expect(twice.routing.default.prefer).toEqual(['a', 'b']);
+  });
+});
+
+describe('dedupePrefer', () => {
+  it('保序去重，首个出现位置获胜', () => {
+    expect(dedupePrefer(['b', 'a', 'b', 'c', 'a'])).toEqual(['b', 'a', 'c']);
+  });
+
+  it('已去重的列表原样返回（幂等）', () => {
+    const clean = ['x', 'y', 'z'];
+    expect(dedupePrefer(clean)).toEqual(clean);
+    expect(dedupePrefer(dedupePrefer(clean))).toEqual(clean);
+  });
+
+  it('空列表 → 空列表', () => {
+    expect(dedupePrefer([])).toEqual([]);
   });
 });

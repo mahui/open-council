@@ -16,7 +16,7 @@ import {
   buildCustomModelConfig,
   customCredentialPath,
 } from '../../providers/model-assembly.js';
-import { assembleConfig } from '../../config/assemble-council.js';
+import { assembleConfig, dedupePrefer } from '../../config/assemble-council.js';
 import { hasBinary } from '../../shared/env.js';
 
 const TEST_PROMPT = "Reply with exactly the word: ok";
@@ -211,7 +211,7 @@ async function runQuickSetup(loader: ConfigLoader): Promise<void> {
       min_agents: minAgents,
       max_agents: maxAgents,
     },
-    prefer: configs.map(c => c.name),
+    prefer: dedupePrefer(configs.map(c => c.name)),
     chairman: chairmanName,
     base,
   });
@@ -467,7 +467,7 @@ async function runCustomSetup(loader: ConfigLoader): Promise<void> {
     ?? named[0]?.config.name
     ?? customConfigs[0]?.name
     ?? '';
-  const preferIds = [...named.map(n => n.config.name), ...customConfigs.map(c => c.name)];
+  const preferIds = dedupePrefer([...named.map(n => n.config.name), ...customConfigs.map(c => c.name)]);
 
   // Merge onto the existing council.yaml when keeping; rebuild from schema defaults
   // when replacing. Either way schema.parse guarantees a complete, valid config.

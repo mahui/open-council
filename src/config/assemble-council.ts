@@ -25,7 +25,12 @@ export function assembleConfig(opts: {
   chairman: string;
   base: CouncilConfig | null;
 }): CouncilConfig {
-  const { generalOverride, prefer, chairman, base } = opts;
+  const { generalOverride, chairman, base } = opts;
+  // Backstop dedupe: every write path (wizard, Web GUI PUT, rescan) funnels the
+  // prefer list through here, so a single order-preserving de-dup at the gate
+  // guarantees council.yaml can never accumulate duplicate routing entries —
+  // even if an upstream source forgets to clean its own input.
+  const prefer = dedupePrefer(opts.prefer);
 
   if (base) {
     const merged = {
@@ -46,4 +51,14 @@ export function assembleConfig(opts: {
     routing: { default: { prefer, chairman } },
   };
   return CouncilConfigSchema.parse(minimal) as unknown as CouncilConfig;
+}
+
+/**
+ * Order-preserving de-duplication of a prefer list — first occurrence wins, so
+ * the highest-priority routing position for a model is the one that survives.
+ * Shared by the wizard/server prefer-construction sources so intent is explicit
+ * at each call site (the {@link assembleConfig} gate is the ultimate backstop).
+ */
+export function dedupePrefer(prefer: string[]): string[] {
+  return [...new Set(prefer)];
 }

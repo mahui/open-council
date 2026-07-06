@@ -156,6 +156,36 @@ describe('PUT /api/config — merge + optimistic lock', () => {
     expect(res.status).toBe(400);
   });
 
+  it('silently de-dups a prefer list with repeats (no 400), persists it clean', async () => {
+    harness = makeHarness([baseModel({ name: 'claude' }), baseModel({ name: 'gemini', provider: 'google' })]);
+    const dto = await getConfig(harness);
+    const res = await harness.app.request('http://x/api/config', {
+      method: 'PUT', headers: WRITE_HEADERS,
+      body: JSON.stringify({ prefer: ['claude', 'gemini', 'claude', 'gemini'], version: dto.version }),
+    });
+    expect(res.status).toBe(200);
+    const updated = (await res.json()) as ConfigDTO;
+    expect(updated.prefer).toEqual(['claude', 'gemini']);
+    // And on disk, not just in the projection.
+    expect(harness.loader.loadCouncilConfig().routing.default.prefer).toEqual(['claude', 'gemini']);
+  });
+
+  it('allows a disabled-but-known chairman, returns a non-blocking warning', async () => {
+    harness = makeHarness([
+      baseModel({ name: 'claude' }),
+      baseModel({ name: 'gemini', provider: 'google', enabled: false }),
+    ]);
+    const dto = await getConfig(harness);
+    const res = await harness.app.request('http://x/api/config', {
+      method: 'PUT', headers: WRITE_HEADERS,
+      body: JSON.stringify({ general: { default_chairman: 'gemini' }, version: dto.version }),
+    });
+    expect(res.status).toBe(200);
+    const updated = (await res.json()) as ConfigDTO & { warning?: string };
+    expect(updated.general.default_chairman).toBe('gemini');
+    expect(updated.warning).toMatch(/disabled/);
+  });
+
   it('returns 409 with the current config when the version is stale', async () => {
     harness = makeHarness([baseModel({ name: 'claude' })]);
     const res = await harness.app.request('http://x/api/config', {

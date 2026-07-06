@@ -121,7 +121,12 @@ export function createConfigRoutes(deps: ConfigRouteDeps): Hono {
     const next = assembleConfig({ generalOverride, prefer, chairman, base });
     deps.loader.saveCouncilConfig(next);
     reloadRuntime(deps.runtime, deps.loader, deps.credentialManager);
-    return c.json(buildConfigDTO(deps.loader));
+    // Non-blocking advisory: a disabled chairman is legal (the orchestrator falls
+    // back to the strongest enabled model via selectStrongestModel), so we save
+    // and warn rather than 400 — see validateConfigUpdate for the strict guard.
+    const dto = buildConfigDTO(deps.loader);
+    const warning = chairmanWarning(deps.loader, chairman);
+    return c.json(warning ? { ...dto, warning } : dto);
   });
 
   // PATCH /api/models/:name — flip a model's enabled flag (own optimistic lock).
@@ -222,6 +227,21 @@ export function createConfigRoutes(deps: ConfigRouteDeps): Hono {
         deps.loader.saveModelConfig(n.config);
         added.push(n.config.name);
       }
+    }
+
+    // Keep council.yaml's routing in step with the models we just added: a rescan
+    // that surfaces new models must not leave them out of `prefer` (that's exactly
+    // the "models are there but prefer drifted" bug). Same assembleConfig gate as
+    // every other write, so pre-existing duplicates get cleaned up here too.
+    if (added.length > 0 && deps.loader.readCouncilConfigRaw() !== null) {
+      const base = deps.loader.loadCouncilConfig();
+      const next = assembleConfig({
+        generalOverride: {},
+        prefer: [...base.routing.default.prefer, ...added],
+        chairman: base.general.default_chairman,
+        base,
+      });
+      deps.loader.saveCouncilConfig(next);
     }
 
     // New creds may exist → rebuild the adapter from the fresh credential set.
@@ -326,10 +346,13 @@ function validateConfigUpdate(
 ): string | null {
   const all = loader.loadAllModelConfigs();
   const allNames = new Set(all.map((m) => m.name));
-  const enabledNames = new Set(all.filter((m) => m.enabled).map((m) => m.name));
 
-  if (opts.chairman !== '' && !enabledNames.has(opts.chairman)) {
-    return `chairman "${opts.chairman}" is not an enabled model`;
+  // Existence, not enabled-ness: aligning the write guard with runtime, which
+  // tolerates a disabled/absent chairman by falling back to selectStrongestModel.
+  // A disabled-but-known chairman is surfaced as a non-blocking warning instead
+  // (chairmanWarning), so users can disable a model without a hard 400 here.
+  if (opts.chairman !== '' && !allNames.has(opts.chairman)) {
+    return `chairman "${opts.chairman}" is not a known model`;
   }
   const roleGen = opts.generalOverride.role_generator_model ?? opts.base.general.role_generator_model ?? '';
   if (roleGen !== '' && !allNames.has(roleGen)) {
@@ -342,6 +365,20 @@ function validateConfigUpdate(
   const max = opts.generalOverride.max_agents ?? opts.base.general.max_agents;
   if (max < min) return `max_agents (${max}) must be >= min_agents (${min})`;
   return null;
+}
+
+/**
+ * Advisory (non-blocking) check: a known chairman that is currently disabled is
+ * legal but won't actually chair — the orchestrator falls back to the strongest
+ * enabled model. Returns a warning string, or undefined when nothing to flag.
+ */
+function chairmanWarning(loader: ConfigLoader, chairman: string): string | undefined {
+  if (chairman === '') return undefined;
+  const model = loader.loadAllModelConfigs().find((m) => m.name === chairman);
+  if (model && !model.enabled) {
+    return `chairman "${chairman}" is disabled — the council will fall back to the strongest enabled model at runtime`;
+  }
+  return undefined;
 }
 
 // ---------- helpers ----------
