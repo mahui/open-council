@@ -10,7 +10,7 @@
 | [information-architecture-review.md](./information-architecture-review.md) | 全项目信息架构审阅：模块边界、类型归属、配置/文档/命名/导出面 | 2026-07-05 | 审阅定稿 |
 | [web-gui-design.md](./web-gui-design.md) | 本地 Web GUI（`council serve`）：HTTP/SSE 架构、WebRenderer、线协议、REST 契约、模块分层与工作项拆分 | 2026-07-05 | 设计定稿 |
 | [web-gui-config.md](./web-gui-config.md) | Web GUI 配置能力：可编辑字段面、配置 REST 契约与脱敏 DTO、凭证入线边界裁定、RuntimeConfig 热重载、纯函数下沉、乐观锁 | 2026-07-05 | 设计定稿 |
-| [standard-api-convergence.md](./standard-api-convergence.md) | 收敛到标准 API 双协议（anthropic/openai）：拆除 CLI/OAuth/订阅通道、弃用 pi-ai 换官方 SDK、新 protocol schema、配置迁移、实施波次 | 2026-07-06 | 设计定稿（待实施） |
+| [standard-api-convergence.md](./standard-api-convergence.md) | 收敛到标准 API 双协议（anthropic/openai）：拆除 CLI/OAuth/订阅通道、弃用 pi-ai 换官方 SDK、新 protocol schema、配置迁移、实施波次 | 2026-07-06 | 已实施（eb7b246） |
 
 ## 约定
 

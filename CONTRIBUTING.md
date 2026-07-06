@@ -11,7 +11,7 @@
 ```
 commands/  →  core/  →  (无外部依赖)
     ↓          ↑
-   ui/     providers/  →  外部系统 (subprocess, HTTP API, 文件系统)
+   ui/     providers/  →  外部系统 (官方 SDK HTTP API, 文件系统)
     ↓          ↑
          storage/  →  SQLite, JSON 文件
          config/   →  YAML 文件
@@ -80,11 +80,11 @@ commands/  →  core/  →  (无外部依赖)
 
 | 类别 | 约定 | 示例 |
 |------|------|------|
-| 文件名 | kebab-case | `cli-adapter.ts`, `prompt-builder.ts` |
-| 类名 | PascalCase | `CliAdapter`, `CredentialManager` |
+| 文件名 | kebab-case | `api-adapter.ts`, `prompt-builder.ts` |
+| 类名 | PascalCase | `ApiAdapter`, `CredentialManager` |
 | 接口名 | PascalCase，不加 `I` 前缀 | `InvocationAdapter`（非 `IInvocationAdapter`） |
-| 函数/方法 | camelCase | `calculateConsensus()`, `getValidCredential()` |
-| 常量 | UPPER_SNAKE_CASE | `CREDENTIAL_PATHS`, `TOKEN_ENDPOINTS` |
+| 函数/方法 | camelCase | `calculateConsensus()`, `makeProtocolClient()` |
+| 常量 | UPPER_SNAKE_CASE | `OFFICIAL_BASE_URL`, `LOCAL_HOSTS` |
 | 类型参数 | 单大写字母或描述性名称 | `T`, `TResult` |
 | 私有成员 | 不加下划线前缀，使用 `private` 关键字 | `private cache` |
 | 布尔变量 | is/has/should/can 前缀 | `isExpired`, `hasValidCredential` |
@@ -116,10 +116,10 @@ import { PATHS } from '../config/paths.js';
 | 规则 ID | 规则 | 检查方式 |
 |---------|------|---------|
 | SEC-01 | SQLite 查询 100% 使用 prepared statement。禁止字符串拼接或模板字符串构造 SQL | `@reviewer` 审查 |
-| SEC-02 | 凭证字段（access_token, refresh_token, api_key）禁止出现在日志中。pino 配置必须 redact 这些字段 | 日志审查 |
-| SEC-03 | 所有文件写入（session JSON、checkpoint、凭证）必须设置 `mode: 0o600` | grep `writeFileSync` 检查 |
+| SEC-02 | API key（`api_key_env` 的值、key 文件内容）禁止出现在日志 / DTO / YAML 中。日志配置必须 redact 这些字段 | 日志审查 |
+| SEC-03 | 所有文件写入（session JSON、checkpoint、key 文件）必须设置 `mode: 0o600` | grep `writeFileSync` 检查 |
 | SEC-04 | 用户输入拼接文件路径时必须校验：禁止 `..`、绝对路径注入。使用 `path.resolve()` 后验证仍在预期目录内 | `@reviewer` 审查 |
-| SEC-05 | `input_mode: arg` 模式调用时，日志输出一次性安全提醒 | 代码审查 |
+| SEC-05 | 无 subprocess 调用点（标准 API 收敛后 CLI 适配器已移除）。若未来重新引入 subprocess，prompt 禁止经命令行参数传入 | `@reviewer` 审查 |
 | SEC-06 | 环境变量中的 API Key 优先级高于文件凭证。通过 `api_key_env` 配置，不硬编码变量名 | 配置校验 |
 | SEC-07 | `--no-store` 模式下，Session 数据不写入任何本地文件（JSON、SQLite、checkpoint） | 集成测试覆盖 |
 
@@ -151,7 +151,7 @@ import { PATHS } from '../config/paths.js';
 
 ```
 src/core/orchestrator.ts      →  test/core/orchestrator.test.ts
-src/providers/cli-adapter.ts  →  test/providers/cli-adapter.test.ts
+src/providers/api-adapter.ts  →  test/providers/api-adapter.sdk.test.ts
 src/storage/database.ts       →  test/storage/database.test.ts
 ```
 

@@ -7,9 +7,9 @@ $ council "Redis vs Memcached，电商场景日均 5000 万 PV 该怎么选？"
 
 [auto] → debate  理由: 检测到架构决策关键词 | 预估: ~120s, 3 Agent
 [1/4] Broadcasting to 3 agents...
-  ✓ claude-opus   (analyst)    12.3s [API]
-  ✓ openai-o4mini (engineer)    9.1s [API]
-  ✓ gemini-pro    (innovator)   8.7s [API]
+  ✓ claude-opus   (analyst)    12.3s
+  ✓ openai-o4mini (engineer)    9.1s
+  ✓ deepseek-chat (innovator)   8.7s
 [2/4] Peer review...
   ✓ All reviews completed (22.4s)
 [3/4] Calculating consensus...
@@ -45,10 +45,10 @@ $ council "Redis vs Memcached，电商场景日均 5000 万 PV 该怎么选？"
 
 ## 核心特性
 
-- **零额外成本**: 复用已有订阅额度（Claude Max、OpenAI Pro、Google AI），不需要单独的 API Key
-- **双模调用**: CLI 模式（subprocess 调用已安装工具）+ API 模式（直接读取本地 OAuth 凭证调用 SDK）
-- **本地凭证自动发现**: 自动检测 `~/.codex/auth.json`、`~/.gemini/oauth_creds.json` 等已有凭证，零额外登录
-- **纯本地**: 所有数据存储在 `~/.council/`，不上传任何外部服务
+- **标准 API 双协议**: 只走标准 API —— anthropic（`@anthropic-ai/sdk`）和 openai（`openai` SDK）两种协议，官方端点开箱即用
+- **任意兼容端点**: 通过 `base_url` 接入任意 anthropic / openai 兼容端点（DeepSeek、Moonshot、Ollama、vLLM、LM Studio 等），无需改代码
+- **简单凭证**: API key 来自环境变量或 `0o600` key 文件，无 OAuth 登录 / Token 刷新 / keychain 读取
+- **纯本地**: 所有数据存储在 `~/.council/`，不上传任何外部服务；配合本地兼容端点可完全离线
 - **管道友好**: `council "question" | jq .synthesis` — stdout 只输出结果，进度信息走 stderr
 
 ## 安装
@@ -60,7 +60,7 @@ npm install -g open-council
 前提条件：
 - Node.js ≥ 20
 - pnpm（开发时需要）
-- 至少安装并登录一个 AI CLI 工具（claude-code、codex-cli、gemini-cli），或拥有对应的 API Key
+- 至少一个可用的 API key（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`），或一个兼容端点（如本地 Ollama 免鉴权）
 
 ## 从源码构建与运行
 
@@ -104,34 +104,31 @@ pnpm lint
 
 ### 环境变量
 
-运行前需设置至少一个 API Key：
+运行前设置至少一个官方 API key（向导会自动探测）：
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."    # Anthropic Claude
-export OPENAI_API_KEY="sk-..."           # OpenAI GPT
-export GEMINI_API_KEY="AI..."            # Google Gemini
+export ANTHROPIC_API_KEY="sk-ant-..."    # anthropic 协议官方端点
+export OPENAI_API_KEY="sk-..."           # openai 协议官方端点
 ```
 
-也可通过本地凭证文件自动发现（无需手动设置）：
-- `~/.codex/auth.json` — OpenAI Codex CLI 凭证
-- `~/.gemini/oauth_creds.json` — Google Gemini OAuth 凭证
+兼容端点的 key 由模型配置里的 `api_key_env` 指定（如 `DEEPSEEK_API_KEY`），或写入 `0o600` key 文件由 `api_key_path` 引用。首次运行向导也可直接录入。
 
-### 自定义 OpenAI 兼容端点
+### 自定义兼容端点
 
-除内置 Provider 外，可通过 `api_base_url` 接入任意 OpenAI Completions 协议兼容服务（ollama、vLLM、LM Studio、OneAPI、LiteLLM 网关、Azure OpenAI 代理等），无需在 pi-ai 中预注册。
+可通过 `base_url` 接入任意 anthropic / openai 兼容服务（DeepSeek、Moonshot、ollama、vLLM、LM Studio、OneAPI、自建网关等），无需改代码。
 
 首次运行向导的 Step 6（可选）会引导添加。也可手动写入 `~/.council/config/models/custom-ollama.yaml`：
 
 ```yaml
-name: custom:ollama:llama3.2
-invocation: api
-provider: custom:ollama          # 命名约定：custom:<a-z0-9-+>
+name: Ollama Llama 3.2
+protocol: openai                 # 选哪个 SDK：anthropic | openai
 model: llama3.2
-api_base_url: http://localhost:11434/v1
+base_url: http://localhost:11434/v1
+provider: custom:ollama          # 展示 / 熔断键标签
 # 本地 host (localhost/127.0.0.1/[::1]/0.0.0.0) 允许无鉴权调用
 # 远程服务请二选一：
 #   api_key_env: MY_GATEWAY_KEY
-#   api_credential_path: ~/.council/credentials/custom-ollama.key   # mode 0o600
+#   api_key_path: ~/.council/credentials/custom-ollama.key   # mode 0o600
 streaming: true
 capabilities: [general, code]
 priority: 50
@@ -146,12 +143,12 @@ dist/
 └── *.js.map        # Source map
 ```
 
-构建使用 [tsup](https://tsup.egoist.dev/)（基于 esbuild），编译为 ESM 格式，Provider SDK 和原生模块作为 external 依赖。
+构建使用 [tsup](https://tsup.egoist.dev/)（基于 esbuild），编译为 ESM 格式，官方 SDK 和原生模块作为 external 依赖。
 
 ## 快速开始
 
 ```bash
-# 首次运行自动进入配置向导（扫描本地工具和凭证，约 2 分钟）
+# 首次运行自动进入配置向导（探测 API key，约 2 分钟）
 council "你的问题"
 
 # 指定辩论模式
@@ -204,11 +201,11 @@ council serve --no-open
 1. **发起辩论** — 填写问题、选择模式 / 参与模型 / Chairman → 提交
 2. **实时观看** — 多专家流式发言 → 互评 → 共识 → Chairman 综合，逐阶段实时呈现
 3. **历史回看** — 浏览过往辩论的只读详情（与 CLI 共享同一份持久化数据）
-4. **设置页** — 在浏览器里调整常用配置：默认模式 / 主席 / agent 数 / 语言 / prefer 顺序、启停模型、重新扫描凭证、接入自定义 OpenAI 兼容端点，改动即时对下一场辩论生效
+4. **设置页** — 在浏览器里调整常用配置：默认模式 / 主席 / agent 数 / 语言 / prefer 顺序、启停模型、重新探测 API key、接入自定义兼容端点，改动即时对下一场辩论生效
 
 <!-- 截图占位：council serve 主界面 / 实时观看视图 -->
 
-> **说明**：Web 界面仅绑定本地环回地址、无鉴权，是面向单机单用户的本地工具。设置页覆盖日常配置调整与轻量接入；OAuth 登录、设备码等冷启动全量引导仍走命令行 `council setup`。凭证只进不出——提交的 API key 立即写入 `0o600` 文件，任何响应体绝不回显 key/token。
+> **说明**：Web 界面仅绑定本地环回地址、无鉴权，是面向单机单用户的本地工具。设置页覆盖日常配置调整与轻量接入；冷启动全量引导仍走命令行 `council setup`。凭证只进不出——提交的 API key 立即写入 `0o600` 文件，任何响应体绝不回显 key/token。
 
 ## 模型管理
 
@@ -219,13 +216,13 @@ council models
 # 添加新模型（引导式）
 council models add
 
-# 快捷添加
-council models add --quick codex --model o3
+# 快捷添加（从官方 /models 列表选择）
+council models add --quick openai --model o3
 
-# 健康检查
+# 校验凭证（本地）
 council models check
 
-# 重新扫描本地工具
+# 重新探测 API key（env + key 文件）
 council models scan
 ```
 
@@ -266,29 +263,30 @@ council setup
 ~/.council/config/roles/*.yaml          # 角色 prompt 模板
 ```
 
-模型配置示例（API 模式，复用 Codex CLI 凭证）：
+模型配置示例（openai 协议官方端点）：
 
 ```yaml
 name: OpenAI o4-mini
-invocation: api
-provider: openai
+protocol: openai
 model: o4-mini
-api_credential_path: ~/.codex/auth.json
+api_key_env: OPENAI_API_KEY
 capabilities: [code, debug, refactor, general]
 priority: 50
 max_concurrent: 3
 ```
 
+> 从旧版本升级：首次加载会自动迁移旧配置（`schema_version` 1→2）。可转换的模型自动转为 `protocol` 形态；依赖 OAuth/订阅或 CLI 的模型会被禁用并标注原因，可用 `council models` 查看，补齐 API key 后重新启用。
+
 ## 技术栈
 
-TypeScript · Node.js ≥ 20 · better-sqlite3 · @mariozechner/pi-ai · commander · ink · zod
+TypeScript · Node.js ≥ 20 · better-sqlite3 · @anthropic-ai/sdk · openai · commander · ink · zod
 
 ## 项目文档
 
 | 文档 | 说明 |
 |------|------|
-| [PRD](docs/PRD.md) | 产品需求文档 v7.1 |
-| [TDD](docs/TDD.md) | 技术设计文档 v2.2 |
+| [PRD](docs/PRD.md) | 产品需求文档 v8.0 |
+| [TDD](docs/TDD.md) | 技术设计文档 v3.0 |
 | [CONTRIBUTING](CONTRIBUTING.md) | 开发规范（架构约束、编码规范、安全、测试、Git） |
 
 ## 开发路线图

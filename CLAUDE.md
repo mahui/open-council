@@ -5,8 +5,8 @@
 **以下文档是开发时的强制约束，所有代码变更必须符合这些文档的要求：**
 
 1. **`CONTRIBUTING.md`** — 开发规范。所有规则以 ID 编号（ARCH-01、SEC-03 等），**规则已内嵌到各 agent 定义中，无需每次任务重复阅读**。
-2. **`docs/PRD.md`** (v7.2) — 产品需求文档。功能设计的权威来源。
-3. **`docs/TDD.md`** (v2.3) — 技术设计文档。架构、接口、数据结构的权威来源。
+2. **`docs/PRD.md`** (v8.0) — 产品需求文档。功能设计的权威来源。
+3. **`docs/TDD.md`** (v3.0) — 技术设计文档。架构、接口、数据结构的权威来源。
 
 **文档查阅策略**：agent 的关键设计约束和规则已内嵌在各自的 `.claude/agents/*.md` 定义中。开发时**不需要全量阅读 PRD/TDD**，仅在对具体细节有疑问时用 Grep 定向搜索对应章节。
 
@@ -188,8 +188,8 @@
 Open Council 是一个基于 TypeScript/Node.js 的多 Agent 辩论编排系统，支持 CLI 和 API 双模调用。
 
 - **开发规范**: `CONTRIBUTING.md` (强制)
-- **PRD**: `docs/PRD.md` (v7.2)
-- **技术设计**: `docs/TDD.md` (v2.3)
+- **PRD**: `docs/PRD.md` (v8.0)
+- **技术设计**: `docs/TDD.md` (v3.0)
 - **角色模板**: `defaults/roles/*.yaml`
 - **基准测试集**: `defaults/benchmark.yaml`
 
@@ -199,7 +199,7 @@ Open Council 是一个基于 TypeScript/Node.js 的多 Agent 辩论编排系统�
 - pnpm 包管理
 - commander (CLI) + @inquirer/prompts (交互)
 - better-sqlite3 (持久化, 同步 API, WAL 模式)
-- @mariozechner/pi-ai (统一 LLM 接口，内置 20+ Provider 适配 + OAuth 鉴权)
+- @anthropic-ai/sdk + openai (两官方 SDK，标准 API 双协议；凭证为 env / 0o600 key 文件)
 - ink (TUI, Phase 5)
 - zod (Schema 校验)
 - vitest (测试)
@@ -210,7 +210,7 @@ Open Council 是一个基于 TypeScript/Node.js 的多 Agent 辩论编排系统�
 ```
 src/
 ├── core/        纯逻辑层，禁止 I/O 依赖 [ARCH-01, ARCH-02]
-├── providers/   外部交互层（subprocess, HTTP API, 凭证）
+├── providers/   标准 API 调用层（api-adapter + protocol/ 双 SDK 客户端 + 凭证/发现）
 ├── commands/    CLI 薄层，≤150 行/文件 [ARCH-03]
 ├── storage/     SQLite + JSON 持久化
 ├── config/      YAML 加载 + zod 校验
@@ -237,11 +237,11 @@ test/            测试（对应 src/ 结构）
 
 已落地的核心能力：
 1. 端到端 council 辩论：多模型并行回答 → 多轮辩论（路由/广播/评审回灌/共识判停）→ Chairman 综合 → 输出
-2. API 模式 + CLI 模式双通道调用（含凭证发现、Token 刷新、健康检查/熔断）
-3. 配置系统（YAML + zod 校验）、SQLite/JSON 持久化、Checkpoint 中断恢复
+2. 标准 API 双协议调用（anthropic + openai 官方 SDK，`base_url` 覆盖兼容端点；凭证为 env / 0o600 key 文件、本地健康判断/熔断）
+3. 配置系统（YAML + zod 校验，schema_version 1→2 非破坏式迁移）、SQLite/JSON 持久化、Checkpoint 中断恢复
 4. TUI 仪表盘（ink）、Setup Wizard、benchmark 消融实验框架
 5. 本地 Web GUI（`council serve`，hono + SSE + 零构建前端）：浏览器发起 + 实时观看 + 历史只读
 
-当前工作重心：结构/质量收敛（依赖图修正、测试镜像补齐、文档信息架构治理），不新增 Phase 级功能。
+当前工作重心：标准 API 收敛后的结构/质量收敛（弃用 pi-ai、测试镜像补齐、文档信息架构治理），不新增 Phase 级功能。
 
 > Phase 纪律仍然有效（见 CONTRIBUTING.md §1.3）：功能已进入 Phase 5，勿因此回退早期阶段的约束判断。

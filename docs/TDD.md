@@ -1,13 +1,13 @@
 # Open Council — 技术设计文档 (TDD)
 
-**Technical Design Document v2.3**
+**Technical Design Document v3.0**
 
 | 项目 | 内容 |
 |------|------|
 | 文档状态 | Draft |
-| 版本 | 2.3 |
-| 日期 | 2026-07-05 |
-| 对应 PRD | docs/PRD.md v7.2 |
+| 版本 | 3.0 |
+| 日期 | 2026-07-06 |
+| 对应 PRD | docs/PRD.md v8.0 |
 | 主语言 | TypeScript (Node.js ≥ 20) |
 | 包管理 | pnpm |
 | 分发方式 | npm 全局包 (`npm install -g open-council`) |
@@ -16,6 +16,7 @@
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| 3.0 | 2026-07-06 | **标准 API 收敛**：移除 `@mariozechner/pi-ai`，改用官方 `@anthropic-ai/sdk` + `openai`；删除 CLI/Auto 适配器、OAuth 凭证发现、provider 家族映射；新增 `providers/protocol/`（ProtocolClient 双 SDK）与 `config/migrate.ts`；ModelConfig 升 v2（`protocol` 取代 `invocation`+`provider`）。设计依据：`design-notes/standard-api-convergence.md` |
 | 2.3 | 2026-07-05 | §8.4 增设置面五条 REST 路由（`config-routes.ts`）与 `RuntimeConfig` 热换快照；`ConfigLoader` 增 `loadAllModelConfigs`，纯函数下沉至 `config/assemble-council.ts` + `providers/model-assembly.ts`。详见设计笔记 `docs/design-notes/web-gui-config.md` |
 | 2.2 | 2026-07-05 | 新增 `src/server/` 层与 `web/` 零构建前端（`council serve` 本地 Web GUI，见 §8.4）；新增依赖 `hono` + `@hono/node-server`；`WebRenderer` 为 `Renderer` 第三实现。详见设计笔记 `docs/design-notes/web-gui-design.md` |
 | 2.1 | 2026-07-04 | 依设计笔记 consensus-review-dataflow 同步实现：`ConsensusResult` 增 `agreement_score`（判停用）；`calculateConsensus` filter 纳入 partial；`kendallsW` 均值秩填补 + N=2 回退；`InvocationResult` 增 `truncated`；补 `role_generator_model` 配置项与 `InvocationTimeoutError` 错误类型 |
@@ -29,18 +30,19 @@
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
-| 语言 | **TypeScript 5.x** | pi-ai 和主流 Provider SDK 均以 TS 为一等公民；类型安全减少运行时错误 |
-| 运行时 | **Node.js ≥ 20** | 原生 `fetch`、`crypto.subtle`（PKCE）、`node:test`；LTS 稳定 |
+| 语言 | **TypeScript 5.x** | 官方 `@anthropic-ai/sdk` / `openai` 均以 TS 为一等公民；类型安全减少运行时错误 |
+| 运行时 | **Node.js ≥ 20** | 原生 `fetch`、`AbortController`、`node:test`；LTS 稳定 |
 | 包管理 | **pnpm** | workspace 支持好、磁盘占用小、lockfile 确定性强 |
 | 编译 | **tsup** (esbuild) | 编译为单个 CJS bundle，启动速度比 tsc 快 10x+ |
 
 ### 1.2 核心依赖
 
-> 与 `package.json` 保持一致（以 `package.json` / 附录 A 为准）。凭证管理、Provider SDK、JWT 解码等已统一委托 `@mariozechner/pi-ai`，故不再单列 `jose` 等依赖（见 §1.3）。
+> 与 `package.json` 保持一致（以 `package.json` / 附录 A 为准）。凭证降级为 API key（env / 0o600 文件），无 OAuth / JWT 解码需求，故不引入 `jose` 等依赖（见 §1.3）。
 
 | 模块 | 库 | 版本策略 | 选型理由 |
 |------|-----|---------|---------|
-| **统一 LLM 库** | `@mariozechner/pi-ai` | ^0.62 | 统一 LLM 接口，内置 20+ Provider 适配（Anthropic/OpenAI/Google/Mistral/Bedrock 等）、OAuth 凭证管理、模型自动发现、流式输出；替代原来分散的 3 个 Provider SDK |
+| **Anthropic SDK** | `@anthropic-ai/sdk` | ^0.110 | 官方 Anthropic API 客户端（`messages.create`）；覆盖官方及 anthropic 兼容端点（`baseURL`）；结构化 `APIError`、原生 `AbortSignal` |
+| **OpenAI SDK** | `openai` | ^6.45 | 官方 OpenAI API 客户端（`chat.completions.create`）；`baseURL` 覆盖一切 OpenAI 兼容端点（DeepSeek / Ollama / vLLM 等） |
 | **CLI 框架** | `commander` | ^12 | 命令解析、子命令、选项管理；最成熟的 Node CLI 框架 |
 | **交互式 Prompt** | `@inquirer/prompts` | ^7 | Setup Wizard 的多选、确认、列表选择；模块化按需导入 |
 | **TUI 仪表盘** | `ink` (+ `react`) | ^7 | React 范式渲染终端 UI；组件化、声明式更新、天然支持实时刷新 |
@@ -54,8 +56,10 @@
 
 | 库 | 不选理由 |
 |----|---------|
-| `@anthropic-ai/sdk` / `openai` / `@google/genai` | 已被 `@mariozechner/pi-ai` 统一替代；pi-ai 内部封装了这些 SDK，无需直接依赖 |
-| `axios` | Node 20 原生 `fetch` 已足够；pi-ai 内部已封装 HTTP |
+| `@mariozechner/pi-ai` | 标准 API 收敛后只剩 anthropic/openai 两协议，pi-ai 的 20+ Provider 适配与 OAuth 价值不再；直接用官方 SDK 更直白、错误结构化、类型一等公民（见 `design-notes/standard-api-convergence.md`） |
+| `@google/genai` | Gemini 走其 OpenAI 兼容端点（`openai` SDK + `base_url`），无需专用 SDK |
+| `jose` | 无 OAuth / JWT 场景（凭证降为 API key），无需 JWT 解码 |
+| `axios` | Node 20 原生 `fetch` 已足够；两 SDK 内部已封装 HTTP |
 | `knex` / `drizzle` | SQLite 查询简单（< 10 种 query），直接用 `better-sqlite3` 的 prepared statement，无需 ORM 抽象 |
 | `blessed` / `neo-blessed` | 过时，API 复杂；`ink` 的 React 范式更易维护 |
 | `chalk` | `ink` 内置颜色支持；CLI 输出少量颜色用 ANSI 常量即可 |
@@ -115,12 +119,19 @@ council/
 │   │   ├── prompt-builder.ts         # 各阶段 prompt 模板构建
 │   │   └── score-parser.ts           # Review JSON 评分解析 + fallback
 │   │
-│   ├── providers/                  # 双模调用适配层
-│   │   ├── adapter.ts                # 统一接口 invoke(config, prompt) → InvocationResult
-│   │   ├── cli-adapter.ts            # CLI 模式：child_process.spawn + stdin/stdout pipe
-│   │   ├── api-adapter.ts            # API 模式：通过 pi-ai 统一接口调用
-│   │   ├── pi-ai-bridge.ts           # pi-ai 集成层：模型发现、凭证委托、Context 桥接
-│   │   └── health.ts                 # 健康检查 (CLI L1-L3 + API L1-L3) + 熔断器
+│   ├── providers/                  # 标准 API 调用适配层
+│   │   ├── api-adapter.ts            # ApiAdapter implements InvocationAdapter：可靠性骨架（超时/重试/熔断/截断）
+│   │   ├── protocol/                 # SDK 差异下沉：ProtocolClient 双薄客户端
+│   │   │   ├── types.ts                # ProtocolClient / GenRequest / NormalizedResult 契约
+│   │   │   ├── anthropic-client.ts     # @anthropic-ai/sdk 客户端（messages.create）
+│   │   │   ├── openai-client.ts        # openai SDK 客户端（chat.completions.create）
+│   │   │   └── index.ts                # makeProtocolClient 工厂（按 protocol/baseURL/key）
+│   │   ├── error-classifier.ts       # SDK APIError.status → InvocationError 分类
+│   │   ├── model-discovery.ts        # 官方 /models 端点发现（无 key 回退硬编码目录）
+│   │   ├── model-assembly.ts         # 发现结果 → ModelConfig 装配 + 命名去重
+│   │   ├── credentials/
+│   │   │   └── discovery.ts            # CredentialManager 薄壳：env key 探测 + key 文件存在性
+│   │   └── health.ts                 # 本地可用性判断 + 熔断器 + 自适应节流
 │   │
 │   ├── storage/                    # 持久化层
 │   │   ├── database.ts               # SQLite 初始化、迁移、表定义
@@ -130,10 +141,12 @@ council/
 │   │   └── migration.ts              # schema_version 迁移逻辑
 │   │
 │   ├── config/                     # 配置管理
-│   │   ├── loader.ts                 # YAML 加载 + 合并 + 校验
-│   │   ├── schema.ts                 # zod schema（council.yaml + model YAML）
-│   │   ├── presets.ts                # 内置预设库（CLI + API 双模）
-│   │   └── paths.ts                  # 路径常量（~/.council/config、~/.codex/auth.json 等）
+│   │   ├── loader.ts                 # YAML 加载 + 合并 + 校验（挂载 schema_version<2 迁移）
+│   │   ├── schema.ts                 # zod schema（council.yaml + ModelConfig v2 + OFFICIAL_BASE_URL）
+│   │   ├── migrate.ts                # schema_version 1→2 纯函数迁移（可转即转，不可转禁用+标注）
+│   │   ├── assemble-council.ts       # 装配 CouncilConfig（纯函数）
+│   │   ├── presets.ts                # 内置目录预设（官方两协议 + 兼容端点 base_url）
+│   │   └── paths.ts                  # 路径常量（~/.council/config、~/.council/credentials 等）
 │   │
 │   ├── ui/                         # 用户界面层
 │   │   ├── tui/                      # ink 组件（Phase 5 TUI 仪表盘）
@@ -184,9 +197,12 @@ council/
     │   ├── consensus.test.ts
     │   ├── anonymizer.test.ts
     │   └── router.test.ts
-    ├── providers/                   # 适配层测试
-    │   ├── cli-adapter.test.ts
-    │   ├── api-adapter.test.ts
+    ├── providers/                   # 适配层测试（SDK mock）
+    │   ├── api-adapter.sdk.test.ts
+    │   ├── error-classifier.test.ts
+    │   ├── model-discovery.test.ts
+    │   ├── model-assembly.test.ts
+    │   ├── health.test.ts
     │   └── credentials/
     │       └── discovery.test.ts
     ├── storage/                     # 持久化测试
@@ -205,7 +221,7 @@ council/
 **关键设计决策**：
 
 - `core/` 是**纯逻辑层**，不依赖 I/O、CLI、UI。它接收抽象的 `InvocationAdapter` 接口，可独立单元测试。
-- `providers/` 是唯一与外部系统交互的层（subprocess、HTTP API、文件系统凭证读取）。
+- `providers/` 是唯一与外部系统交互的层（官方 SDK 的 HTTP API 调用、文件系统 key 读取）。无 subprocess 调用点。
 - `commands/` 薄层，只负责解析 CLI 参数 → 调用 `core/` → 通过 `ui/` 渲染结果。
 - `ui/` 分为 `tui/`（ink 组件，Phase 5）和 `plain-renderer.ts`（Phase 0-4 的纯文本输出），通过 `process.stdout.isTTY` 自动切换。
 - `server/` 是 `council serve` 的 HTTP 层，位于 core 之外的外层：可依赖 core/storage/config/providers/commands.shared，**core 严格不反向依赖**（ARCH-02）。它经 `Renderer` 接口接入编排（`WebRenderer`），**core 零改动**即可支撑 Web GUI（见 §8.4 与设计笔记 `web-gui-design.md`）。
@@ -216,19 +232,19 @@ council/
 
 ### 3.1 Provider 调用适配层
 
-这是系统的关键抽象——编排层不关心调用是通过 subprocess 还是 HTTP API 完成的。
+这是系统的关键抽象——编排层只依赖 `InvocationAdapter` 接口，唯一实现是 `ApiAdapter`。**接口契约在标准 API 收敛中保持不变**（ARCH-05），换引擎不动 core。
 
 ```typescript
-// src/providers/adapter.ts
+// src/types/provider.ts
 
 export interface InvocationResult {
   response: string;                    // 模型回复的完整文本
   elapsed_ms: number;                  // 调用耗时
-  invocation_mode: 'cli' | 'api';     // 实际使用的调用模式
-  exit_code?: number;                  // CLI 模式：进程退出码
-  http_status?: number;                // API 模式：HTTP 状态码
-  stderr?: string;                     // CLI 模式：标准错误
-  token_usage?: {                      // API 模式：token 用量
+  invocation_mode: 'cli' | 'api';     // 新写恒为 'api'；'cli' 仅为读旧 session 的历史兼容
+  exit_code?: number;                  // 历史遗留（CLI 退出码）；API 调用不写
+  http_status?: number;                // HTTP 状态码
+  stderr?: string;                     // 历史遗留（CLI stderr）；API 调用不写
+  token_usage?: {                      // token 用量（兼容端点缺失时兜底 0）
     input_tokens: number;
     output_tokens: number;
   };
@@ -238,29 +254,18 @@ export interface InvocationResult {
 
 // 截断回答照常参与 review/consensus/synthesis，orchestrator 仅发 onDegradation 提示，不剔除、不重试。
 // 该字段随 Invocation.result 整体落盘到 Session JSON，无需新增 Invocation 顶层字段（见 PRD §3.4.3）。
-// 注：review 的解析结果 ParsedReview（scores/strengths/weaknesses/devil_advocate_notes/reviewed_agent_id）
-// 为运行期从 response_raw 重解析的派生结构，非落库 Invocation 字段。
 
-/** pi-ai 的 ThinkingLevel 类型 */
-export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type OnChunk = (chunk: string) => void;
 
 export interface InvocationAdapter {
   /**
-   * 调用模型，返回完整响应。
-   * 编排层通过此接口与所有模型交互，无需关心 CLI/API 差异。
-   * @param stageEffort 阶段级推理深度覆盖（与模型配置的 reasoning_effort 取较高值）
+   * 调用模型，返回完整响应。传入 onChunk 则走流式（逐 chunk 回调）；不传则非流式。
+   * 编排层通过此接口与所有模型交互，无需关心协议差异。
    */
-  invoke(config: ModelConfig, prompt: string, stageEffort?: ThinkingLevel): Promise<InvocationResult>;
+  invoke(config: ModelConfig, prompt: string, onChunk?: OnChunk): Promise<InvocationResult>;
 
   /**
-   * 流式调用模型，通过 AsyncGenerator 逐 chunk 返回。
-   * 用于 TUI 实时渲染。CLI 模式逐行读取 stdout，API 模式解析 SSE。
-   * @param stageEffort 阶段级推理深度覆盖
-   */
-  stream(config: ModelConfig, prompt: string, stageEffort?: ThinkingLevel): AsyncGenerator<string, InvocationResult>;
-
-  /**
-   * 健康检查。CLI 模式检查 binary 存在 + version；API 模式检查凭证有效性。
+   * 健康检查（纯本地判断，无网络调用）：api_key_env 有值 / api_key_path 文件存在 / localhost 端点允许空 key。
    */
   healthCheck(config: ModelConfig): Promise<HealthStatus>;
 }
@@ -272,411 +277,141 @@ export type HealthStatus = {
 };
 ```
 
-**适配器选择逻辑**（`invocation: auto` 时的分派）：
+> **契约不变，实现层收敛**：`AutoAdapter`（API-first + CLI 回退编排器）与 `CliAdapter`（subprocess）两个实现类**已删除**；`ApiAdapter` 成为唯一实现。原 `new AutoAdapter(new ApiAdapter(cm), new CliAdapter())` 调用点全部改为 `new ApiAdapter(cm)`。**core 层零改动**。
+
+### 3.2 ProtocolClient 抽象（SDK 差异下沉）
+
+api-adapter 不再散落 SDK 细节，而是面向一个协议无关的内部接口编程；两个薄客户端类隔离 `@anthropic-ai/sdk` 与 `openai` 的差异。加第三个协议 = 加一个 ProtocolClient，不动 adapter。
 
 ```typescript
-// src/providers/adapter.ts
+// src/providers/protocol/types.ts
 
-export class AutoAdapter implements InvocationAdapter {
-  constructor(
-    private apiAdapter: ApiAdapter,
-    private cliAdapter: CliAdapter,
-  ) {}
+export interface NormalizedEvent { textDelta: string; }
 
-  async invoke(config: ModelConfig, prompt: string): Promise<InvocationResult> {
-    // 1. 如果有有效 API 凭证，优先 API 模式
-    if (config.invocation === 'api' || config.invocation === 'auto') {
-      const apiHealth = await this.apiAdapter.healthCheck(config);
-      if (apiHealth.level === 'healthy') {
-        return this.apiAdapter.invoke(config, prompt);
-      }
-    }
-
-    // 2. 回退到 CLI 模式
-    if (config.invocation === 'cli' || config.invocation === 'auto') {
-      const cliHealth = await this.cliAdapter.healthCheck(config);
-      if (cliHealth.level !== 'unavailable') {
-        return this.cliAdapter.invoke(config, prompt);
-      }
-    }
-
-    throw new ModelUnavailableError(config.name, 'No available invocation mode');
-  }
+export interface NormalizedResult {
+  text: string;
+  inputTokens: number;
+  outputTokens: number;
+  truncated: boolean;   // anthropic stop_reason==='max_tokens' | openai finish_reason==='length'
 }
+
+export interface GenRequest {
+  model: string;
+  prompt: string;
+  maxTokens: number;
+  temperature?: number;
+  reasoningEffort?: ReasoningEffort;
+  signal: AbortSignal;  // 由 adapter 的空闲超时守卫驱动；两 SDK 原生尊重
+}
+
+export interface ProtocolClient {
+  /** 流式：逐块回调 textDelta，返回最终归一化结果。 */
+  stream(req: GenRequest, onEvent: (e: NormalizedEvent) => void): Promise<NormalizedResult>;
+  /** 非流式：一次性归一化结果。 */
+  complete(req: GenRequest): Promise<NormalizedResult>;
+}
+
+// src/providers/protocol/index.ts
+// 工厂：按 (protocol, baseURL, apiKey) 造/复用 client
+export function makeProtocolClient(config: ModelConfig, apiKey: string): ProtocolClient;
 ```
 
-### 3.2 CLI 适配器实现
+- **AnthropicClient**（`anthropic-client.ts`）：`new Anthropic({ apiKey, baseURL, maxRetries: 0, timeout })`；`messages.create({ model, max_tokens, temperature, messages, stream, thinking? }, { signal })`。`thinking` 由 `reasoningEffort` 映射为 `{ type:'enabled', budget_tokens }`（或省略）。
+- **OpenAIClient**（`openai-client.ts`）：`new OpenAI({ apiKey, baseURL, maxRetries: 0, timeout })`；`chat.completions.create({ model, max_tokens, temperature, messages, stream, stream_options:{include_usage:true}, reasoning_effort? }, { signal })`。兼容端点不支持 `stream_options`/`reasoning_effort`/`max_tokens` 时在此类内温和降级。
 
-```typescript
-// src/providers/cli-adapter.ts
+**流式事件映射（两 SDK → 归一化）：**
 
-import { spawn } from 'node:child_process';
+| 归一化 | anthropic SDK | openai SDK |
+|--------|---------------|------------|
+| textDelta | `content_block_delta` 且 `delta.type==='text_delta'` → `delta.text` | chunk `choices[0].delta.content` |
+| inputTokens | `message_start.message.usage.input_tokens` | 末块 `usage.prompt_tokens`（需 include_usage） |
+| outputTokens | `message_delta.usage.output_tokens`（累计） | 末块 `usage.completion_tokens` |
+| truncated | 终态 `stop_reason==='max_tokens'` | `finish_reason==='length'` |
+| 非流式 text | `message.content` 里 `type==='text'` 拼接 | `choices[0].message.content` |
 
-export class CliAdapter implements InvocationAdapter {
-  async invoke(config: ModelConfig, prompt: string): Promise<InvocationResult> {
-    const args = [...config.args, ...(config.model_args ?? [])];
-    const start = Date.now();
+### 3.3 ApiAdapter 实现（可靠性骨架 + 双 SDK）
 
-    return new Promise((resolve, reject) => {
-      const child = spawn(config.binary!, args, {
-        env: { ...process.env, ...config.env },
-        timeout: config.timeout_seconds * 1000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      let stdout = '';
-      let stderr = '';
-
-      child.stdout.on('data', (chunk) => { stdout += chunk; });
-      child.stderr.on('data', (chunk) => { stderr += chunk; });
-
-      // input_mode 处理
-      if (config.input_mode === 'stdin') {
-        child.stdin.write(prompt);
-        child.stdin.end();
-      }
-      // arg 模式: prompt 已在 args 中作为最后一个参数
-
-      child.on('close', (code) => {
-        const elapsed = Date.now() - start;
-        resolve({
-          response: this.cleanOutput(stdout),
-          elapsed_ms: elapsed,
-          invocation_mode: 'cli',
-          exit_code: code ?? 1,
-          stderr: stderr || undefined,
-          timed_out: false,
-        });
-      });
-
-      child.on('error', (err) => {
-        reject(new InvocationError(config.name, 'cli', err.message));
-      });
-    });
-  }
-
-  /** 去除 ANSI 色彩码、进度条等非内容输出 */
-  private cleanOutput(raw: string): string {
-    return raw
-      .replace(/\x1b\[[0-9;]*m/g, '')  // ANSI escape codes
-      .replace(/\r/g, '')               // carriage returns
-      .trim();
-  }
-}
-```
-
-### 3.3 API 适配器实现（基于 pi-ai）
-
-Council 的 API 模式通过 `@mariozechner/pi-ai` 统一接口调用所有 Provider，不再分别引入各 Provider SDK。
+`ApiAdapter` 保留全部可靠性能力（**空闲**超时守卫、指数退避重试 + jitter、熔断记账、截断标记、usage 兜底、AbortError→timeout 重分类），只把最内两个调用点从 pi-ai 换成 `ProtocolClient.stream/complete`。
 
 ```typescript
 // src/providers/api-adapter.ts
 
-import {
-  getModel, getModels, getProviders,
-  streamSimple, completeSimple,
-  supportsXhigh,
-  type Context, type SimpleStreamOptions, type ThinkingLevel,
-} from '@mariozechner/pi-ai';
-import { getEnvApiKey } from '@mariozechner/pi-ai/env-api-keys';
-import { getOAuthApiKey } from '@mariozechner/pi-ai/oauth';
+import { makeProtocolClient } from './protocol/index.js';
 
 export class ApiAdapter implements InvocationAdapter {
-  /**
-   * 通过 pi-ai 调用模型。pi-ai 自动处理：
-   * - Provider SDK 选择（Anthropic/OpenAI/Google/Mistral/Bedrock...）
-   * - 凭证获取（环境变量 > OAuth token > ADC）
-   * - Token 过期自动刷新
-   * - 推理深度（reasoning effort）跨 Provider 统一抽象
-   * - 流式/非流式输出
-   */
-  async invoke(
-    config: ModelConfig, prompt: string, stageEffort?: ThinkingLevel,
-  ): Promise<InvocationResult> {
-    const model = getModel(config.provider!, config.model!);
-    const apiKey = await this.resolveApiKey(config.provider!);
-    const start = Date.now();
+  constructor(private cm: CredentialManager) {}
 
-    const context: Context = {
-      systemPrompt: config.system_prompt,
-      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
-    };
+  async invoke(config: ModelConfig, prompt: string, onChunk?: OnChunk): Promise<InvocationResult> {
+    const provider = config.provider ?? deriveProviderLabel(config);   // 熔断键
+    return this.executeWithHealth(provider, config, prompt, onChunk);
+  }
 
-    // 解析 reasoning effort：stage_effort 与 model config 取较高值
-    const reasoning = this.resolveEffort(config.reasoning_effort, stageEffort, model);
+  // executeWithHealth: 自适应节流 → resolveApiKey → makeProtocolClient → withRetry(invoke) → 熔断记账
+  // withRetry: 流式已 emit chunk 则不再重试（避免重复吐字）；重试仅针对 retryable 分类
+  // invokeStreaming: guard.reset() per event → onChunk(e.textDelta) → 归一化结果
+  // invokeComplete:  client.complete() → 归一化结果
 
-    const options: SimpleStreamOptions = {
-      apiKey,
-      reasoning,
-      temperature: config.temperature,
-      maxTokens: config.max_tokens,
-    };
-
-    try {
-      const result = await completeSimple(model, context, [], options);
-
-      return {
-        response: result.content
-          .filter((b) => b.type === 'text')
-          .map((b) => b.text)
-          .join(''),
-        elapsed_ms: Date.now() - start,
-        invocation_mode: 'api',
-        http_status: 200,
-        token_usage: result.usage ? {
-          input_tokens: result.usage.inputTokens,
-          output_tokens: result.usage.outputTokens,
-        } : undefined,
-        timed_out: false,
-      };
-    } catch (err) {
-      throw new InvocationError(config.name, 'api',
-        err instanceof Error ? err.message : String(err));
+  /** 凭证解析：env → key 文件 → 空串（仅 localhost 允许）。无 OAuth / token 刷新。 */
+  private resolveApiKey(config: ModelConfig): string {
+    if (config.api_key_env) {
+      const v = process.env[config.api_key_env];
+      if (v) return v;
     }
-  }
-
-  /**
-   * 流式调用，通过 pi-ai 的 streamSimple() 返回事件流。
-   * 自动应用 reasoning effort 配置。
-   */
-  async *stream(
-    config: ModelConfig, prompt: string, stageEffort?: ThinkingLevel,
-  ): AsyncGenerator<string, InvocationResult> {
-    const model = getModel(config.provider!, config.model!);
-    const apiKey = await this.resolveApiKey(config.provider!);
-    const start = Date.now();
-
-    const context: Context = {
-      systemPrompt: config.system_prompt,
-      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
-    };
-
-    const reasoning = this.resolveEffort(config.reasoning_effort, stageEffort, model);
-
-    const eventStream = streamSimple(model, context, [], {
-      apiKey,
-      reasoning,
-      temperature: config.temperature,
-      maxTokens: config.max_tokens,
-    });
-    let fullText = '';
-    let usage: { inputTokens: number; outputTokens: number } | undefined;
-
-    for await (const event of eventStream) {
-      if (event.type === 'text') {
-        fullText += event.text;
-        yield event.text;
-      }
-      if (event.type === 'complete') {
-        usage = event.usage;
-      }
+    if (config.api_key_path) {
+      return readFileSync(expandHome(config.api_key_path), 'utf8').trim();
     }
-
-    return {
-      response: fullText,
-      elapsed_ms: Date.now() - start,
-      invocation_mode: 'api',
-      http_status: 200,
-      token_usage: usage ? {
-        input_tokens: usage.inputTokens,
-        output_tokens: usage.outputTokens,
-      } : undefined,
-      timed_out: false,
-    };
+    if (isLocalHost(config.base_url)) return '';   // localhost 无鉴权
+    throw new CredentialNotFoundError(config.name);
   }
 
-  /**
-   * 解析最终使用的 reasoning effort。
-   * 取 modelEffort 和 stageEffort 中较高的那个。
-   * xhigh 不支持时自动降级为 high。
-   */
-  private resolveEffort(
-    modelEffort?: string,
-    stageEffort?: ThinkingLevel,
-    model?: any,
-  ): ThinkingLevel | undefined {
-    const levels: ThinkingLevel[] = ['minimal', 'low', 'medium', 'high', 'xhigh'];
-    const modelIdx = modelEffort ? levels.indexOf(modelEffort as ThinkingLevel) : -1;
-    const stageIdx = stageEffort ? levels.indexOf(stageEffort) : -1;
-    const maxIdx = Math.max(modelIdx, stageIdx);
-    if (maxIdx < 0) return undefined;
-
-    let resolved = levels[maxIdx];
-    // xhigh 不支持时降级为 high
-    if (resolved === 'xhigh' && model && !supportsXhigh(model)) {
-      resolved = 'high';
-    }
-    return resolved;
-  }
-
-  /**
-   * 凭证解析优先级：环境变量 > OAuth token。
-   * 全部委托给 pi-ai，Council 不自行管理凭证。
-   */
-  private async resolveApiKey(provider: string): Promise<string> {
-    // 1. 环境变量（pi-ai 自动检测对应的 env var）
-    const envKey = getEnvApiKey(provider);
-    if (envKey) return envKey;
-
-    // 2. OAuth token（pi-ai 自动刷新过期 token）
-    const oauthKey = await getOAuthApiKey(provider);
-    if (oauthKey) return oauthKey;
-
-    throw new CredentialNotFoundError(provider);
-  }
-
-  /**
-   * 自定义 OpenAI 兼容端点分支（config.api_base_url 存在时进入）。
-   * 完全绕过 pi-ai 的模型注册表，直接构造一个 Model<'openai-completions'> 字面量：
-   * - 不继承任何注册模型的成本/上下文窗口假设
-   * - `compat` 字段留空，由 pi-ai 根据 baseUrl 自动判断协议变体
-   * - 用户可指向 ollama / vLLM / LM Studio / OneAPI / Azure OpenAI 等任意服务，无需 Council/pi-ai 维护注册表
-   *
-   * 凭证解析（resolveApiKey）三级优先级（与已注册 Provider 共用）：
-   *   ① config.api_key_env 指定的环境变量（不存在 → InvocationError）
-   *   ② config.api_credential_path 指向的密钥文件（整个文件 trim 后作为 key）
-   *   ③ CredentialManager.getApiKey(provider) 回退（失败时返回空串）
-   * 空 key 仅在 baseUrl 指向本地 host 时被允许（适配 ollama 默认无鉴权部署）。
-   *
-   * Provider 命名约定：`custom:<name>`，<name> 满足 [a-z0-9-]+。该字符串同时作为
-   * circuit-breaker 的 key — 同一自定义 provider 的多个模型共享熔断状态。
-   */
-  private buildCustomModel(config: ModelConfig): Model<'openai-completions'> { /* ... */ }
-
+  /** 纯本地判断，无网络调用。 */
   async healthCheck(config: ModelConfig): Promise<HealthStatus> {
-    // 自定义端点分支：纯本地检查，不查 pi-ai registry。
-    // - api_key_env 设置：检查环境变量是否存在且非空
-    // - api_credential_path 设置：检查文件是否存在
-    // - 都未设置：仅当 baseUrl 在 LOCAL_HOSTS 集合内时判定为 healthy
-    //   LOCAL_HOSTS = { 'localhost', '127.0.0.1', '[::1]', '0.0.0.0' }
-    if (config.api_base_url) { /* see source for branch logic */ }
-
-    try {
-      const apiKey = await this.resolveApiKey(config.provider!);
-      return {
-        level: apiKey ? 'healthy' : 'unavailable',
-        message: apiKey ? 'API credentials available' : 'No credentials',
-        checked_at: new Date().toISOString(),
-      };
-    } catch {
-      return {
-        level: 'unavailable',
-        message: 'No credentials found',
-        checked_at: new Date().toISOString(),
-      };
-    }
+    const ok = (config.api_key_env && process.env[config.api_key_env])
+      || (config.api_key_path && existsSync(expandHome(config.api_key_path)))
+      || isLocalHost(config.base_url);
+    return {
+      level: ok ? 'healthy' : 'unavailable',
+      message: ok ? 'API credentials available' : 'No credentials',
+      checked_at: new Date().toISOString(),
+    };
   }
 }
 ```
 
-**pi-ai 集成层**（模型发现与 Provider 注册）：
+> **SDK 原生重试必须关（maxRetries: 0）**：官方 SDK 默认 `maxRetries: 2`。必须设 `0`，让自研 `withRetry` 统管，以协调 (a) 流式已 emit 则不重试、(b) 熔断器分类只记一次、(c) 自适应节流。否则 SDK 底层偷偷重试会双重重试并对熔断器隐藏失败。
+
+> **错误分类以 status 为主路径**：SDK 抛结构化 `APIError`（带 `.status`；`RateLimitError`=429、`APIConnectionError`/`APIConnectionTimeoutError`=网络）。`error-classifier.ts` 的 `extractStatus` 直接命中 status，字符串关键字匹配降级为「非 APIError 兜底」（兼容网关抛裸文本）。`isRateLimit` 优先 `err instanceof RateLimitError || status===429`。
+
+### 3.4 模型发现与凭证管理
+
+**模型发现**（`model-discovery.ts` + `model-assembly.ts`）：`ANTHROPIC_API_KEY` 存在 → `anthropicClient.models.list()`；`OPENAI_API_KEY` 存在 → `openaiClient.models.list()`；离线/无 key → 回退硬编码目录（`shared/model-catalog.ts`）。发现结果形态 `{ id, name, protocol, source: 'official' }`，由 `model-assembly` 装配为 ModelConfig（官方持裸名，自定义端点后缀 source 标签，`-2/-3` 兜底唯一化；`modelDedupeKey` 从 `(name, provider)` 改为 `(name, base_url)`）。
+
+**凭证管理**（`credentials/discovery.ts`）：`CredentialManager` 收敛为薄壳，只保留「env var 探测（ANTHROPIC_API_KEY / OPENAI_API_KEY）+ key 文件存在性」，供向导 / GUI 报告用。
 
 ```typescript
-// src/providers/pi-ai-bridge.ts
-
-import { getProviders, getModels, getModel, supportsXhigh } from '@mariozechner/pi-ai';
-import { getEnvApiKey } from '@mariozechner/pi-ai/env-api-keys';
-import {
-  getOAuthProviders,
-  getOAuthApiKey,
-  type OAuthProviderId,
-} from '@mariozechner/pi-ai/oauth';
-
-/**
- * 发现所有可用的 API Provider 和模型。
- * Council 的模型注册不再硬编码 Provider 列表，而是动态从 pi-ai 获取。
- */
-export async function discoverApiModels(): Promise<DiscoveredProvider[]> {
-  const results: DiscoveredProvider[] = [];
-
-  for (const providerId of getProviders()) {
-    // 检查是否有可用凭证
-    const envKey = getEnvApiKey(providerId);
-    const oauthProviders = getOAuthProviders();
-    const hasOAuth = oauthProviders.some(p => p.id === providerId);
-
-    let hasCredential = !!envKey;
-    if (!hasCredential && hasOAuth) {
-      try {
-        const oauthKey = await getOAuthApiKey(providerId as OAuthProviderId);
-        hasCredential = !!oauthKey;
-      } catch {
-        // OAuth 凭证不可用
-      }
-    }
-
-    if (hasCredential) {
-      const models = getModels(providerId);
-      results.push({
-        provider: providerId,
-        authMethod: envKey ? 'env' : 'oauth',
-        models: models.map(m => ({
-          id: m.id,
-          name: m.name ?? m.id,
-          contextWindow: m.contextWindow,
-          maxTokens: m.maxTokens,
-          reasoning: m.reasoning ?? false,
-          supportsXhigh: supportsXhigh(m),
-        })),
-      });
-    }
-  }
-
-  return results;
+// src/types/provider.ts
+export interface DiscoveryResult {
+  source: 'env' | 'file';   // 不再有 'oauth' | 'legacy-file'
+  status: 'valid' | 'refreshed' | 'expired' | 'not_found' | 'parse_error';
+  path?: string;
+  env_var?: string;
 }
-
-interface DiscoveredModel {
-  id: string;
-  name: string;
-  contextWindow?: number;     // pi-ai 动态提供
-  maxTokens?: number;         // pi-ai 动态提供
-  reasoning: boolean;         // 模型是否支持推理/思考
-  supportsXhigh: boolean;     // 是否支持 xhigh 级别思考
-}
-
-interface DiscoveredProvider {
-  provider: string;
-  authMethod: 'env' | 'oauth';
-  models: DiscoveredModel[];
-}
+export type DiscoveryReport = Record<string, DiscoveryResult>;
 ```
 
-### 3.4 凭证管理（委托给 pi-ai）
+**已移除**：`discoverOAuthCredentials` / `readClaudeCodeKeychain` / `readCodexAuthFile` / `readGeminiOAuthFile` / `login` / `saveOAuthCredentials`、`LEGACY_TO_PIAI` / `PIAI_TO_LEGACY`、所有 provider 家族映射表（`RELATED_PROVIDERS` / `OAUTH_ALSO_TRY` / `PROVIDER_PRIORITY` / `PROVIDER_SUFFIX` / `GOOGLE_FAMILY`）、`paths.ts` 的 `KNOWN_CREDENTIALS`。
 
-Council **不再自行实现**凭证解析、Token 刷新、OAuth 流程。所有鉴权逻辑统一委托给 `@mariozechner/pi-ai`。
+#### 3.4.1 Key 文件存储约定
 
-**原有的 `src/providers/credentials/` 目录整体移除**，替换为 `src/providers/pi-ai-bridge.ts` 中的薄封装（见 §3.3）。
-
-**pi-ai 鉴权能力总结**：
-
-| 能力 | pi-ai 函数 | Council 原实现 |
-|------|-----------|---------------|
-| 环境变量 API Key | `getEnvApiKey(provider)` | `CredentialManager` 的 ENV_VARS 字典 → **删除** |
-| OAuth 凭证发现 | `getOAuthProviders()` + `getOAuthApiKey()` | `CredentialManager` 的 `parseCredentialFile()` → **删除** |
-| Token 自动刷新 | `getOAuthApiKey()` 内部自动处理 | `CredentialManager` 的 `refreshToken()` → **删除** |
-| OAuth 登录流程 | `OAuthProviderInterface.login()` | 原计划 Phase 4+ 自行实现 → **不再需要** |
-| 模型发现 | `getProviders()` + `getModels(provider)` | 硬编码预设列表 → **替换为动态发现** |
-| 自定义 OAuth Provider | `registerOAuthProvider()` | 无 → **可扩展** |
-
-**迁移影响**：
-
-- 删除 `src/providers/credentials/` 目录（`discovery.ts`, `anthropic.ts`, `openai.ts`, `google.ts`, `types.ts`）
-- 删除 `src/types/provider.ts` 中的 `ProviderCredential` 接口
-- 新增 `src/providers/pi-ai-bridge.ts`（模型发现 + 凭证委托）
-- `ApiAdapter` 简化为统一的 `complete()` / `stream()` 调用，不再 switch-case 各 Provider
-
-#### 3.4.1 自定义 Provider 凭证存储约定
-
-针对自定义 OpenAI 兼容端点（`config.api_base_url` 存在），Council 自行管理 raw API key 文件（pi-ai 不参与）：
+向导录入 raw API key 时落盘为 key 文件，被模型配置的 `api_key_path` 引用：
 
 | 项 | 约定 |
 |----|------|
-| 存储路径 | `~/.council/credentials/custom-<name>.key` |
+| 存储路径 | `~/.council/credentials/<name>.key` |
 | 文件 mode | `0o600`（chmodSync 显式设置，符合 SEC-03） |
 | 父目录 mode | `0o700`（首次写入时 mkdirSync recursive） |
 | 文件内容 | 单行 raw API key（读取时 trim 去尾随换行） |
-| `<name>` 规则 | `[a-z0-9-]+`，由 first-run wizard 通过 `sanitizeProviderName()` 强制 |
-| Provider 命名 | `provider: 'custom:<name>'`，作为 circuit-breaker key（同 name 下多模型共享熔断状态） |
+| 熔断键标签 | `provider`（默认从 protocol / base_url 派生，可显式如 `custom:<name>`）；同标签多模型共享熔断状态 |
 | 孤儿清理 | wizard 中途取消时，已写入但未持久化到 ModelConfig 的 key 文件由 wizard 主动 `unlinkSync` 删除 |
 
 ---
@@ -1246,61 +981,46 @@ export class ConcurrencyManager {
 
 import { z } from 'zod';
 
-/** 模型配置 Schema */
+/** 协议官方端点。省略 base_url 时用协议对应的官方端点。 */
+export const OFFICIAL_BASE_URL = {
+  anthropic: 'https://api.anthropic.com',
+  openai: 'https://api.openai.com/v1',
+} as const;
+
+/** 模型配置 Schema（v2 — 标准 API 收敛，schema_version 2） */
 export const ModelConfigSchema = z.object({
-  // 通用字段
   name: z.string(),
-  invocation: z.enum(['cli', 'api', 'auto']).default('auto'),
-  provider: z.string().optional(),  // pi-ai 支持的所有 Provider ID（通过 getProviders() 动态获取）
-  model: z.string().optional(),
+  protocol: z.enum(['anthropic', 'openai']),   // 选哪个 SDK（取代 invocation + provider 语义）
+  model: z.string(),                            // 透传给端点的 model id
+  base_url: z.string().url().optional(),        // 省略 → OFFICIAL_BASE_URL[protocol]
+
+  api_key_env: z.string().optional(),
+  api_key_path: z.string().optional(),
+  provider: z.string().optional(),              // 展示 / 熔断键标签（默认派生）
+
+  reasoning_effort: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']).optional(),
+  temperature: z.number().optional(),
+  max_tokens: z.number().int().positive().optional(),
+
   timeout_seconds: z.number().int().positive().default(120),
   capabilities: z.array(z.string()).default(['general']),
   priority: z.number().int().nonnegative().default(100),
   max_concurrent: z.number().int().positive().default(1),
   resource_weight: z.number().int().positive().default(1),
   enabled: z.boolean().default(true),
-
-  // CLI 专用
-  binary: z.string().optional(),
-  model_args: z.array(z.string()).optional(),
-  args: z.array(z.string()).optional(),
-  input_mode: z.enum(['stdin', 'arg', 'file']).optional(),
-  output_mode: z.enum(['stdout', 'file', 'json_field']).optional(),
-  output_json_field: z.string().optional(),
-  env: z.record(z.string()).optional(),
-  health_check: z.object({
-    command: z.array(z.string()),
-    expect_exit_code: z.number().int().default(0),
-    cache_seconds: z.number().int().default(300),
-    timeout_seconds: z.number().int().default(10),
-  }).optional(),
-
-  // 推理与生成参数
-  reasoning_effort: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']).optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  max_tokens: z.number().int().positive().optional(),
-
-  // API 专用
-  api_credential_path: z.string().optional(),
-  api_base_url: z.string().url().optional(),
-  api_key_env: z.string().optional(),
   streaming: z.boolean().default(true),
-}).refine(
-  // CLI 模式必须有 binary + args + input_mode
-  (data) => {
-    if (data.invocation === 'cli') {
-      return !!data.binary && !!data.args && !!data.input_mode;
-    }
-    return true;
-  },
-  { message: 'CLI mode requires binary, args, and input_mode' },
-);
+
+  // 迁移写入：旧模型无法自动转换时保留可见但禁用，附此原因（见 §6.4）
+  legacy_disabled_reason: z.string().optional(),
+});
+// 删字段：invocation/binary/model_args/args/input_mode/output_mode/output_json_field/env/health_check
+// 重命名：api_base_url→base_url、api_credential_path→api_key_path；删原 CLI .refine
 
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 
 /** 主配置 Schema */
 export const CouncilConfigSchema = z.object({
-  schema_version: z.number().int().default(1),
+  schema_version: z.number().int().default(2),
 
   general: z.object({
     default_mode: z.enum(['quick', 'compare', 'debate', 'auto']).default('auto'),
@@ -1441,12 +1161,31 @@ export const PATHS = {
   database:     join(COUNCIL_HOME, 'data', 'council.db'),
   sessionsDir:  join(COUNCIL_HOME, 'data', 'sessions'),
   checkpoints:  join(COUNCIL_HOME, 'checkpoints'),
-  credentials:  join(COUNCIL_HOME, 'credentials'),
+  credentials:  join(COUNCIL_HOME, 'credentials'),   // API key 文件（被 api_key_path 引用）
   logs:         join(COUNCIL_HOME, 'logs'),
 } as const;
 
-// 凭证路径不再由 Council 管理，统一委托给 pi-ai
+// 已删除 KNOWN_CREDENTIALS（OAuth/keychain/CLI 客户端凭证路径）—— 凭证降为 env / key 文件
 ```
+
+### 6.4 配置迁移（schema_version 1 → 2）
+
+`config/migrate.ts` 是纯函数（逻辑与文件写分离）。`ConfigLoader` 首次加载检测到 `schema_version < 2` 时触发一次性**非破坏式迁移**：可转换即转，不可转换「禁用 + 标注 `legacy_disabled_reason`」保留，绝不硬报错、绝不静默丢弃。迁移重写 model YAML、升 `schema_version`、向 stderr 打印摘要。转换规则见 PRD §4.4.4。
+
+```typescript
+// src/config/migrate.ts
+export interface MigrationResult {
+  models: ModelConfig[];        // 迁移后（含被禁用+标注的）
+  converted: number;
+  disabled: { name: string; reason: string }[];
+}
+// 纯函数：读入旧 model 字面量 + 当前 env 可用性 → 决定转换 or 禁用+标注
+export function migrateModelsV1ToV2(rawModels: unknown[], env: NodeJS.ProcessEnv): MigrationResult;
+```
+
+- `invocation: api/auto` + `api_base_url` + key → `protocol:'openai'`、`base_url`←`api_base_url`、`api_key_path`←`api_credential_path`（enabled）
+- `provider: anthropic/openai` + 对应 env key 存在 → `protocol` 官方（enabled）
+- `invocation: cli` / OAuth-only / `google*` / `github-copilot` → 禁用 + 标注（见 PRD §4.4.4 表）
 
 ---
 
@@ -1537,12 +1276,10 @@ export async function runCouncil(question: string | undefined, options: any) {
   const config = loader.loadCouncilConfig();
   const models = loader.loadAllModels();
 
-  // 2. 初始化各层（鉴权由 pi-ai 管理，无需手动创建 CredentialManager）
+  // 2. 初始化各层
   const db = initDatabase(PATHS.database);
-  const adapter = new AutoAdapter(
-    new ApiAdapter(),   // 内部通过 pi-ai 的 getEnvApiKey / getOAuthApiKey 获取凭证
-    new CliAdapter(),
-  );
+  const cm = new CredentialManager();   // 薄壳：env key 探测 + key 文件存在性
+  const adapter = new ApiAdapter(cm);   // 唯一实现：ProtocolClient(anthropic|openai) 双 SDK
   const sessionStore = new SessionStore(PATHS.sessionsDir, db);
   const checkpointManager = new CheckpointManager(PATHS.checkpoints);
   const concurrencyManager = new ConcurrencyManager(db, config.concurrency.global_resource_limit);
@@ -1624,9 +1361,8 @@ export class PlainRenderer implements Renderer {
   }
 
   onAgentComplete(agent: Agent, result: InvocationResult) {
-    const mode = result.invocation_mode === 'api' ? 'API' : 'CLI';
     process.stderr.write(
-      `  ✓ ${agent.config.name} (${agent.role}) ${result.elapsed_ms / 1000}s [${mode}]\n`
+      `  ✓ ${agent.config.name} (${agent.role}) ${result.elapsed_ms / 1000}s\n`
     );
   }
 
@@ -1980,9 +1716,9 @@ private handlePhaseError(phase: DebatePhase, session: Session, err: unknown): Se
 | 层级 | 覆盖目标 | 运行条件 | 框架 |
 |------|---------|---------|------|
 | **单元测试** | `core/` 纯逻辑（共识计算、匿名化、prompt 构建、评分解析） | 无外部依赖，CI 中运行 | vitest |
-| **适配器测试** | `providers/` CLI 适配器（mock subprocess）+ API 适配器（mock HTTP） | mock 外部调用 | vitest + msw (HTTP mock) |
+| **适配器测试** | `providers/` ApiAdapter + ProtocolClient（mock 两个官方 SDK）、错误分类、发现/装配 | mock SDK 调用 | vitest（SDK mock） |
 | **存储测试** | `storage/` SQLite 操作、Checkpoint 读写、并发调度 | 临时 SQLite（`:memory:` 或 tmpdir） | vitest |
-| **集成测试** | 完整 debate 流程端到端 | 需要至少 1 个真实 CLI/API 可用 | vitest，标记为 `@slow` |
+| **集成测试** | 完整 debate 流程端到端 | 需要至少 1 个真实 API 端点可用 | vitest，标记为 `@slow` |
 | **Snapshot 测试** | TUI 组件渲染输出 | 无外部依赖 | vitest + ink-testing-library |
 
 ### 11.2 关键测试用例
@@ -2069,34 +1805,34 @@ describe('ConcurrencyManager', () => {
 |------|------|---------|
 | `src/cli.ts` | commander 入口，仅主命令 | ~30 |
 | `src/commands/council.ts` | 硬编码 2 模型，直接调用 | ~60 |
-| `src/providers/adapter.ts` | InvocationAdapter 接口 + AutoAdapter | ~50 |
-| `src/providers/api-adapter.ts` | Anthropic + OpenAI + Google SDK 调用 | ~150 |
-| `src/providers/cli-adapter.ts` | spawn + stdin/stdout pipe | ~80 |
-| `src/providers/credentials/discovery.ts` | 扫描凭证 + token 刷新 | ~180 |
+| `src/types/provider.ts` | InvocationAdapter 接口 | ~50 |
+| `src/providers/api-adapter.ts` | ApiAdapter：可靠性骨架 + ProtocolClient 分派 | ~200 |
+| `src/providers/protocol/*.ts` | ProtocolClient 契约 + Anthropic/OpenAI 双客户端 | ~180 |
+| `src/providers/credentials/discovery.ts` | env key 探测 + key 文件存在性（薄壳） | ~80 |
 | `src/core/orchestrator.ts` | 仅 Broadcast + Synthesis | ~100 |
 | `src/core/prompt-builder.ts` | Broadcast + Synthesis prompt 模板 | ~60 |
 | `src/ui/plain-renderer.ts` | stderr 进度 + stdout 结果 | ~40 |
 | `src/types/*.ts` | 核心类型定义 | ~80 |
 | `src/config/paths.ts` | 路径常量 | ~20 |
 
-**合计**：~850 行。不含配置系统、持久化、TUI。
+**合计**：~900 行。不含配置系统、持久化、TUI。
 
 **验收标准**：
 ```bash
 npx council "Redis vs Memcached 怎么选?"
 # → 2 个模型并行回答 → Chairman 综合 → 输出到 stdout
-# → stderr 显示进度 "✓ claude-opus (12.3s) [API]" "✓ gemini-pro (8.7s) [API]"
+# → stderr 显示进度 "✓ claude-opus (12.3s)" "✓ openai-o4mini (8.7s)"
 ```
 
 ### Phase 1: MVP + 配置系统（3-5 天）
 
 在 Phase 0 基础上增加：
 
-- `src/config/` — YAML 加载、zod 校验、预设库
+- `src/config/` — YAML 加载、zod 校验（v2 schema）、migrate.ts、预设目录
 - `src/ui/wizard/first-run.ts` — 5 步引导（inquirer）
 - `src/storage/session-store.ts` — Session JSON 写入
 - `src/commands/models.ts` — `council models` 列出状态
-- 健康检查 L1（CLI binary 存在 / API 凭证存在）
+- 本地凭证可解析性校验（env key 有值 / key 文件存在 / localhost）
 - `council.yaml` + `models/*.yaml` 生成
 
 ### Phase 2: 完整辩论流程（3-5 天）
@@ -2154,28 +1890,29 @@ npx council "Redis vs Memcached 怎么选?"
 
 | 场景 | 瓶颈 | 预估耗时 | 优化手段 |
 |------|------|---------|---------|
-| quick 模式 | 单次 API 调用 | 5-15s | API 模式减少 1-3s subprocess 开销 |
+| quick 模式 | 单次 API 调用 | 5-15s | 原生 HTTP 流式，无 subprocess 开销 |
 | compare 模式（3 模型） | 最慢模型的响应时间 | 15-40s | 并行调用 |
 | debate 模式（3 模型） | Broadcast + Review + Synthesis 串行 | 45-120s | Broadcast 并行；Review 并行 |
 | 启动时间 | Node.js 启动 + 配置加载 + SQLite 连接 | ~200ms | tsup 单文件 bundle 减少模块解析 |
-| 凭证刷新 | OAuth token refresh HTTP 调用 | 0.5-2s | 提前 60s 判定过期，在主流程前异步刷新 |
+| 凭证解析 | 读 env / key 文件（本地，无网络） | < 1ms | 无 OAuth 刷新往返 |
 
 ---
 
 ## 附录 A: 依赖版本锁定
 
-> 与 `package.json` 保持一致（以 `package.json` 为准）。鉴权/Provider SDK 已统一委托 `@mariozechner/pi-ai`，不再直接依赖各家 SDK（见 §1.3）。
+> 与 `package.json` 保持一致（以 `package.json` 为准）。标准 API 收敛后直接依赖官方 `@anthropic-ai/sdk` + `openai`，移除 `@mariozechner/pi-ai`（见 §1.3）。
 
 ```json
 {
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
     "@hono/node-server": "^2.0.8",
     "@inquirer/prompts": "^7.0.0",
-    "@mariozechner/pi-ai": "^0.62.0",
     "better-sqlite3": "^12.8.0",
     "commander": "^12.0.0",
     "hono": "^4.12.27",
     "ink": "^7.0.1",
+    "openai": "^6.45.0",
     "react": "^19.2.5",
     "yaml": "^2.0.0",
     "zod": "^3.0.0"
@@ -2194,12 +1931,11 @@ npx council "Redis vs Memcached 怎么选?"
 
 ## 附录 B: 环境变量一览
 
-| 变量 | 用途 | 优先级 |
-|------|------|--------|
-| `ANTHROPIC_API_KEY` | Anthropic API Key（替代 OAuth 凭证） | 最高 |
-| `OPENAI_API_KEY` | OpenAI API Key | 最高 |
-| `GEMINI_API_KEY` | Google Gemini API Key | 最高 |
-| `COPILOT_GITHUB_TOKEN` / `GH_TOKEN` | GitHub Copilot Token | 最高 |
+| 变量 | 用途 | 说明 |
+|------|------|------|
+| `ANTHROPIC_API_KEY` | anthropic 协议官方端点凭证 | 向导内置探测 |
+| `OPENAI_API_KEY` | openai 协议官方端点凭证 | 向导内置探测 |
+| `<自定义>_API_KEY` | 兼容端点凭证（如 `DEEPSEEK_API_KEY`），由模型配置的 `api_key_env` 指定 | 用户显式配置 |
 | `COUNCIL_HOME` | 自定义 Council 数据目录（默认 `~/.council`） | — |
 | `COUNCIL_LOG_LEVEL` | 日志级别（debug/info/warn/error） | — |
 | `NO_COLOR` | 禁用终端颜色（遵循 no-color.org 标准） | — |
