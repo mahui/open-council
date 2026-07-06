@@ -35,7 +35,8 @@ import { parseReviewResponse, type ParsedReview } from './score-parser.js';
 import { calculateConsensus } from './consensus.js';
 import { buildReviewSummaries, type AnswerReviewSummary } from './review-aggregator.js';
 import { detectLanguage } from './language.js';
-import { generateRoles, resolveModel, defaultRoles, rateModelCapability, rolesFromRoleSet } from './role-generator.js';
+import { generateRoles, resolveModel, defaultRoles, rolesFromRoleSet } from './role-generator.js';
+import { rateModelCapability } from '../shared/model-catalog.js';
 import { resolveMode } from './router.js';
 import { buildCompressionPlan, applyFallbackCompression, type ScoredResponse, aggregateReviewScores } from './compression.js';
 

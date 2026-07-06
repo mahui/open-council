@@ -8,6 +8,7 @@ import type { InvocationAdapter } from '../types/provider.js';
 import type { ModelConfig, RoleSet } from '../types/config.js';
 import { detectLanguage } from './language.js';
 import { isPrefixAtBoundary } from '../shared/match.js';
+import { rateModelCapability } from '../shared/model-catalog.js';
 
 export interface GeneratedRole {
   name: string;
@@ -16,20 +17,6 @@ export interface GeneratedRole {
   system_prompt: string;
   /** Which model (by name) should play this role */
   assigned_model: string;
-}
-
-/**
- * Coarse capability tier inferred from a model's id/name.
- * 3 = strong reasoning, 2 = balanced (also the default for unrecognized ids),
- * 1 = fast/lightweight. Reusable across chairman selection (strongest wins),
- * role-panel designer selection (prefer balanced), and model descriptions.
- */
-export function rateModelCapability(m: ModelConfig): number {
-  const id = m.model ?? m.name;
-  if (/opus|pro|5\.[3-9]|o[34]/i.test(id)) return 3;
-  if (/sonnet|flash|gpt-[45]/i.test(id)) return 2;
-  if (/haiku|mini|lite|spark/i.test(id)) return 1;
-  return 2;
 }
 
 const CAPABILITY_TRAIT: Record<number, string> = {

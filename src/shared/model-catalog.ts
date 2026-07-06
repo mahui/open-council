@@ -19,7 +19,7 @@
  * literals below by hand.
  */
 
-import type { Protocol } from '../types/config.js';
+import type { Protocol, ModelConfig } from '../types/config.js';
 
 /** The two line protocols we ship a fallback catalog for. */
 export type CatalogProvider = Protocol;
@@ -73,4 +73,18 @@ export function catalogModelIds(): Set<string> {
     ids.add(cat.economy.id);
   }
   return ids;
+}
+
+/**
+ * Coarse capability tier inferred from a model's id/name.
+ * 3 = strong reasoning, 2 = balanced (also the default for unrecognized ids),
+ * 1 = fast/lightweight. Reusable across chairman selection (strongest wins),
+ * role-panel designer selection (prefer balanced), and model descriptions.
+ */
+export function rateModelCapability(m: ModelConfig): number {
+  const id = m.model ?? m.name;
+  if (/opus|pro|5\.[3-9]|o[34]/i.test(id)) return 3;
+  if (/sonnet|flash|gpt-[45]/i.test(id)) return 2;
+  if (/haiku|mini|lite|spark/i.test(id)) return 1;
+  return 2;
 }

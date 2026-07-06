@@ -7,7 +7,7 @@ import { discoverModels } from '../../providers/model-discovery.js';
 import type { DiscoveredModel } from '../../providers/model-discovery.js';
 import type { ModelConfig, Protocol } from '../../types/config.js';
 import { ApiAdapter } from '../../providers/api-adapter.js';
-import { rateModelCapability } from '../../core/role-generator.js';
+import { rateModelCapability } from '../../shared/model-catalog.js';
 import {
   buildNamedModels,
   selectBestChairman,

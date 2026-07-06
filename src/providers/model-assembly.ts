@@ -19,7 +19,7 @@
 import { join } from 'node:path';
 import type { DiscoveredModel } from './model-discovery.js';
 import type { ModelConfig, Protocol } from '../types/config.js';
-import { rateModelCapability } from '../core/role-generator.js';
+import { rateModelCapability } from '../shared/model-catalog.js';
 import { PATHS } from '../config/paths.js';
 import { MODEL_CATALOG } from '../shared/model-catalog.js';
 
