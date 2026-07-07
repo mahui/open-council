@@ -296,4 +296,69 @@ describe('discoverEndpointModels — custom / self-hosted endpoints', () => {
     }
     stderr.mockRestore();
   });
+
+  // #23: discoverEndpointModels is the trust boundary for untrusted endpoint data.
+  // An id that cannot be persisted safely as <id>.yaml (path traversal) is dropped
+  // — otherwise it would surface later as an uncaught safePath throw at save time.
+  it('drops path-traversal ids, keeps the legit ones, and warns once with the count + base_url (no key leak)', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    openaiListMock.mockResolvedValue({
+      data: [{ id: 'llama3.2' }, { id: '../../evil' }, { id: '/etc/passwd' }, { id: 'mistral' }],
+    });
+
+    const models = await discoverEndpointModels({
+      protocol: 'openai',
+      baseUrl: OLLAMA,
+      apiKey: 'sk-endpoint-secret',
+      sourceLabel: 'ollama',
+    });
+
+    // Only the storable ids survive; the two traversal ids are gone.
+    expect(models.map((m) => m.id)).toEqual(['llama3.2', 'mistral']);
+
+    const dropWarnings = stderr.mock.calls.map((c) => String(c[0])).filter((s) => s.includes('dropped'));
+    expect(dropWarnings).toHaveLength(1); // a single summary line, not one-per-id
+    expect(dropWarnings[0]).toContain('2'); // dropped count
+    expect(dropWarnings[0]).toContain(OLLAMA); // base_url provenance
+    // SEC-02: the drop warning never echoes key material.
+    for (const call of stderr.mock.calls) expect(String(call[0])).not.toContain('sk-endpoint-secret');
+    stderr.mockRestore();
+  });
+
+  it('all ids unsafe → returns [] (with a drop warning)', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    openaiListMock.mockResolvedValue({ data: [{ id: '../../evil' }, { id: '../secrets' }] });
+
+    const models = await discoverEndpointModels({ protocol: 'openai', baseUrl: OLLAMA, sourceLabel: 'ollama' });
+
+    expect(models).toEqual([]);
+    expect(stderr.mock.calls.some((c) => String(c[0]).includes('dropped'))).toBe(true);
+    stderr.mockRestore();
+  });
+
+  it('the anthropic branch is guarded by the same storability filter', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    anthropicListMock.mockResolvedValue({ data: [{ id: 'claude-proxy-1' }, { id: '../../evil' }] });
+
+    const models = await discoverEndpointModels({
+      protocol: 'anthropic',
+      baseUrl: 'https://proxy.example',
+      apiKey: 'sk-x',
+      sourceLabel: 'proxy',
+    });
+
+    expect(models.map((m) => m.id)).toEqual(['claude-proxy-1']);
+    expect(stderr.mock.calls.some((c) => String(c[0]).includes('dropped'))).toBe(true);
+    stderr.mockRestore();
+  });
+
+  it('all-legit ids produce no drop warning (filter is silent when nothing is dropped)', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    openaiListMock.mockResolvedValue({ data: [{ id: 'llama3.2' }, { id: 'mistral' }] });
+
+    await discoverEndpointModels({ protocol: 'openai', baseUrl: OLLAMA, sourceLabel: 'ollama' });
+
+    expect(stderr.mock.calls.some((c) => String(c[0]).includes('dropped'))).toBe(false);
+    stderr.mockRestore();
+  });
 });

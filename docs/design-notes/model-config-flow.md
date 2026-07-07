@@ -86,6 +86,7 @@ export async function discoverEndpointModels(opts: {
 | SDK 客户端 | 按 `protocol` 构造 `Anthropic`/`OpenAI`，`{ baseURL: opts.baseUrl, apiKey: <见下>, maxRetries: 0, timeout: DISCOVERY_TIMEOUT_MS }`（复用现有 5s 常量） |
 | no-auth key | `apiKey` 缺省/空时，向 SDK 构造器传**非空占位**（如 `'noauth'`）。**关键**：不能传空串——否则 OpenAI SDK 会回退读 `OPENAI_API_KEY` env 或抛错，破坏 ollama 等无鉴权端点 |
 | OpenAI 过滤 | **不套用**官方路径的 `^(gpt-|o[0-9]|chatgpt)` 家族过滤。自定义端点返回 `llama3.2`/`mistral`/`gemini-2.5-pro` 等任意 id，过滤会误杀。全量返回 |
+| 落盘安全过滤（#23，2026-07-07 追加） | 对每个 id 跑 `isResolvableModelName(PATHS.modelsDir, id)`（现居 `shared/paths.ts`；providers→shared/config 合法方向）；文件名不可安全落盘的 id（含 `../` traversal）**丢弃 + stderr 汇总一行警告**（建议 `[model-discovery] endpoint <baseUrl>: dropped N unsafe model id(s): …`），不进返回集。**与上一行家族过滤正交**：家族过滤是功能性（chat-capable）；本过滤是持久化**安全性**。`isResolvableModelName` 纯路径运算（无 fs），故用真实 `PATHS.modelsDir` 即可、无需测试夹具。`safePath` 仍是落盘时的通用硬后盾（本过滤把它从"抛栈"提前为"友好丢弃+警告"）。**仅自定义端点做**（官方端点可信，见 §2.3） |
 | 返回形态 | 每条 `{ id, name: id, protocol, base_url: opts.baseUrl, source: opts.sourceLabel }`。**必带 `base_url`**（区别于官方的 `base_url: undefined`），供 `model-assembly` 的裸名/后缀命名与 `modelDedupeKey` 正确工作 |
 | 失败/超时 | 网络/鉴权/超时/协议不符 → **stderr 警告 + 返回 `[]`，绝不抛出**。警告格式建议 `[model-discovery] endpoint <baseUrl> /models unavailable: <msg>`（无 catalog 可回退，故不含 "using static catalog"）。实现须确保 `<msg>` 不拼接 key |
 | 成功空集 | `models.list()` 成功但返回空 → `[]`（与失败同为空，CLI 用户从 stderr 有无警告区分；调用方一律回退手输） |
@@ -106,6 +107,7 @@ export async function discoverEndpointModels(opts: {
 - 官方 `discoverModels` 失败/空 → 仍回退 `staticCatalog(protocol)`（来自 `MODEL_CATALOG`）。
 - stderr 警告格式不变：`[model-discovery] <protocol> /models unavailable, using static catalog: <msg>`。
 - 官方 OpenAI 路径的 `^(gpt-|o[0-9]|chatgpt)` 家族过滤**保留**（避免 embeddings/tts 灌满面板）。仅自定义端点跳过过滤。
+- **官方 `discoverModels` 不加 #23 的落盘安全过滤**（Q2 裁决，2026-07-07）：官方 Anthropic/OpenAI 端点与其 completion 响应同属可信基础设施，`../` id 需厂商被攻陷才可能出现；给官方加过滤是恒不触发的死分支（YAGNI）。paranoid 情形由 `safePath` 落盘硬后盾兜底。
 - `DISCOVERY_TIMEOUT_MS=5s`、`maxRetries:0` 不变。
 - `DiscoveredModel` 形态不变（`{ id, name, protocol, base_url?, source }`）。
 - `model-assembly` 的裸名/后缀/`-2/-3` 命名与 `modelDedupeKey` 不变（自定义端点带 `base_url`，天然走后缀分支）。

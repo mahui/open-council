@@ -21,6 +21,8 @@ import OpenAI from 'openai';
 import type { Protocol } from '../types/config.js';
 import type { CredentialManager } from './credentials/discovery.js';
 import { MODEL_CATALOG } from '../shared/model-catalog.js';
+import { isResolvableModelName } from '../shared/paths.js';
+import { PATHS } from '../config/paths.js';
 
 /** Short timeout for discovery — we never want `/models` to hang startup. */
 const DISCOVERY_TIMEOUT_MS = 5_000;
@@ -78,6 +80,11 @@ export async function discoverModels(credentials: CredentialManager): Promise<Di
  *  - the OpenAI `^(gpt-|o[0-9]|chatgpt)` family filter is NOT applied — a custom
  *    endpoint legitimately returns llama/mistral/gemini ids that the filter
  *    would wrongly drop;
+ *  - this is the trust boundary for untrusted endpoint data (#23): every returned
+ *    id is run through {@link filterStorable} so an id that cannot be persisted
+ *    safely (e.g. a `../` traversal) is dropped with a summary warning rather than
+ *    surfacing later as an uncaught safePath throw. Orthogonal to the family
+ *    filter above: that one is functional (chat-capable), this one is security;
  *  - every model carries `base_url` + the caller's `sourceLabel`, so model-assembly's
  *    suffix naming and modelDedupeKey treat it as a distinct custom endpoint.
  */
@@ -91,6 +98,7 @@ export async function discoverEndpointModels(opts: {
   const key = apiKey && apiKey.length > 0 ? apiKey : NO_AUTH_PLACEHOLDER;
 
   try {
+    let discovered: DiscoveredModel[];
     if (protocol === 'anthropic') {
       const client = new Anthropic({
         baseURL: baseUrl,
@@ -99,35 +107,62 @@ export async function discoverEndpointModels(opts: {
         timeout: DISCOVERY_TIMEOUT_MS,
       });
       const page = await client.models.list({ limit: 1000 });
-      return page.data.map((m) => ({
+      discovered = page.data.map((m) => ({
         id: m.id,
         name: m.id,
         protocol: 'anthropic' as const,
         base_url: baseUrl,
         source: sourceLabel,
       }));
+    } else {
+      const client = new OpenAI({
+        baseURL: baseUrl,
+        apiKey: key,
+        maxRetries: 0,
+        timeout: DISCOVERY_TIMEOUT_MS,
+      });
+      const page = await client.models.list();
+      // No family filter here (unlike the official OpenAI path): custom endpoints
+      // serve llama3.2 / mistral / gemini-* ids that the gpt/o filter would kill.
+      discovered = page.data.map((m) => ({
+        id: m.id,
+        name: m.id,
+        protocol: 'openai' as const,
+        base_url: baseUrl,
+        source: sourceLabel,
+      }));
     }
-
-    const client = new OpenAI({
-      baseURL: baseUrl,
-      apiKey: key,
-      maxRetries: 0,
-      timeout: DISCOVERY_TIMEOUT_MS,
-    });
-    const page = await client.models.list();
-    // No family filter here (unlike the official OpenAI path): custom endpoints
-    // serve llama3.2 / mistral / gemini-* ids that the gpt/o filter would kill.
-    return page.data.map((m) => ({
-      id: m.id,
-      name: m.id,
-      protocol: 'openai' as const,
-      base_url: baseUrl,
-      source: sourceLabel,
-    }));
+    return filterStorable(discovered, baseUrl);
   } catch (err) {
     warnEndpoint(baseUrl, err);
     return [];
   }
+}
+
+/**
+ * Trust boundary for untrusted `/models` data (#23): keep only ids that can be
+ * persisted as `<id>.yaml` under the models dir ({@link isResolvableModelName} —
+ * pure path math, no fs). A malicious/misconfigured endpoint returning a `../`
+ * traversal id is dropped here, turning what would otherwise be an uncaught
+ * safePath throw at save time into a friendly, summarised stderr warning.
+ * safePath remains the universal write-time backstop; this only moves the failure
+ * earlier and softer. Official endpoints do NOT run this (trusted infrastructure,
+ * design-notes/model-config-flow.md §2.3). The dropped ids are echoed (they carry
+ * no key material — SEC-02 concerns only apply to the error path's message).
+ */
+function filterStorable(models: DiscoveredModel[], baseUrl: string): DiscoveredModel[] {
+  const safe: DiscoveredModel[] = [];
+  const dropped: string[] = [];
+  for (const m of models) {
+    if (isResolvableModelName(PATHS.modelsDir, m.id)) safe.push(m);
+    else dropped.push(m.id);
+  }
+  if (dropped.length > 0) {
+    process.stderr.write(
+      `[model-discovery] endpoint ${baseUrl}: dropped ${dropped.length} unsafe model id(s): ${dropped.join(', ')}\n`,
+    );
+  }
+  return safe;
 }
 
 async function discoverAnthropic(apiKey: string): Promise<DiscoveredModel[]> {
