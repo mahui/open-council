@@ -5,11 +5,19 @@
 
 import type { ModelConfig } from './config.js';
 
+/**
+ * How a model response was produced. Always 'api' for new records; 'cli' survives
+ * only when reading sessions persisted before the standard-API convergence
+ * (TDD §invocation_mode, review-2 P1-1). Canonical single source for this union —
+ * every DTO/state/error field referencing it aliases here rather than re-spelling
+ * the literal union.
+ */
+export type InvocationMode = 'cli' | 'api';
+
 export interface InvocationResult {
   response: string;
   elapsed_ms: number;
-  /** Always 'api' for new records; 'cli' survives only when reading sessions persisted before the standard-API convergence (TDD §invocation_mode, review-2 P1-1). */
-  invocation_mode: 'cli' | 'api';
+  invocation_mode: InvocationMode;
   exit_code?: number;
   http_status?: number;
   stderr?: string;

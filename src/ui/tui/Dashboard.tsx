@@ -6,13 +6,13 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput, useApp } from 'ink';
 import type { ConsensusResult, DegradationEvent } from '../../types/session.js';
+import type { InvocationMode } from '../../types/provider.js';
 
 export interface AgentState {
   agent_id: string;
   role: string;
   model_name: string;
-  /** Always 'api' for new records; 'cli' survives only when replaying pre-convergence sessions. */
-  invocation_mode: 'api' | 'cli';
+  invocation_mode: InvocationMode;
   status: 'waiting' | 'running' | 'done' | 'failed';
   elapsed_ms?: number;
 }

@@ -3,6 +3,8 @@
  * Exception to ARCH-04: errors need runtime class definitions.
  */
 
+import type { InvocationMode } from './provider.js';
+
 export class CouncilError extends Error {
   constructor(message: string, public readonly code: string) {
     super(message);
@@ -17,7 +19,7 @@ export class ModelUnavailableError extends CouncilError {
 }
 
 export class InvocationError extends CouncilError {
-  constructor(modelName: string, mode: 'cli' | 'api', reason: string) {
+  constructor(modelName: string, mode: InvocationMode, reason: string) {
     super(`${mode.toUpperCase()} invocation of ${modelName} failed: ${reason}`, 'INVOCATION_FAILED');
   }
 }
@@ -32,7 +34,7 @@ export class InvocationError extends CouncilError {
 export class InvocationTimeoutError extends CouncilError {
   constructor(
     public readonly modelName: string,
-    public readonly mode: 'cli' | 'api',
+    public readonly mode: InvocationMode,
     public readonly timeoutSeconds: number,
   ) {
     super(

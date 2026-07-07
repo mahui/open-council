@@ -1,6 +1,7 @@
 // src/server/protocol.ts — 线协议（server 私有契约）。纯类型，无运行时代码（ARCH-04）。
 import type { DebatePhase, DegradationEvent, ConsensusResult, Session } from '../types/session.js';
 import type { Protocol } from '../types/config.js';
+import type { InvocationMode } from '../types/provider.js';
 
 /** SSE 事件类型枚举（与 Renderer 方法一一映射 + 生命周期）。 */
 export type DebateEventType =
@@ -33,7 +34,7 @@ export interface AgentDTO {
 export interface InvocationResultDTO {
   response: string;
   elapsedMs: number;
-  invocationMode: 'cli' | 'api';
+  invocationMode: InvocationMode;
   timedOut: boolean;
   truncated?: boolean;
   tokenUsage?: { inputTokens: number; outputTokens: number };
