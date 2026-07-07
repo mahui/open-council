@@ -749,15 +749,13 @@ export function calculateConsensus(
 }
 
 /** 判断模型的供应商归属（用于 diversity 计算） */
-function getProviderFamily(config: ModelConfig): string {
-  if (config.provider) return config.provider;
-  // CLI 模式通过 binary 推断
-  const binary = config.binary ?? '';
-  if (binary.includes('claude')) return 'anthropic';
-  if (binary.includes('codex')) return 'openai';
-  if (binary.includes('gemini')) return 'google';
-  if (binary.includes('ollama')) return 'ollama';
-  return binary;  // 未知工具以 binary 名作为 family
+export function getProviderFamily(config: ModelConfig): string {
+  if (config.provider) return config.provider;               // 显式 provider 标签优先
+  if (config.base_url) {                                     // 自定义端点：protocol + host 归并同源
+    try { return `${config.protocol}:${new URL(config.base_url).host}`; }
+    catch { return `${config.protocol}:${config.base_url}`; }
+  }
+  return config.protocol;                                    // 官方端点（无 base_url）按协议归并
 }
 ```
 
@@ -1955,12 +1953,12 @@ npx council "Redis vs Memcached 怎么选?"
 
 | 风险 | 缓解措施 |
 |------|---------|
-| 凭证文件被意外读取 | 凭证路径 hardcode，不接受用户任意路径输入；只读取已知格式 |
-| token 泄露到日志 | 结构化日志层统一 redact `access_token`、`refresh_token` 等敏感字段 |
-| `input_mode: arg` 进程列表暴露 | 启动时 warn；配置引导标注风险；推荐 stdin |
-| Session JSON 明文存储 | 文件权限 `0o600`；`--no-store` 模式不写盘 |
-| refresh_token 写回失败 | catch + 日志记录，不阻塞主流程；下次使用时重新刷新 |
-| SQLite 注入 | 所有查询使用 prepared statement，无字符串拼接 |
+| 凭证文件被意外读取 | key 文件路径来自配置的 `api_key_path`，落盘时 `0o600`（SEC-03）；父目录 `0o700` |
+| API key 泄露到日志 / DTO | 日志层 redact `api_key_env` 的值与 key 文件内容；key 绝不进入 DTO / YAML / Session（SEC-02） |
+| prompt 经命令行 / 进程列表暴露 | 无 subprocess 调用点（CLI 适配器已移除）；prompt 仅经 HTTPS 请求体发送，不入进程参数或 shell 历史（SEC-05） |
+| Session JSON 明文存储 | 文件权限 `0o600`（SEC-03）；`--no-store` 模式不写盘（SEC-07） |
+| 恶意模型名构造路径穿越 | 读写 / 删除模型 YAML 前经 `safePath` 校验，确认解析路径仍在 `models/` 目录内（SEC-04） |
+| SQLite 注入 | 所有查询使用 prepared statement，无字符串拼接（SEC-01） |
 | 依赖供应链 | pnpm lockfile 锁定版本；CI 中运行 `npm audit` |
 
 ---

@@ -2269,8 +2269,8 @@ Found 3 related debates:
 - **文件权限**: 配置文件和 Session JSON 自动设为 `600`（仅所有者可读写）。权限不满足时输出警告提示
 - **数据保留**: Session JSON 默认保留 90 天（`storage_security.session_retention_days`），超期自动清理。`council prune --before DATE` 可手动清理
 - **`--no-store` 模式**: 当处理敏感问题（如涉及企业代码、凭证、安全审计内容）时，用户可通过 `--no-store` 参数禁止本次辩论的 Session 持久化。该模式下结果仅输出到 stdout，不写入 JSON 文件、不写入 SQLite 索引、不留 checkpoint。辩论结束后无任何本地痕迹
-- **input_mode: arg 安全警告**: `arg` 模式会将 prompt 作为命令行参数传入，这意味着 prompt 内容会暴露在进程列表（`ps aux` 可见）和 shell 历史中。系统在使用 `arg` 模式调用时，自动在日志中输出一次性提醒：`⚠ input_mode=arg: prompt 可通过 ps 命令被同机其他用户看到，建议敏感场景使用 stdin/file 模式`。配置引导中 `arg` 选项旁标注此风险
-- **进程隔离**: 每个模型调用通过独立的 subprocess 执行，互不影响
+- **凭证 redact**: API key（`api_key_env` 的值、key 文件内容）绝不写入日志、DTO、YAML 或 Session（SEC-02）；key 文件本身以 `0o600` 落盘（SEC-03）
+- **无 subprocess 调用**: 标准 API 收敛后无 CLI 子进程，prompt 仅经 HTTPS 请求体发送到官方 / 兼容端点，不进入进程参数列表（`ps aux`）或 shell 历史（SEC-05）
 - **并发调度**: 通过 SQLite `resource_slots` 表原子事务调度（唯一真源），`locks/` 目录仅作进程存活标记供调试
 
 ---
