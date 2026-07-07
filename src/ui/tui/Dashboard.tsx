@@ -11,6 +11,7 @@ export interface AgentState {
   agent_id: string;
   role: string;
   model_name: string;
+  /** Always 'api' for new records; 'cli' survives only when replaying pre-convergence sessions. */
   invocation_mode: 'api' | 'cli';
   status: 'waiting' | 'running' | 'done' | 'failed';
   elapsed_ms?: number;

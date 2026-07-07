@@ -8,6 +8,7 @@ import type { ModelConfig } from './config.js';
 export interface InvocationResult {
   response: string;
   elapsed_ms: number;
+  /** Always 'api' for new records; 'cli' survives only when reading sessions persisted before the standard-API convergence (TDD §invocation_mode, review-2 P1-1). */
   invocation_mode: 'cli' | 'api';
   exit_code?: number;
   http_status?: number;
