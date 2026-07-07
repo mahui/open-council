@@ -1813,22 +1813,40 @@ describe('calculateConsensus', () => {
 });
 
 // test/providers/credentials/discovery.test.ts
+//   标准 API 收敛后 CredentialManager 是三方法薄壳（无 OAuth / keychain / CLI / token 刷新）；
+//   TEST-04：对 tmpdir 走真实文件系统，不整体 mock node:fs（已无可隔离的 OAuth 面）。
 
-describe('CredentialManager', () => {
-  it('读取 ~/.codex/auth.json 并解析 OpenAI token', () => {
-    // 使用 fixtures/credentials/codex-auth.json
-    const manager = new CredentialManager();
-    const cred = manager.parseCredentialFile('openai', fixturePath);
-    expect(cred.access_token).toBeDefined();
-    expect(cred.refresh_token).toBeDefined();
+describe('CredentialManager.getApiKey — 解析顺序', () => {
+  it('api_key_env 优先于 api_key_path 与协议默认 env', () => {
+    process.env['MY_CUSTOM_KEY'] = 'sk-from-env';
+    const cm = new CredentialManager();
+    expect(cm.getApiKey(makeConfig({ api_key_env: 'MY_CUSTOM_KEY' }))).toBe('sk-from-env');
   });
 
-  it('过期 token 自动刷新', async () => {
-    // mock token endpoint
-    const manager = new CredentialManager();
-    // ... mock fetch
-    const cred = await manager.getValidCredential('openai');
-    expect(cred.expires_at).toBeGreaterThan(Date.now());
+  it('回退 api_key_path（0o600 key 文件，内容 trim 去尾随换行）', () => {
+    writeFileSync(keyPath, '  sk-from-file  \n');
+    const cm = new CredentialManager();
+    expect(cm.getApiKey(makeConfig({ api_key_path: keyPath }))).toBe('sk-from-file');
+  });
+
+  it('皆无 → 回退协议默认 env（anthropic→ANTHROPIC_API_KEY）；仍无 → null', () => {
+    const cm = new CredentialManager();
+    expect(cm.getApiKey(makeConfig({ protocol: 'anthropic' }))).toBeNull();
+  });
+});
+
+describe('CredentialManager.discoverAll / resolveOfficialKey', () => {
+  it('discoverAll 汇报 env 官方 key 与磁盘上的 custom-<name>.key', () => {
+    process.env['OPENAI_API_KEY'] = 'sk-oai';
+    writeFileSync(join(dir, 'custom-gw.key'), 'sk-custom', { mode: 0o600 });
+    const report = new CredentialManager().discoverAll();
+    expect(report['openai']).toEqual({ source: 'env', status: 'valid', env_var: 'OPENAI_API_KEY' });
+    expect(report['custom:gw']).toEqual({ source: 'file', status: 'valid', path: join(dir, 'custom-gw.key') });
+  });
+
+  it('resolveOfficialKey 只读 env——绝不读 custom-<name>.key（后者绑定 base_url，非协议官方端点）', () => {
+    writeFileSync(join(dir, 'custom-anthropic.key'), 'sk-ignored', { mode: 0o600 });
+    expect(new CredentialManager().resolveOfficialKey('anthropic')).toBeNull();
   });
 });
 
