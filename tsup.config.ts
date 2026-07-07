@@ -10,8 +10,6 @@ export default defineConfig({
   dts: false,
   banner: undefined,
   external: [
-    '@mariozechner/pi-ai',
-    '@mariozechner/pi-ai/oauth',
     '@inquirer/prompts',
     'better-sqlite3',
     'ink',
