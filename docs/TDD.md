@@ -206,31 +206,37 @@ council/
 │   ├── store.js  transport.js  md.js  styles.css
 │   └── vendor/                      # 本地 vendored：petite-vue / marked / DOMPurify（离线、不外链）
 │
-└── test/
+└── test/                           # 测试镜像 src/ 结构（vitest；无独立 fixtures/ 目录，夹具就地构造/临时目录）
+    ├── commands/                   # CLI 命令层
+    │   ├── models.test.ts  models-name-guard.test.ts
+    │   └── serve.test.ts
+    ├── config/                     # 配置加载 / 迁移 / 预设
+    │   └── loader.test.ts  migrate.test.ts  presets.test.ts
     ├── core/                       # 编排引擎单元测试
-    │   ├── orchestrator.test.ts
-    │   ├── consensus.test.ts
-    │   ├── anonymizer.test.ts
-    │   └── router.test.ts
-    ├── providers/                   # 适配层测试（SDK mock）
-    │   ├── api-adapter.sdk.test.ts
-    │   ├── error-classifier.test.ts
-    │   ├── model-discovery.test.ts
-    │   ├── model-assembly.test.ts
-    │   ├── health.test.ts
-    │   └── credentials/
-    │       └── discovery.test.ts
-    ├── storage/                     # 持久化测试
-    │   ├── database.test.ts
-    │   ├── checkpoint.test.ts
-    │   └── concurrency.test.ts
-    ├── integration/                 # 集成测试（需要真实 CLI/API）
-    │   ├── debate-flow.test.ts
-    │   └── benchmark.test.ts
-    └── fixtures/                    # 测试数据
-        ├── sessions/
-        ├── configs/
-        └── credentials/              # mock 凭证文件
+    │   ├── orchestrator.test.ts  orchestrator-agent-bounds.test.ts  orchestrator-coverage-gaps.test.ts
+    │   ├── consensus.test.ts  anonymizer.test.ts  router.test.ts  compression.test.ts
+    │   ├── prompt-builder.test.ts  score-parser.test.ts  review-aggregator.test.ts  evaluator.test.ts
+    │   ├── role-generator.test.ts  chairman-role-gen.test.ts  role-set-override.test.ts
+    │   └── language.test.ts  self-review-exclusion.test.ts
+    ├── providers/                  # 适配层测试（SDK mock）
+    │   ├── api-adapter.sdk.test.ts  error-classifier.test.ts  health.test.ts
+    │   ├── model-discovery.test.ts  model-assembly.test.ts
+    │   └── credentials/discovery.test.ts
+    ├── server/                     # 本地 Web GUI 服务端测试
+    │   ├── routes.test.ts  config-routes.test.ts  config-routes-rescan.test.ts
+    │   ├── event-log.test.ts  web-renderer.test.ts  security.test.ts
+    │   ├── lifecycle.test.ts  reconnect.test.ts  concurrency.test.ts
+    │   └── runtime-helpers.ts        # 共享测试辅助（非 .test.ts）
+    ├── shared/                     # 跨层纯工具测试
+    │   └── model-catalog.test.ts  resources.test.ts
+    ├── storage/                    # 持久化测试
+    │   └── checkpoint.test.ts  concurrency.test.ts  session-store.test.ts
+    ├── integration/                # 集成 / 端到端
+    │   └── debate-flow.test.ts  wizard-custom-endpoint-e2e.test.ts
+    └── ui/wizard/                  # Setup Wizard 交互测试
+        ├── first-run.test.ts  run-quick-setup.test.ts
+        ├── collect-custom-providers.test.ts  select-discovered-models.test.ts
+        └── verify-model-connectivity.test.ts
 ```
 
 **关键设计决策**：

@@ -12,6 +12,7 @@
 | [web-gui-config.md](./web-gui-config.md) | Web GUI 配置能力：可编辑字段面、配置 REST 契约与脱敏 DTO、凭证入线边界裁定、RuntimeConfig 热重载、纯函数下沉、乐观锁 | 2026-07-05 | 设计定稿 |
 | [standard-api-convergence.md](./standard-api-convergence.md) | 收敛到标准 API 双协议（anthropic/openai）：拆除 CLI/OAuth/订阅通道、弃用 pi-ai 换官方 SDK、新 protocol schema、配置迁移、实施波次 | 2026-07-06 | 已实施（eb7b246） |
 | [model-config-flow.md](./model-config-flow.md) | 模型配置流程改进：发现凭证收敛走 CredentialManager、自定义端点发现契约、推荐/flagship 数据源统一、`rateModelCapability` 归位 shared、gemini 清理裁定 | 2026-07-06 | 设计定稿 |
+| [information-architecture-review-2.md](./information-architecture-review-2.md) | 信息架构审阅第二轮（模型配置批次）：核销上一轮 8 项、依赖图 grep 复核（providers/ui→core 反向边已消除）、invocation_mode 死取值裁定、测试镜像缺口、role-generator trait 归属闭合 | 2026-07-07 | 审阅定稿 |
 
 ## 约定
 
