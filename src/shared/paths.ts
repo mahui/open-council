@@ -21,3 +21,19 @@ export function safePath(parentDir: string, filename: string): string {
   }
   return resolved;
 }
+
+/**
+ * True when `<name>.yaml` resolves inside `modelsDir` (i.e. {@link safePath} would
+ * NOT throw). Lets the model commands and the setup wizard turn a path-traversal
+ * name (`../../evil`) into a friendly error instead of an uncaught safePath stack
+ * trace. safePath stays the security backstop; this is a UX pre-check only. Pure —
+ * the caller supplies `modelsDir`, so it's testable without the real config dir.
+ */
+export function isResolvableModelName(modelsDir: string, name: string): boolean {
+  try {
+    safePath(modelsDir, `${name}.yaml`);
+    return true;
+  } catch {
+    return false;
+  }
+}

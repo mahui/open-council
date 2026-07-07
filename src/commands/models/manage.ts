@@ -1,6 +1,7 @@
 import { PATHS } from '../../config/paths.js';
+import { isResolvableModelName } from '../../shared/paths.js';
 import { requireConfiguredLoader } from './shared.js';
-import { removeModelConfig, setModelEnabled, isResolvableModelName } from './mutations.js';
+import { removeModelConfig, setModelEnabled } from './mutations.js';
 
 const NOT_FOUND = (name: string): string =>
   `Error: no model named '${name}'. Run "council models list" to see registered models.\n`;

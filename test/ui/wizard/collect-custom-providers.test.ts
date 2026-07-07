@@ -167,4 +167,29 @@ describe('resolveEndpointModelIds', () => {
     expect(validate('a,a')).toContain('Duplicate');
     expect(validate('a,b')).toBe(true);
   });
+
+  it('manual validate rejects path-traversal / absolute model ids (aligned with add.ts)', async () => {
+    mockSelect.mockResolvedValueOnce('manual');
+    mockInput.mockResolvedValueOnce('gpt-4o');
+
+    await resolveEndpointModelIds({
+      protocol: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: 'k',
+      sourceLabel: 'openai-manual',
+    });
+
+    const validate = mockInput.mock.calls[0]![0].validate as (v: string) => string | true;
+
+    // deep + shallow `../` and absolute paths are rejected before reaching disk
+    expect(validate('../../evil')).toContain('Invalid model id');
+    expect(validate('../evil')).toContain('Invalid model id'); // shallow: the case add.ts's inside=true would miss on the full name
+    expect(validate('/etc/passwd')).toContain('Invalid model id');
+    expect(validate('foo/../../bar')).toContain('Invalid model id');
+    // a traversal id mixed with a legit one still fails (per-id check, names the bad id)
+    expect(validate('gpt-4o,../../evil')).toContain("Invalid model id '../../evil'");
+    // legit flat ids pass
+    expect(validate('gpt-4o')).toBe(true);
+    expect(validate('llama3.2,mistral')).toBe(true);
+  });
 });

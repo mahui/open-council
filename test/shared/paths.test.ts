@@ -1,14 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { isResolvableModelName } from '../../src/commands/models/mutations.js';
+import { isResolvableModelName } from '../../src/shared/paths.js';
 
 /**
- * Command-layer name pre-check behind `council models remove/enable/disable`
- * (backlog #13). It answers "would safePath accept `<name>.yaml` inside the
- * models dir?" so the manage handlers can emit a friendly one-liner + exit 1 for
- * a traversal name instead of an uncaught safePath stack trace. The loader-level
- * defense itself is pinned in models.test.ts; here we pin the UX pre-check.
+ * `isResolvableModelName` (co-located with its only dependency `safePath`).
+ * Answers "would safePath accept `<name>.yaml` inside the models dir?" so the
+ * model commands / setup wizard can emit a friendly one-liner + exit 1 for a
+ * traversal name instead of an uncaught safePath stack trace. safePath itself
+ * remains the security backstop; here we pin the UX pre-check.
  */
 const modelsDir = join(tmpdir(), 'council-name-guard', 'models');
 

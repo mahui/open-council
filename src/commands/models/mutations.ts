@@ -8,23 +8,6 @@
 
 import type { ConfigLoader } from '../../config/loader.js';
 import type { ModelConfig } from '../../types/config.js';
-import { safePath } from '../../shared/paths.js';
-
-/**
- * True when `<name>.yaml` resolves inside `modelsDir` (i.e. `safePath` would NOT
- * throw). Lets the manage commands turn a path-traversal name (`../../evil`) into
- * a friendly one-line error instead of an uncaught `safePath` stack trace.
- * `safePath` stays the security backstop; this is a UX pre-check only. Pure — the
- * caller supplies `modelsDir`, so it's testable without touching the real config.
- */
-export function isResolvableModelName(modelsDir: string, name: string): boolean {
-  try {
-    safePath(modelsDir, `${name}.yaml`);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 export type AddResult = { status: 'added' } | { status: 'exists' };
 

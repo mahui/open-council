@@ -13,6 +13,7 @@ import {
 import type { ModelConfig, Protocol } from '../../types/config.js';
 import { requireConfiguredLoader } from './shared.js';
 import { addModelConfig } from './mutations.js';
+import { parseModelIds, validateModelIds } from './id-input.js';
 
 /**
  * Incrementally register one or more models without re-running the full setup
@@ -109,12 +110,7 @@ async function collectCustomEndpoint(): Promise<ModelConfig[]> {
 
   const modelIdsRaw = await input({
     message: 'Model identifier(s) — comma-separated (e.g. gpt-4o or llama3.2,mistral):',
-    validate: (v: string) => {
-      const ids = parseModelIds(v);
-      if (ids.length === 0) return 'At least one model id is required.';
-      if (new Set(ids).size !== ids.length) return 'Duplicate model ids in input.';
-      return true;
-    },
+    validate: validateModelIds,
   });
   const modelIds = parseModelIds(modelIdsRaw);
 
@@ -139,9 +135,4 @@ async function collectCustomEndpoint(): Promise<ModelConfig[]> {
       ...(credentialPath ? { credentialPath } : {}),
     }),
   );
-}
-
-/** Parse a comma-separated model id list, trimming and dropping empties. */
-function parseModelIds(raw: string): string[] {
-  return raw.split(',').map(s => s.trim()).filter(s => s.length > 0);
 }

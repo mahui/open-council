@@ -8,6 +8,7 @@ import type { DiscoveredModel } from '../../providers/model-discovery.js';
 import type { ModelConfig, Protocol } from '../../types/config.js';
 import { ApiAdapter } from '../../providers/api-adapter.js';
 import { rateModelCapability, isRecommendedModel } from '../../shared/model-catalog.js';
+import { isResolvableModelName } from '../../shared/paths.js';
 import {
   buildNamedModels,
   selectBestChairman,
@@ -785,6 +786,12 @@ async function promptManualModelIds(): Promise<string[]> {
       const ids = parseModelIds(v);
       if (ids.length === 0) return 'At least one model id is required.';
       if (new Set(ids).size !== ids.length) return 'Duplicate model ids in input.';
+      // Traversal guard on the BARE id (mirrors add.ts): the on-disk name is
+      // `custom:<sanitized>:<id>`, but path.resolve collapses a shallow `../` in
+      // the full name into a mangled in-dir file (inside=true, missed). Only the
+      // id itself is user-controlled, so validate it directly against modelsDir.
+      const bad = ids.find(id => !isResolvableModelName(PATHS.modelsDir, id));
+      if (bad !== undefined) return `Invalid model id '${bad}'.`;
       return true;
     },
   });
