@@ -198,18 +198,46 @@ describe('buildModelChoices', () => {
     expect(shown.filter(c => c.name.includes('[openai]'))).toHaveLength(openaiCount);
   });
 
-  it('boundary: 20 models render in full, 21 (none recommended) collapse behind "show all"', () => {
-    // 20 ≤ threshold → full list, no disclosure row
+  it('boundary: ≤ 20 models render in full, no disclosure row', () => {
     const at = buildModelChoices(openaiModels(20));
     expect(at.hiddenCount).toBe(0);
     expect(modelRows(at.choices)).toHaveLength(20);
     expect(findByValue(at.choices, SHOW_ALL_VALUE)).toBeUndefined();
+  });
 
-    // 21 > threshold with nothing recommended → everything disclosed behind the row
-    const over = buildModelChoices(openaiModels(21));
-    expect(over.hiddenCount).toBe(21);
-    expect(modelRows(over.choices)).toHaveLength(0);
-    expect(findByValue(over.choices, SHOW_ALL_VALUE)).toBeDefined();
+  it('> 20 but nothing recommended: does NOT collapse — full list, plain header, no empty "showing 0 of N"', () => {
+    // Worst case (e.g. an OpenAI-compatible gateway of all-custom ids): collapsing
+    // would leave an empty default view, so the full list is shown instead.
+    const { choices, hiddenCount } = buildModelChoices(openaiModels(21));
+
+    expect(hiddenCount).toBe(0);
+    expect(modelRows(choices)).toHaveLength(21); // every model visible, not hidden
+    expect(findByValue(choices, SHOW_ALL_VALUE)).toBeUndefined();
+
+    const headers = choices.filter(i => !('value' in i)) as { separator: string }[];
+    expect(headers.some(h => h.separator === '── openai ──')).toBe(true); // plain header
+    expect(headers.some(h => h.separator.includes('showing 0 of'))).toBe(false); // never an empty section
+  });
+
+  it('> 20 with one protocol having no recommended ids: suppresses that empty header, global "show all" carries it', () => {
+    // anthropic: 2 recommended flagships; openai: 25 non-recommended fillers.
+    const models = [
+      makeDiscovered({ id: 'claude-opus-4-6', protocol: 'anthropic' }),
+      makeDiscovered({ id: 'claude-sonnet-4-6', protocol: 'anthropic' }),
+      ...Array.from({ length: 25 }, (_, i) => makeDiscovered({ id: `filler-${i}`, protocol: 'openai' })),
+    ];
+    const { choices, hiddenCount } = buildModelChoices(models);
+
+    // Global recommended present → collapse is active; only openai is fully hidden.
+    expect(hiddenCount).toBe(25);
+    expect(modelRows(choices)).toHaveLength(2); // just the 2 anthropic flagships
+    expect(findByValue(choices, SHOW_ALL_VALUE)).toBeDefined();
+
+    const headers = choices.filter(i => !('value' in i)) as { separator: string }[];
+    expect(headers.some(h => h.separator.includes('anthropic'))).toBe(true);
+    // openai section is suppressed entirely — no header, no "showing 0 of 25"
+    expect(headers.some(h => h.separator.includes('openai'))).toBe(false);
+    expect(headers.some(h => h.separator.includes('showing 0 of'))).toBe(false);
   });
 
   it('show-all rebuild preserves the user selection via checkedKeys', () => {

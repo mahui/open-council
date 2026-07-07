@@ -422,7 +422,14 @@ export function buildModelChoices(
   options: BuildModelChoicesOptions = {},
 ): ModelChoicesResult {
   const { showAll = false, checkedKeys } = options;
-  const truncate = !showAll && discovered.length > MODEL_LIST_TRUNCATE_THRESHOLD;
+  // Collapsing only helps when there are recommended flagships to surface. If
+  // nothing is recommended (e.g. an OpenAI-compatible gateway of all-custom
+  // ids), collapsing would hide EVERY model behind the "show all" row — so in
+  // that case show the full list instead of an empty default view.
+  const truncate =
+    !showAll &&
+    discovered.length > MODEL_LIST_TRUNCATE_THRESHOLD &&
+    discovered.some(isRecommended);
 
   const byProtocol = new Map<Protocol, DiscoveredModel[]>();
   for (const m of discovered) {
@@ -450,6 +457,11 @@ export function buildModelChoices(
     const visible = truncate ? sorted.filter(isRecommended) : sorted;
     const hiddenHere = sorted.length - visible.length;
     hiddenCount += hiddenHere;
+
+    // Suppress a protocol section left with no visible rows by truncation (no
+    // recommended ids in it) — the global "show all" row accounts for what it
+    // hid, so we never render an empty "── openai (showing 0 of N) ──" header.
+    if (visible.length === 0) continue;
 
     choices.push(new Separator(
       hiddenHere > 0 ? `── ${protocol} (showing ${visible.length} of ${sorted.length}) ──` : `── ${protocol} ──`,
