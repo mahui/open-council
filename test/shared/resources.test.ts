@@ -13,10 +13,10 @@ import { resolveResourceRoot, resolveDefaultsDir } from '../../src/shared/resour
 
 let root: string;
 
-/** Materialize a package root: package.json (name open-council) + defaults/. */
+/** Materialize a package root: package.json (name @open-council/cli) + defaults/. */
 function makePackageRoot(dir: string): void {
   mkdirSync(join(dir, 'defaults', 'roles'), { recursive: true });
-  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'open-council' }));
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: '@open-council/cli' }));
 }
 
 beforeEach(() => {
@@ -47,8 +47,8 @@ describe('resolveResourceRoot', () => {
     expect(resolveResourceRoot(dist)).toBe(root);
   });
 
-  it('resolves from an npm-install layout (node_modules/open-council/dist)', () => {
-    const pkg = join(root, 'node_modules', 'open-council');
+  it('resolves from an npm-install layout (node_modules/@open-council/cli/dist)', () => {
+    const pkg = join(root, 'node_modules', '@open-council', 'cli');
     makePackageRoot(pkg);
     const dist = join(pkg, 'dist');
     mkdirSync(dist, { recursive: true });

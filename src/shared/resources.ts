@@ -36,7 +36,7 @@ function isPackageRoot(dir: string): boolean {
   if (!existsSync(pkgPath)) return false;
   try {
     const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as { name?: unknown };
-    return pkg.name === 'open-council';
+    return pkg.name === '@open-council/cli';
   } catch {
     return false;
   }
