@@ -1,5 +1,5 @@
 {
-  "name": "open-council",
+  "name": "@open-council/cli",
   "version": "0.1.0",
   "description": "Open Council — Multi-model debate orchestration system",
   "type": "module",

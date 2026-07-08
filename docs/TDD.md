@@ -10,7 +10,7 @@
 | 对应 PRD | docs/PRD.md v8.1 |
 | 主语言 | TypeScript (Node.js ≥ 20) |
 | 包管理 | pnpm |
-| 分发方式 | npm 全局包 (`npm install -g open-council`) |
+| 分发方式 | npm 全局包 (`npm install -g @open-council/cli`) |
 
 **修订记录**
 
@@ -70,10 +70,10 @@
 
 ```bash
 # 主分发渠道：npm 全局安装
-npm install -g open-council
+npm install -g @open-council/cli
 
 # 零安装试用
-npx council "Redis vs Memcached 怎么选?"
+npx @open-council/cli "Redis vs Memcached 怎么选?"
 
 # 开发者本地
 pnpm install && pnpm build

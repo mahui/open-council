@@ -212,7 +212,7 @@ refactor(providers): extract token refresh logic into shared base class
 |---------|------|
 | CI-01 | push 到 `main`/`dev` 及所有 PR 触发 CI（`.github/workflows/ci.yml`）：lint → 测试（Node 20/22 矩阵）→ build → `npm pack` → 干净环境全局安装冒烟（`council --version`）。CI 红灯禁止合并 |
 | CI-02 | 发布走 tag：推送 `vX.Y.Z` tag 触发 release 流水线（`.github/workflows/release.yml`）。tag 版本必须与 package.json `version` 一致，且 `council --version` 输出必须与之一致（`src/cli.ts` 的 `.version()` 为硬编码，改版本号时两处同步），否则流水线失败 |
-| CI-03 | release 产物为 `open-council-X.Y.Z.tgz`，自动附到 GitHub Release（`npm install -g <release 下载地址>` 可直接安装）；仓库配置 `NPM_TOKEN` secret 后自动同步发布到 npm，未配置时静默跳过 |
+| CI-03 | release 产物为 `open-council-cli-X.Y.Z.tgz`，自动附到 GitHub Release（`npm install -g <release 下载地址>` 可直接安装）；仓库配置 `NPM_TOKEN` secret（granular token，勾选 bypass 2FA + open-council 组织权限）后自动同步发布 npm 包 `@open-council/cli`，未配置时静默跳过 |
 
 ---
 
