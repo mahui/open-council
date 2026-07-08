@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.png" alt="Open Council logo" width="160">
+</p>
+
 # Open Council
 
 **本地多模型辩论编排系统** — 让多个 AI 模型围绕同一问题辩论、互评、达成共识，产出比单模型更可靠的答案。
