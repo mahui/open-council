@@ -61,6 +61,12 @@ $ council "Redis vs Memcached，电商场景日均 5000 万 PV 该怎么选？"
 npm install -g open-council
 ```
 
+或者不经 npm registry，直接安装 GitHub Releases 上的打包产物（每个 `vX.Y.Z` tag 由 CI 自动构建发布）：
+
+```bash
+npm install -g https://github.com/mahui/open-council/releases/download/v0.1.0/open-council-0.1.0.tgz
+```
+
 前提条件：
 - Node.js ≥ 20
 - pnpm（开发时需要）

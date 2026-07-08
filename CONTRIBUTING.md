@@ -206,6 +206,14 @@ refactor(providers): extract token refresh logic into shared base class
 - 新功能 PR 必须包含测试
 - 触及接口契约（ARCH-05 中列出的接口）的 PR 必须 `@architect` 审查
 
+### 5.4 CI 与发布
+
+| 规则 ID | 规则 |
+|---------|------|
+| CI-01 | push 到 `main`/`dev` 及所有 PR 触发 CI（`.github/workflows/ci.yml`）：lint → 测试（Node 20/22 矩阵）→ build → `npm pack` → 干净环境全局安装冒烟（`council --version`）。CI 红灯禁止合并 |
+| CI-02 | 发布走 tag：推送 `vX.Y.Z` tag 触发 release 流水线（`.github/workflows/release.yml`）。tag 版本必须与 package.json `version` 一致，且 `council --version` 输出必须与之一致（`src/cli.ts` 的 `.version()` 为硬编码，改版本号时两处同步），否则流水线失败 |
+| CI-03 | release 产物为 `open-council-X.Y.Z.tgz`，自动附到 GitHub Release（`npm install -g <release 下载地址>` 可直接安装）；仓库配置 `NPM_TOKEN` secret 后自动同步发布到 npm，未配置时静默跳过 |
+
 ---
 
 ## 6. 依赖管理
@@ -288,4 +296,5 @@ export const logger = pino({
 - **ASYNC-01 ~ 05**: 异步与错误处理
 - **SEC-01 ~ 07**: 安全规范
 - **TEST-01 ~ 06**: 测试规范
+- **CI-01 ~ 03**: CI 与发布
 - **DEP-01 ~ 05**: 依赖管理

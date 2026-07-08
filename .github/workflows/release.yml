@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+
+      - name: Verify tag matches package.json version
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm build
+      - run: npm pack
+
+      # 全局安装打包产物，并校验 CLI 上报的版本号与 package.json 一致
+      # （src/cli.ts 中 .version() 为硬编码，此处兜底防止漂移）
+      - name: Smoke-test the packed tarball
+        run: |
+          npm install -g ./open-council-*.tgz
+          INSTALLED="$(council --version)"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$INSTALLED" != "$PKG_VERSION" ]; then
+            echo "::error::council --version reports $INSTALLED, expected $PKG_VERSION (update src/cli.ts .version())"
+            exit 1
+          fi
+
+      - name: Create GitHub Release with tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" open-council-*.tgz \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
+
+      - name: Publish to npm (skipped unless NPM_TOKEN secret is set)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "NPM_TOKEN not configured — skipping npm publish."
+            exit 0
+          fi
+          npm publish ./open-council-*.tgz --access public
